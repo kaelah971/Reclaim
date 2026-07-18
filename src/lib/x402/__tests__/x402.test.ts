@@ -27,9 +27,13 @@ import {
   recordPending,
   recordSettled,
   recordFailed,
+  recordSettlementReceipt,
+  recordBrief,
   getStatus,
   getResult,
   getError,
+  getAllEntries,
+  findByTxHash,
   type PaymentIdentifier,
 } from "../paymentStore";
 import type { DisputeBrief } from "../disputeBrief";
@@ -594,7 +598,7 @@ describe("paymentStore", () => {
     const result = getResult(id);
     expect(result).toBeDefined();
     expect(result!.receipt.txHash).toBe(mockReceipt.txHash);
-    expect(result!.brief.briefId).toBe(mockBrief.briefId);
+    expect(result!.brief!.briefId).toBe(mockBrief.briefId);
   });
 
   it("records and retrieves failed status with error", () => {
@@ -624,7 +628,7 @@ describe("paymentStore", () => {
     expect(result1).toBeDefined();
     expect(result2).toBeDefined();
     expect(result1!.receipt.txHash).toBe(result2!.receipt.txHash);
-    expect(result1!.brief.briefId).toBe(result2!.brief.briefId);
+    expect(result1!.brief!.briefId).toBe(result2!.brief!.briefId);
   });
 
   it("failed payment should not return result", () => {
@@ -634,6 +638,106 @@ describe("paymentStore", () => {
 
     expect(getResult(id)).toBeUndefined();
     expect(getError(id)).toBe("RPC error");
+  });
+
+  // --- Post-settlement resilience tests (I3.1 recovery pass) ---
+
+  it("recordSettlementReceipt creates a paid_pending_brief record", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    expect(getStatus(id)).toBe("paid_pending_brief");
+  });
+
+  it("getResult returns receipt but no brief for paid_pending_brief", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    const result = getResult(id);
+    expect(result).toBeDefined();
+    expect(result!.receipt.txHash).toBe(mockReceipt.txHash);
+    expect(result!.brief).toBeUndefined();
+  });
+
+  it("recordBrief upgrades paid_pending_brief to settled with brief", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    recordBrief(id, mockBrief);
+    expect(getStatus(id)).toBe("settled");
+    const result = getResult(id);
+    expect(result!.brief!.briefId).toBe(mockBrief.briefId);
+    expect(result!.receipt.txHash).toBe(mockReceipt.txHash);
+  });
+
+  it("recordBrief is idempotent (no-op if already settled)", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    recordBrief(id, mockBrief);
+    recordBrief(id, mockBrief);
+    expect(getStatus(id)).toBe("settled");
+  });
+
+  it("recordBrief no-ops on non-existent paymentId", () => {
+    expect(() => recordBrief("nonexistent", mockBrief)).not.toThrow();
+  });
+
+  it("paid_pending_brief prevents re-settlement (idempotent retry returns cached)", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    const result = getResult(id);
+    expect(result).toBeDefined();
+    expect(result!.receipt.txHash).toBe(mockReceipt.txHash);
+  });
+
+  it("idempotent retry does not execute settlement again", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    const cachedBeforeSettlement = getResult(id);
+    expect(cachedBeforeSettlement).toBeDefined();
+    expect(cachedBeforeSettlement!.receipt.txHash).toBe(mockReceipt.txHash);
+  });
+
+  it("findByTxHash locates a settlement by transaction hash", () => {
+    const id = createPaymentId();
+    const uniqueReceipt = { ...mockReceipt, txHash: `0x${"a".repeat(62)}f1` };
+    recordSettlementReceipt(id, uniqueReceipt);
+    const found = findByTxHash(uniqueReceipt.txHash);
+    expect(found).toBeDefined();
+    expect(found!.paymentId).toBe(id);
+    expect(found!.record.status).toBe("paid_pending_brief");
+  });
+
+  it("findByTxHash returns undefined for unknown tx hash", () => {
+    const found = findByTxHash("0x" + "f".repeat(64));
+    expect(found).toBeUndefined();
+  });
+
+  it("findByTxHash matches case-insensitively", () => {
+    const id = createPaymentId();
+    const uniqueReceipt = { ...mockReceipt, txHash: `0x${"b".repeat(62)}f2` };
+    recordSettlementReceipt(id, uniqueReceipt);
+    const upper = uniqueReceipt.txHash.toUpperCase();
+    const found = findByTxHash(upper);
+    expect(found).toBeDefined();
+    expect(found!.paymentId).toBe(id);
+  });
+
+  it("getAllEntries returns all non-expired records", () => {
+    const id1 = createPaymentId();
+    const id2 = createPaymentId();
+    recordSettlementReceipt(id1, { ...mockReceipt, txHash: "0x01" + "0".repeat(62) });
+    recordFailed(id2, "Test error");
+    const all = getAllEntries();
+    expect(all.has(id1)).toBe(true);
+    expect(all.has(id2)).toBe(true);
+    expect(all.get(id1)!.status).toBe("paid_pending_brief");
+    expect(all.get(id2)!.status).toBe("failed");
+  });
+
+  it("process restart clears in-memory store (documented limitation)", () => {
+    const id = createPaymentId();
+    recordSettlementReceipt(id, mockReceipt);
+    expect(getResult(id)).toBeDefined();
+    // After a process restart, all records are lost — this is documented.
+    // The store is explicitly in-memory and not durable.
   });
 });
 

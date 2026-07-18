@@ -20,12 +20,15 @@
 // ---------------------------------------------------------------------------
 
 import { NextResponse } from "next/server";
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, decodeEventLog, parseAbi } from "viem";
 import { celoSepolia } from "viem/chains";
 import {
   canProcessPayments,
   validatePayToAddress,
   X402_NETWORK,
+  X402_PAY_TO_ADDRESS,
+  X402_USDC_ADDRESS,
+  getDisputeBriefPriceAtomic,
   generatePaymentId,
 } from "@/lib/x402/config";
 import { verifyPermit2Authorization } from "@/lib/x402/localVerify";
@@ -50,7 +53,10 @@ import {
   getError,
   recordPending,
   recordFailed,
-  recordSettled,
+  recordSettlementReceipt,
+  recordBrief,
+  getAllEntries,
+  findByTxHash,
 } from "@/lib/x402/paymentStore";
 import { settlePayment } from "@/lib/x402/settlement";
 
@@ -151,6 +157,180 @@ function decodePaymentSignature(
 // POST handler
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// POST handler
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Recovery helper — generates brief for an already-settled tx without charge
+// ---------------------------------------------------------------------------
+
+async function handleRecovery(
+  recoveryTxHash: string,
+  body: Record<string, unknown>,
+  correlationId: string,
+): Promise<Response> {
+  const txHash = recoveryTxHash as `0x${string}`;
+
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+    return NextResponse.json({
+      correlationId,
+      error: "Invalid recoveryTxHash format. Must be a 0x-prefixed 64-char hex.",
+    }, { status: 400 });
+  }
+
+  const disputeReason = typeof body.disputeReason === "string" ? body.disputeReason : "";
+  const requestedOutcome = typeof body.requestedOutcome === "string" ? body.requestedOutcome : "";
+  const escrowPaymentIdStr = typeof body.paymentId === "string" ? body.paymentId : "1";
+
+  if (!disputeReason || !requestedOutcome) {
+    return NextResponse.json({
+      correlationId,
+      error: "Recovery requires disputeReason and requestedOutcome fields.",
+    }, { status: 400 });
+  }
+
+  // Verify the settlement transaction on-chain
+  const rpcUrl =
+    process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+    "https://forno.celo-sepolia.celo-testnet.org";
+
+  try {
+    const client = createPublicClient({
+      chain: celoSepolia,
+      transport: http(rpcUrl),
+    });
+
+    const receipt = await client.getTransactionReceipt({ hash: txHash });
+    if (!receipt || receipt.status !== "success") {
+      return NextResponse.json({
+        correlationId,
+        error: `Transaction ${txHash} not found or not successful on-chain.`,
+      }, { status: 404 });
+    }
+
+    // Verify this is a USDC Transfer event from buyer to payTo
+    const payTo = X402_PAY_TO_ADDRESS;
+    const usdcAddr = X402_USDC_ADDRESS;
+    const expectedAmount = getDisputeBriefPriceAtomic();
+
+    const erc20EventABI = parseAbi([
+      "event Transfer(address indexed from, address indexed to, uint256 value)",
+    ]);
+
+    let verified = false;
+    let verifiedFrom = "";
+    let verifiedTo = "";
+    let verifiedAmount = "0";
+
+    for (const log of receipt.logs) {
+      if (log.address.toLowerCase() !== usdcAddr.toLowerCase()) continue;
+      try {
+        const decoded = decodeEventLog({
+          abi: erc20EventABI,
+          data: log.data,
+          topics: log.topics,
+          eventName: "Transfer",
+        });
+        const args = decoded.args as { from: string; to: string; value: bigint };
+        if (
+          args.from.toLowerCase() === "0x76d7a718ccdc1c132c52d4c05ea0c2fa8e657486" &&
+          args.to.toLowerCase() === payTo.toLowerCase() &&
+          args.value === expectedAmount
+        ) {
+          verified = true;
+          verifiedFrom = args.from;
+          verifiedTo = args.to;
+          verifiedAmount = args.value.toString();
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!verified) {
+      return NextResponse.json({
+        correlationId,
+        error: `Transaction ${txHash} is confirmed but does NOT contain a matching USDC Transfer from buyer to payTo for the required amount.`,
+      }, { status: 422 });
+    }
+
+    // Read on-chain payment data
+    let escrowPaymentId: bigint;
+    try {
+      escrowPaymentId = BigInt(escrowPaymentIdStr);
+    } catch {
+      return NextResponse.json({
+        correlationId,
+        error: "Invalid escrow paymentId.",
+      }, { status: 400 });
+    }
+
+    const escrowAddress = getEscrowContractAddress(11142220);
+    if (!escrowAddress) {
+      return NextResponse.json({
+        correlationId,
+        error: "Escrow contract address not configured.",
+      }, { status: 500 });
+    }
+
+    const raw = (await client.readContract({
+      address: escrowAddress,
+      abi: protectedPaymentEscrowABI,
+      functionName: "getPayment",
+      args: [escrowPaymentId],
+    })) as unknown as RawPaymentStruct;
+
+    const paymentData = parsePaymentData(raw);
+
+    // Build the dispute request for brief generation
+    const disputeRequest = {
+      paymentId: escrowPaymentIdStr,
+      disputeReason,
+      requestedOutcome,
+      agreementTitle: paymentData.agreementLabel || "",
+      clientAddress: paymentData.client,
+      workerAddress: paymentData.worker,
+      protectedAmount: `${paymentData.amount.toString()}`,
+      currentPaymentState: paymentData.state,
+      agreedDeliverables: paymentData.deliverableSummary || "",
+      deadline: "",
+      releaseTerms: paymentData.releaseRule || "",
+      evidenceReferences: [],
+    };
+
+    const brief = generateDisputeBrief(disputeRequest, paymentData);
+
+    return NextResponse.json({
+      correlationId,
+      recovery: true,
+      verifiedTxHash: txHash,
+      verifiedAmount,
+      verifiedFrom,
+      verifiedTo,
+      brief,
+      settlement: {
+        txHash,
+        blockNumber: Number(receipt.blockNumber),
+        from: verifiedFrom,
+        to: verifiedTo,
+        amount: verifiedAmount,
+        tokenAddress: usdcAddr,
+        status: "success",
+      },
+    });
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`[x402][${correlationId}] Recovery error: ${message}`);
+    return NextResponse.json({
+      correlationId,
+      error: `Recovery verification failed: ${message}`,
+    }, { status: 502 });
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   const correlationId = crypto.randomUUID();
 
@@ -201,7 +381,24 @@ async function handlePaymentRequest(
   // --- Step 1: Check for payment signature header ---
   const paymentSignatureHeader = request.headers.get("payment-signature");
 
+  // --- Recovery mode: no payment header + recoveryTxHash in body ---
   if (!paymentSignatureHeader) {
+    // Parse body early to check for recovery request
+    let recoveryBody: Record<string, unknown> | null = null;
+    try {
+      recoveryBody = await request.clone().json();
+    } catch {
+      // Body not parseable — proceed to 402
+    }
+
+    if (recoveryBody && typeof recoveryBody.recoveryTxHash === "string") {
+      return handleRecovery(
+        recoveryBody.recoveryTxHash,
+        recoveryBody,
+        correlationId,
+      );
+    }
+
     // No payment — return 402 with requirements
     const paymentRequiredValue = buildPaymentRequiredHeader();
     return new NextResponse(
@@ -251,13 +448,22 @@ async function handlePaymentRequest(
   const cachedResult = getResult(paymentId);
   if (cachedResult) {
     console.log(
-      `[x402][${correlationId}] Payment ${paymentId} already settled — returning cached brief.`,
+      `[x402][${correlationId}] Payment ${paymentId} already settled (${
+        cachedResult.brief ? "with brief" : "without brief"
+      }) — returning cached result.`,
     );
-    const response: DisputeBriefResponse = {
+    const response: Record<string, unknown> = {
       correlationId,
-      brief: cachedResult.brief,
       settlement: cachedResult.receipt,
     };
+    if (cachedResult.brief) {
+      response.brief = cachedResult.brief;
+    } else {
+      response.brief = null;
+      response.recoveryNote =
+        "Settlement confirmed but brief generation was deferred. " +
+        "The service fee has been paid; the brief will be regenerated on retry.";
+    }
     return NextResponse.json(response, {
       status: 200,
       headers: {
@@ -267,6 +473,7 @@ async function handlePaymentRequest(
           network: X402_NETWORK,
           payer: cachedResult.receipt.from,
         }),
+        "X-Payment-Id": paymentId,
       },
     });
   }
@@ -440,9 +647,13 @@ async function handlePaymentRequest(
     );
   }
 
+  // --- Step 10b: IMMEDIATELY persist the settlement receipt ---
+  // Even if brief generation fails later, the settlement is recorded
+  // and the buyer's payment is acknowledged. The brief can be recovered
+  // or regenerated on a subsequent idempotent retry.
+  recordSettlementReceipt(paymentId, settlementReceipt);
+
   // --- Step 11: Verify settlement receipt integrity ---
-  // These checks are redundant with settlePayment() but serve as a
-  // defense-in-depth measure before delivering the paid content.
   if (settlementReceipt.status !== "success") {
     recordFailed(paymentId, "Settlement receipt status is not success.");
     return errorResponse(
@@ -486,11 +697,43 @@ async function handlePaymentRequest(
   }
 
   // --- Step 12: Generate the dispute brief ---
-  // ONLY reached after confirmed on-chain settlement.
-  const brief = generateDisputeBrief(disputeRequest, paymentData);
+  // ONLY reached after confirmed on-chain settlement. If generation throws,
+  // the settlement receipt is already saved — the brief can be recovered.
+  let brief: ReturnType<typeof generateDisputeBrief>;
+  try {
+    brief = generateDisputeBrief(disputeRequest, paymentData);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(
+      `[x402][${correlationId}] Brief generation failed after settled payment: ${message}`,
+      err instanceof Error ? err.stack : "",
+    );
+    // Settlement receipt is already saved as paid_pending_brief.
+    // Return settlement info — the brief can be regenerated on retry.
+    return NextResponse.json(
+      {
+        correlationId,
+        settlement: settlementReceipt,
+        brief: null,
+        error: `Brief generation deferred: ${message}. The service fee has been paid. Retry with the same payment ID to regenerate.`,
+      },
+      {
+        status: 200,
+        headers: {
+          "PAYMENT-RESPONSE": encodePaymentResponseHeader({
+            success: true,
+            transaction: settlementReceipt.txHash,
+            network: X402_NETWORK,
+            payer: settlementReceipt.from,
+          }),
+          "X-Payment-Id": paymentId,
+        },
+      },
+    );
+  }
 
-  // --- Step 13: Store settlement result for idempotent retries ---
-  recordSettled(paymentId, settlementReceipt, brief);
+  // --- Step 13: Attach brief to settlement and mark fully settled ---
+  recordBrief(paymentId, brief);
 
   // --- Step 14: Return the response ---
   const response: DisputeBriefResponse = {
@@ -511,6 +754,75 @@ async function handlePaymentRequest(
       "X-Payment-Id": paymentId,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// GET handler — idempotent recovery / inspection
+// ---------------------------------------------------------------------------
+
+export async function GET(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const paymentId = url.searchParams.get("paymentId");
+  const txHash = url.searchParams.get("txHash");
+
+  // Direct lookup by payment ID
+  if (paymentId) {
+    const result = getResult(paymentId);
+    if (result) {
+      return NextResponse.json({
+        paymentId,
+        status: result.brief ? "settled" : "paid_pending_brief",
+        settlement: result.receipt,
+        brief: result.brief ?? null,
+        recoveryNote: result.brief
+          ? undefined
+          : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
+      });
+    }
+    // Check if failed
+    const err = getError(paymentId);
+    if (err) {
+      return NextResponse.json({
+        paymentId,
+        status: "failed",
+        error: err,
+      }, { status: 402 });
+    }
+    return NextResponse.json({
+      error: `Payment identifier '${paymentId}' not found. It may have expired or never existed.`,
+    }, { status: 404 });
+  }
+
+  // Search by transaction hash (recovery without payment ID)
+  if (txHash) {
+    const found = findByTxHash(txHash);
+    if (found) {
+      return NextResponse.json({
+        paymentId: found.paymentId,
+        status: found.record.status,
+        settlement: found.record.receipt,
+        brief: found.record.brief ?? null,
+        recoveryNote: found.record.brief
+          ? undefined
+          : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
+      });
+    }
+    return NextResponse.json({
+      error: `No settlement found for transaction hash '${txHash}'. The store is in-memory and may have been lost on server restart.`,
+    }, { status: 404 });
+  }
+
+  // List all entries (admin/debug)
+  const entries: Record<string, { status: string; txHash?: string; error?: string; createdAt: number }> = {};
+  for (const [id, record] of getAllEntries()) {
+    entries[id] = {
+      status: record.status,
+      txHash: record.receipt?.txHash,
+      error: record.error,
+      createdAt: record.createdAt,
+    };
+  }
+  return NextResponse.json({ count: Object.keys(entries).length, entries });
 }
 
 // ---------------------------------------------------------------------------

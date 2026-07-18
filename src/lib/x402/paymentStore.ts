@@ -19,7 +19,7 @@ import type { DisputeBrief } from "./disputeBrief";
 
 export type PaymentIdentifier = string;
 
-export type PaymentStatus = "pending" | "settled" | "failed";
+export type PaymentStatus = "pending" | "settled" | "failed" | "paid_pending_brief";
 
 export interface PaymentRecord {
   status: PaymentStatus;
@@ -103,16 +103,80 @@ export function getStatus(
 }
 
 /**
- * Get the full result (receipt + brief) for a settled payment.
- * Returns undefined if the payment is not settled or doesn't exist.
+ * Get the full result (receipt + brief) for a settled or paid-pending payment.
+ * Returns undefined if the payment has not been settled.
  */
 export function getResult(
   paymentId: PaymentIdentifier,
-): { receipt: SettlementReceipt; brief: DisputeBrief } | undefined {
+): { receipt: SettlementReceipt; brief?: DisputeBrief } | undefined {
   pruneExpired();
   const record = store.get(paymentId);
-  if (record?.status === "settled" && record.receipt && record.brief) {
+  if (
+    (record?.status === "settled" || record?.status === "paid_pending_brief") &&
+    record.receipt
+  ) {
     return { receipt: record.receipt, brief: record.brief };
+  }
+  return undefined;
+}
+
+/**
+ * Record ONLY the settlement receipt — without the brief.
+ * Used when settlement succeeds but brief generation must be deferred.
+ * The record can be upgraded later with recordBrief().
+ */
+export function recordSettlementReceipt(
+  paymentId: PaymentIdentifier,
+  receipt: SettlementReceipt,
+): void {
+  store.set(paymentId, {
+    status: "paid_pending_brief",
+    receipt,
+    createdAt: Date.now(),
+  });
+}
+
+/**
+ * Attach a brief to an existing settlement receipt.
+ * Upgrades the status from paid_pending_brief → settled.
+ * No-ops if the payment is not in a recoverable state.
+ */
+export function recordBrief(
+  paymentId: PaymentIdentifier,
+  brief: DisputeBrief,
+): void {
+  const record = store.get(paymentId);
+  if (!record || !record.receipt) return;
+  if (record.status !== "paid_pending_brief" && record.status !== "settled") return;
+  store.set(paymentId, {
+    ...record,
+    status: "settled",
+    brief,
+    createdAt: Date.now(),
+  });
+}
+
+/**
+ * Return all non-expired entries for inspection / recovery.
+ * Exposed for admin/debug use — not for regular request paths.
+ */
+export function getAllEntries(): ReadonlyMap<PaymentIdentifier, PaymentRecord> {
+  pruneExpired();
+  return store;
+}
+
+/**
+ * Search all entries for a settlement matching a transaction hash.
+ * Returns the payment identifier and record, or undefined.
+ */
+export function findByTxHash(
+  txHash: string,
+): { paymentId: PaymentIdentifier; record: PaymentRecord } | undefined {
+  pruneExpired();
+  for (const [paymentId, record] of store) {
+    if (record.receipt?.txHash?.toLowerCase() === txHash.toLowerCase()) {
+      return { paymentId, record };
+    }
   }
   return undefined;
 }
