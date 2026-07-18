@@ -33,6 +33,10 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# foundry build artifacts (broadcast/ is kept — it records real deployments)
+/contracts/cache/
+/contracts/out/
+
 # vercel
 .vercel
 

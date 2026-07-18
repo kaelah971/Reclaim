@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Upstream library test files (not project code):
+    "contracts/lib/**",
+    "contracts/out/**",
   ]),
 ]);
 

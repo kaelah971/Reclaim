@@ -1,26 +1,67 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --color-primary: #231C15;
+  --color-page: #F5EFE4;
+  --color-hero: #F2EBDD;
+  --color-surface: #FFFFFF;
+  --color-utility: #3A2E22;
+  --color-ink: #1E1A15;
+  --color-muted: #8A7F6E;
+  --color-gold: #B4884A;
+  --color-gold-on-dark: #C9A050;
+  --color-success: #4C8A5E;
+  --color-border: #E4D9C6;
+  --color-input: #F7EFE2;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-status-protected-bg: #EAF3EC;
+  --color-status-protected-text: #235235;
+  --color-status-disputed-bg: #FDF3E7;
+  --color-status-disputed-text: #7A5A30;
+  --color-status-pending-bg: #F7EFE2;
+  --color-status-pending-text: #5C4F3B;
+  --color-status-settled-bg: #EAF3EC;
+  --color-status-settled-text: #235235;
+
+  --font-display: var(--font-newsreader), Georgia, serif;
+  --font-ui: var(--font-georama), sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, monospace;
+
+  --radius-button: 6px;
+  --radius-input: 10px;
+  --radius-card: 16px;
+  --radius-pill: 9999px;
+
+  --spacing-foundation-xs: 4px;
+  --spacing-foundation-sm: 8px;
+  --spacing-foundation-md: 16px;
+  --spacing-foundation-lg: 24px;
+  --spacing-foundation-xl: 32px;
+  --spacing-foundation-2xl: 48px;
+
+  --shadow-card: 0 8px 24px rgba(35, 28, 21, 0.14);
+  --shadow-modal: 0 16px 40px rgba(35, 28, 21, 0.18);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: var(--color-page);
+    color: var(--color-ink);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

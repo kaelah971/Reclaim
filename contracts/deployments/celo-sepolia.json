@@ -1,0 +1,51 @@
+{
+  "contractName": "ProtectedPaymentEscrow",
+  "network": "celo-sepolia",
+  "chainId": 11142220,
+  "address": "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
+  "deploymentTransaction": "0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312",
+  "blockNumber": 31013036,
+  "blockHash": "0x3b366b982c57adb974d3b8f631de89fd876b5ab690532f27a57b4807b5c94097",
+  "deployer": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+  "owner": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+  "pauseAuthority": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+  "constructorArgs": {
+    "_stablecoin": "0x01C5C0122039549AD1493B8220cABEdD739BC44E"
+  },
+  "escrowToken": {
+    "address": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
+    "symbol": "USDC",
+    "decimals": 6
+  },
+  "rpcUrl": "https://forno.celo-sepolia.celo-testnet.org",
+  "explorer": {
+    "base": "https://celo-sepolia.blockscout.com",
+    "contract": "https://celo-sepolia.blockscout.com/address/0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
+    "deploymentTx": "https://celo-sepolia.blockscout.com/tx/0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312"
+  },
+  "compiler": {
+    "solc": "0.8.28",
+    "evmVersion": "cancun",
+    "optimizer": true,
+    "optimizerRuns": 200,
+    "viaIR": true
+  },
+  "abiExport": {
+    "artifact": "contracts/out/ProtectedPaymentEscrow.sol/ProtectedPaymentEscrow.json",
+    "frontendModule": "src/lib/contracts/ProtectedPaymentEscrow.abi.ts",
+    "regenerate": "forge build (in contracts/) then `npm run abi:export`"
+  },
+  "verification": {
+    "onChainChecks": {
+      "bytecodePresent": true,
+      "escrowTokenReadback": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
+      "ownerReadback": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "pausedReadback": false,
+      "creationInputMatchesCurrentArtifact": true
+    },
+    "blockscoutSourceVerification": "completed"
+  },
+  "source": "contracts/broadcast/DeployProtectedPaymentEscrow.s.sol/11142220/run-latest.json",
+  "deployedAtTimestamp": 1784297024,
+  "deployedAtUtc": "2026-07-17T14:03:44Z"
+}
