@@ -306,8 +306,65 @@ export async function settlePayment(
   };
 }
 
+export interface TransferEventMatch {
+  from: `0x${string}`;
+  to: `0x${string}`;
+  value: bigint;
+  log: Log;
+}
+
 // ---------------------------------------------------------------------------
-// Helper: find the correct USDC Transfer event in the receipt logs
+// Helper: find all USDC Transfer events matching the given criteria
+// ---------------------------------------------------------------------------
+
+export function findTransferEvents(
+  logs: Log[],
+  tokenAddress: `0x${string}`,
+  expectedFrom: `0x${string}`,
+  expectedTo: `0x${string}`,
+  expectedAmount: bigint,
+): TransferEventMatch[] {
+  const expectedFromPadded = padAddressToTopic(expectedFrom);
+  const expectedToPadded = padAddressToTopic(expectedTo);
+  const matches: TransferEventMatch[] = [];
+
+  for (const log of logs) {
+    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
+    if (!log.topics[0] || log.topics[0].toLowerCase() !== TRANSFER_EVENT_TOPIC.toLowerCase()) continue;
+
+    const fromTopic = log.topics[1]?.toLowerCase();
+    const toTopic = log.topics[2]?.toLowerCase();
+
+    if (fromTopic !== expectedFromPadded.toLowerCase()) continue;
+    if (toTopic !== expectedToPadded.toLowerCase()) continue;
+
+    try {
+      const decoded = decodeEventLog({
+        abi: erc20EventABI,
+        data: log.data,
+        topics: log.topics,
+        eventName: "Transfer",
+      });
+
+      const value = (decoded.args as { value: bigint }).value;
+      if (value === expectedAmount) {
+        matches.push({
+          from: expectedFrom,
+          to: expectedTo,
+          value,
+          log,
+        });
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return matches;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find the first matching USDC Transfer event in the receipt logs
 // ---------------------------------------------------------------------------
 
 function findTransferEvent(
@@ -317,42 +374,8 @@ function findTransferEvent(
   expectedTo: `0x${string}`,
   expectedAmount: bigint,
 ): Log | null {
-  const expectedFromPadded = padAddressToTopic(expectedFrom);
-  const expectedToPadded = padAddressToTopic(expectedTo);
-
-  for (const log of logs) {
-    // Must be from the USDC token contract
-    if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
-
-    // Must be a Transfer event (topic[0] matches)
-    if (!log.topics[0] || log.topics[0].toLowerCase() !== TRANSFER_EVENT_TOPIC.toLowerCase()) continue;
-
-    // Check indexed parameters
-    const fromTopic = log.topics[1]?.toLowerCase();
-    const toTopic = log.topics[2]?.toLowerCase();
-
-    if (fromTopic !== expectedFromPadded.toLowerCase()) continue;
-    if (toTopic !== expectedToPadded.toLowerCase()) continue;
-
-    // Decode the value (non-indexed, in data field)
-    try {
-      const decoded = decodeEventLog({
-        abi: erc20EventABI,
-        data: log.data,
-        topics: log.topics,
-        eventName: "Transfer",
-      });
-
-      if ((decoded.args as { value: bigint }).value === expectedAmount) {
-        return log;
-      }
-    } catch {
-      // Couldn't decode this log — skip
-      continue;
-    }
-  }
-
-  return null;
+  const matches = findTransferEvents(logs, tokenAddress, expectedFrom, expectedTo, expectedAmount);
+  return matches.length > 0 ? matches[0].log : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import { NextResponse } from "next/server";
-import { createPublicClient, http, decodeEventLog, parseAbi } from "viem";
+import { createPublicClient, http } from "viem";
 import { celoSepolia } from "viem/chains";
 import {
   canProcessPayments,
@@ -57,8 +57,18 @@ import {
   recordBrief,
   getAllEntries,
   findByTxHash,
+  isTxHashConsumed,
+  consumeTxHash,
+  findConsumedTx,
+  setRequestHash,
+  getRequestHash,
 } from "@/lib/x402/paymentStore";
 import { settlePayment } from "@/lib/x402/settlement";
+import { findTransferEvents } from "@/lib/x402/settlement";
+import { computeRequestHash, SERVICE_IDENTIFIER } from "@/lib/x402/requestHash";
+import {
+  verifyWalletSignature,
+} from "@/lib/x402/walletAuth";
 
 // ---------------------------------------------------------------------------
 // Helper: build error response with correlation ID
@@ -165,6 +175,14 @@ function decodePaymentSignature(
 // Recovery helper — generates brief for an already-settled tx without charge
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Known settlement addresses for recovery binding
+// ---------------------------------------------------------------------------
+
+const KNOWN_SETTLEMENT_BUYER = "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486";
+const KNOWN_SETTLEMENT_PAY_TO = "0x85522bdE267d05bf8CE8813F97c75417b7894A33";
+const PERMIT2_UNIVERSAL = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+
 async function handleRecovery(
   recoveryTxHash: string,
   body: Record<string, unknown>,
@@ -172,6 +190,7 @@ async function handleRecovery(
 ): Promise<Response> {
   const txHash = recoveryTxHash as `0x${string}`;
 
+  // --- Step R1: Validate txHash format ---
   if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
     return NextResponse.json({
       correlationId,
@@ -179,21 +198,44 @@ async function handleRecovery(
     }, { status: 400 });
   }
 
+  // --- Step R2: Validate required fields ---
   const disputeReason = typeof body.disputeReason === "string" ? body.disputeReason : "";
   const requestedOutcome = typeof body.requestedOutcome === "string" ? body.requestedOutcome : "";
-  const escrowPaymentIdStr = typeof body.paymentId === "string" ? body.paymentId : "1";
+  const escrowPaymentIdStr = typeof body.paymentId === "string" ? body.paymentId : "";
 
-  if (!disputeReason || !requestedOutcome) {
+  if (!disputeReason || !requestedOutcome || !escrowPaymentIdStr) {
     return NextResponse.json({
       correlationId,
-      error: "Recovery requires disputeReason and requestedOutcome fields.",
+      error: "Recovery requires disputeReason, requestedOutcome, and paymentId fields.",
     }, { status: 400 });
   }
 
-  // Verify the settlement transaction on-chain
+  // --- Step R3: Wallet authentication ---
+  const walletAddress = typeof body.walletAddress === "string" ? body.walletAddress : "";
+  const signedMessage = typeof body.signedMessage === "string" ? body.signedMessage : "";
+  const walletSignature = typeof body.walletSignature === "string" ? body.walletSignature : "";
+
+  if (!walletAddress || !signedMessage || !walletSignature) {
+    return NextResponse.json({
+      correlationId,
+      error: "Recovery requires walletAddress, signedMessage, and walletSignature for payer authentication.",
+    }, { status: 401 });
+  }
+
+  const authResult = await verifyWalletSignature(walletAddress, signedMessage, walletSignature);
+  if (!authResult.verified) {
+    return NextResponse.json({
+      correlationId,
+      error: `Wallet authentication failed: ${authResult.error}`,
+    }, { status: 401 });
+  }
+
+  // --- Step R4: Verify txHash on-chain (strict) ---
   const rpcUrl =
     process.env.NEXT_PUBLIC_CELO_RPC_URL ||
     "https://forno.celo-sepolia.celo-testnet.org";
+
+  let receipt: Awaited<ReturnType<ReturnType<typeof createPublicClient>["getTransactionReceipt"]>>;
 
   try {
     const client = createPublicClient({
@@ -201,72 +243,129 @@ async function handleRecovery(
       transport: http(rpcUrl),
     });
 
-    const receipt = await client.getTransactionReceipt({ hash: txHash });
-    if (!receipt || receipt.status !== "success") {
-      return NextResponse.json({
-        correlationId,
-        error: `Transaction ${txHash} not found or not successful on-chain.`,
-      }, { status: 404 });
+    receipt = await client.getTransactionReceipt({ hash: txHash });
+
+    const txDetail = await client.getTransaction({ hash: txHash });
+    if (txDetail) {
+      const isPermit2 = txDetail.to?.toLowerCase() === PERMIT2_UNIVERSAL.toLowerCase();
+      console.log(
+        `[x402][${correlationId}] Recovery tx chainId=${txDetail.chainId ?? "?"}, ` +
+        `to=${txDetail.to ?? "?"}, isPermit2=${isPermit2}`,
+      );
     }
 
-    // Verify this is a USDC Transfer event from buyer to payTo
-    const payTo = X402_PAY_TO_ADDRESS;
-    const usdcAddr = X402_USDC_ADDRESS;
-    const expectedAmount = getDisputeBriefPriceAtomic();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error(`[x402][${correlationId}] Recovery RPC error: ${message}`);
+    return NextResponse.json({
+      correlationId,
+      error: `Failed to verify transaction on-chain: ${message}`,
+    }, { status: 502 });
+  }
 
-    const erc20EventABI = parseAbi([
-      "event Transfer(address indexed from, address indexed to, uint256 value)",
-    ]);
+  if (!receipt || receipt.status !== "success") {
+    return NextResponse.json({
+      correlationId,
+      error: `Transaction ${txHash} not found or not successful on-chain.`,
+    }, { status: 404 });
+  }
 
-    let verified = false;
-    let verifiedFrom = "";
-    let verifiedTo = "";
-    let verifiedAmount = "0";
+  // --- Step R5: Verify exact USDC Transfer event ---
+  const payTo = X402_PAY_TO_ADDRESS || KNOWN_SETTLEMENT_PAY_TO;
+  const usdcAddr = X402_USDC_ADDRESS;
+  const expectedAmount = getDisputeBriefPriceAtomic();
 
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== usdcAddr.toLowerCase()) continue;
-      try {
-        const decoded = decodeEventLog({
-          abi: erc20EventABI,
-          data: log.data,
-          topics: log.topics,
-          eventName: "Transfer",
-        });
-        const args = decoded.args as { from: string; to: string; value: bigint };
-        if (
-          args.from.toLowerCase() === "0x76d7a718ccdc1c132c52d4c05ea0c2fa8e657486" &&
-          args.to.toLowerCase() === payTo.toLowerCase() &&
-          args.value === expectedAmount
-        ) {
-          verified = true;
-          verifiedFrom = args.from;
-          verifiedTo = args.to;
-          verifiedAmount = args.value.toString();
-          break;
-        }
-      } catch {
-        continue;
+  const matchingTransfers = findTransferEvents(
+    receipt.logs,
+    usdcAddr as `0x${string}`,
+    walletAddress as `0x${string}`,
+    payTo as `0x${string}`,
+    expectedAmount,
+  );
+
+  if (matchingTransfers.length === 0) {
+    return NextResponse.json({
+      correlationId,
+      error: `Transaction ${txHash} does NOT contain a USDC Transfer from ${walletAddress} to ${payTo} for ${expectedAmount} atomic units.`,
+    }, { status: 422 });
+  }
+
+  if (matchingTransfers.length > 1) {
+    return NextResponse.json({
+      correlationId,
+      error: `Transaction ${txHash} contains ${matchingTransfers.length} matching USDC Transfer events. Expected exactly one.`,
+    }, { status: 422 });
+  }
+
+  const transfer = matchingTransfers[0];
+  const verifiedFrom = transfer.from;
+  const verifiedTo = transfer.to;
+  const verifiedAmount = transfer.value.toString();
+
+  // --- Step R6: Replay protection ---
+  if (isTxHashConsumed(txHash)) {
+    const consumed = findConsumedTx(txHash);
+    return NextResponse.json({
+      correlationId,
+      error: `Transaction ${txHash} has already been consumed for recovery (payment ${consumed?.paymentId}, at ${consumed?.consumedAt}). This transaction cannot be reused.`,
+    }, { status: 409 });
+  }
+
+  // --- Step R7: Determine paid_pending_brief or legacy ---
+  const existingRecord = findByTxHash(txHash);
+
+  let escrowPaymentId: bigint;
+  try {
+    escrowPaymentId = BigInt(escrowPaymentIdStr);
+  } catch {
+    return NextResponse.json({
+      correlationId,
+      error: "Invalid escrow paymentId.",
+    }, { status: 400 });
+  }
+
+  if (existingRecord && existingRecord.record.status === "paid_pending_brief") {
+    // =================================================================
+    // PAID_PENDING_BRIEF RECOVERY — strict request-hash binding
+    // =================================================================
+
+    const existingPaymentId = existingRecord.paymentId;
+
+    if (existingPaymentId !== escrowPaymentIdStr) {
+      return NextResponse.json({
+        correlationId,
+        error: `Payment ID mismatch: transaction ${txHash} is bound to payment '${existingPaymentId}', not '${escrowPaymentIdStr}'.`,
+      }, { status: 409 });
+    }
+
+    const storedHash = getRequestHash(escrowPaymentIdStr);
+    if (storedHash) {
+      const computedHash = computeRequestHash({
+        paymentId: escrowPaymentIdStr,
+        disputeReason,
+        requestedOutcome,
+        buyerAddress: verifiedFrom,
+        network: X402_NETWORK,
+        serviceIdentifier: SERVICE_IDENTIFIER,
+        price: expectedAmount.toString(),
+        payToAddress: verifiedTo,
+      });
+
+      if (computedHash !== storedHash) {
+        return NextResponse.json({
+          correlationId,
+          error: "Request hash mismatch. The submitted dispute details differ from the original settlement request. The brief cannot be regenerated with different details.",
+        }, { status: 409 });
       }
     }
 
-    if (!verified) {
-      return NextResponse.json({
-        correlationId,
-        error: `Transaction ${txHash} is confirmed but does NOT contain a matching USDC Transfer from buyer to payTo for the required amount.`,
-      }, { status: 422 });
-    }
+    // Consume txHash so it cannot be reused
+    consumeTxHash(txHash, escrowPaymentIdStr, {
+      recoveredPayer: verifiedFrom,
+      recoveredRequestHash: storedHash,
+    });
 
     // Read on-chain payment data
-    let escrowPaymentId: bigint;
-    try {
-      escrowPaymentId = BigInt(escrowPaymentIdStr);
-    } catch {
-      return NextResponse.json({
-        correlationId,
-        error: "Invalid escrow paymentId.",
-      }, { status: 400 });
-    }
-
     const escrowAddress = getEscrowContractAddress(11142220);
     if (!escrowAddress) {
       return NextResponse.json({
@@ -275,16 +374,27 @@ async function handleRecovery(
       }, { status: 500 });
     }
 
-    const raw = (await client.readContract({
-      address: escrowAddress,
-      abi: protectedPaymentEscrowABI,
-      functionName: "getPayment",
-      args: [escrowPaymentId],
-    })) as unknown as RawPaymentStruct;
+    let raw: RawPaymentStruct;
+    try {
+      const client = createPublicClient({
+        chain: celoSepolia,
+        transport: http(rpcUrl),
+      });
+      raw = (await client.readContract({
+        address: escrowAddress,
+        abi: protectedPaymentEscrowABI,
+        functionName: "getPayment",
+        args: [escrowPaymentId],
+      })) as unknown as RawPaymentStruct;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown RPC error";
+      return NextResponse.json({
+        correlationId,
+        error: `Failed to read payment data: ${message}`,
+      }, { status: 502 });
+    }
 
     const paymentData = parsePaymentData(raw);
-
-    // Build the dispute request for brief generation
     const disputeRequest = {
       paymentId: escrowPaymentIdStr,
       disputeReason,
@@ -301,10 +411,12 @@ async function handleRecovery(
     };
 
     const brief = generateDisputeBrief(disputeRequest, paymentData);
+    recordBrief(escrowPaymentIdStr, brief);
 
     return NextResponse.json({
       correlationId,
       recovery: true,
+      mode: "paid_pending_brief",
       verifiedTxHash: txHash,
       verifiedAmount,
       verifiedFrom,
@@ -320,15 +432,99 @@ async function handleRecovery(
         status: "success",
       },
     });
+  }
 
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error(`[x402][${correlationId}] Recovery error: ${message}`);
+  // ===================================================================
+  // LEGACY RECOVERY — one-time only, Payment #1, consumed forever
+  // ===================================================================
+
+  if (escrowPaymentIdStr !== "1") {
     return NextResponse.json({
       correlationId,
-      error: `Recovery verification failed: ${message}`,
+      error: "Historical recovery is only available for Payment #1. The original request hash was lost for this transaction.",
+    }, { status: 422 });
+  }
+
+  if (verifiedFrom.toLowerCase() !== KNOWN_SETTLEMENT_BUYER.toLowerCase()) {
+    return NextResponse.json({
+      correlationId,
+      error: `Historical recovery: transaction payer ${verifiedFrom} does not match the expected buyer ${KNOWN_SETTLEMENT_BUYER}.`,
+    }, { status: 403 });
+  }
+
+  // Mark txHash as consumed — legacy, one-time only
+  consumeTxHash(txHash, "1", {
+    legacyRecovery: true,
+    recoveredPayer: verifiedFrom,
+  });
+
+  // Read on-chain payment data
+  const escrowAddress = getEscrowContractAddress(11142220);
+  if (!escrowAddress) {
+    return NextResponse.json({
+      correlationId,
+      error: "Escrow contract address not configured.",
+    }, { status: 500 });
+  }
+
+  let raw: RawPaymentStruct;
+  try {
+    const client = createPublicClient({
+      chain: celoSepolia,
+      transport: http(rpcUrl),
+    });
+    raw = (await client.readContract({
+      address: escrowAddress,
+      abi: protectedPaymentEscrowABI,
+      functionName: "getPayment",
+      args: [escrowPaymentId],
+    })) as unknown as RawPaymentStruct;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown RPC error";
+    return NextResponse.json({
+      correlationId,
+      error: `Failed to read payment data: ${message}`,
     }, { status: 502 });
   }
+
+  const paymentData = parsePaymentData(raw);
+
+  const disputeRequest = {
+    paymentId: "1",
+    disputeReason,
+    requestedOutcome,
+    agreementTitle: paymentData.agreementLabel || "",
+    clientAddress: paymentData.client,
+    workerAddress: paymentData.worker,
+    protectedAmount: `${paymentData.amount.toString()}`,
+    currentPaymentState: paymentData.state,
+    agreedDeliverables: paymentData.deliverableSummary || "",
+    deadline: "",
+    releaseTerms: paymentData.releaseRule || "",
+    evidenceReferences: [],
+  };
+
+  const brief = generateDisputeBrief(disputeRequest, paymentData);
+
+  return NextResponse.json({
+    correlationId,
+    recovery: true,
+    mode: "legacy",
+    verifiedTxHash: txHash,
+    verifiedAmount,
+    verifiedFrom,
+    verifiedTo,
+    brief,
+    settlement: {
+      txHash,
+      blockNumber: Number(receipt.blockNumber),
+      from: verifiedFrom,
+      to: verifiedTo,
+      amount: verifiedAmount,
+      tokenAddress: usdcAddr,
+      status: "success",
+    },
+  });
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -560,6 +756,21 @@ async function handlePaymentRequest(
 
   const disputeRequest = parseResult.data;
 
+  // --- Step 6b: Compute and persist the canonical request hash ---
+  // This binds the dispute details to the buyer before settlement, so
+  // recovery can verify that the same details are used as originally paid.
+  const computedRequestHash = computeRequestHash({
+    paymentId: disputeRequest.paymentId,
+    disputeReason: disputeRequest.disputeReason,
+    requestedOutcome: disputeRequest.requestedOutcome,
+    buyerAddress: paymentPayload.payment.from,
+    network: X402_NETWORK,
+    serviceIdentifier: SERVICE_IDENTIFIER,
+    price: paymentPayload.payment.amount,
+    payToAddress: X402_PAY_TO_ADDRESS,
+  });
+  setRequestHash(paymentId, computedRequestHash);
+
   // --- Step 7: Convert paymentId to bigint ---
   let escrowPaymentId: bigint;
   try {
@@ -760,12 +971,35 @@ async function handlePaymentRequest(
 // GET handler — idempotent recovery / inspection
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// GET handler — idempotent recovery / inspection
+//
+// txHash query (no wallet auth) → public settlement status only (NO brief)
+// txHash query + valid wallet auth → full brief (authenticated payer)
+// paymentId query → full result (paymentId is a secret UUID)
+// ---------------------------------------------------------------------------
+
+async function authenticateWalletFromHeaders(
+  request: Request,
+  requiredPayer: string,
+): Promise<boolean> {
+  const walletAddress = request.headers.get("x-wallet-address") || "";
+  const signedMessage = request.headers.get("x-wallet-message") || "";
+  const walletSignature = request.headers.get("x-wallet-signature") || "";
+
+  if (!walletAddress || !signedMessage || !walletSignature) return false;
+  if (walletAddress.toLowerCase() !== requiredPayer.toLowerCase()) return false;
+
+  const authResult = await verifyWalletSignature(walletAddress, signedMessage, walletSignature);
+  return authResult.verified;
+}
+
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const paymentId = url.searchParams.get("paymentId");
   const txHash = url.searchParams.get("txHash");
 
-  // Direct lookup by payment ID
+  // Direct lookup by payment ID (UUID — not public, implicitly authenticated)
   if (paymentId) {
     const result = getResult(paymentId);
     if (result) {
@@ -779,7 +1013,6 @@ export async function GET(request: Request): Promise<Response> {
           : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
       });
     }
-    // Check if failed
     const err = getError(paymentId);
     if (err) {
       return NextResponse.json({
@@ -793,22 +1026,58 @@ export async function GET(request: Request): Promise<Response> {
     }, { status: 404 });
   }
 
-  // Search by transaction hash (recovery without payment ID)
+  // Search by transaction hash — security-restricted
   if (txHash) {
     const found = findByTxHash(txHash);
+    const consumed = findConsumedTx(txHash);
+
     if (found) {
+      const payer = found.record.receipt?.from;
+      const isAuthenticated = payer
+        ? await authenticateWalletFromHeaders(request, payer)
+        : false;
+
+      if (isAuthenticated) {
+        return NextResponse.json({
+          paymentId: found.paymentId,
+          status: found.record.status,
+          settlement: found.record.receipt,
+          brief: found.record.brief ?? null,
+          recoveryNote: found.record.brief
+            ? undefined
+            : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
+        });
+      }
+
+      // Unauthenticated — return public info only
       return NextResponse.json({
-        paymentId: found.paymentId,
-        status: found.record.status,
-        settlement: found.record.receipt,
-        brief: found.record.brief ?? null,
-        recoveryNote: found.record.brief
-          ? undefined
-          : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
+        txHash,
+        publicSettlement: {
+          status: found.record.status,
+          txHash: found.record.receipt?.txHash,
+          blockNumber: found.record.receipt?.blockNumber
+            ? Number(found.record.receipt.blockNumber)
+            : null,
+          from: found.record.receipt?.from,
+          to: found.record.receipt?.to,
+          amount: found.record.receipt?.amount,
+          tokenAddress: found.record.receipt?.tokenAddress,
+          settledAt: found.record.createdAt,
+        },
+        consumedTx: consumed
+          ? { consumedAt: consumed.consumedAt, legacyRecovery: consumed.legacyRecovery }
+          : null,
+        authRequired: "Authenticate with X-Wallet-Address, X-Wallet-Message, and X-Wallet-Signature headers to retrieve the full brief.",
       });
     }
+
+    // Not in store — return what public info we have
     return NextResponse.json({
-      error: `No settlement found for transaction hash '${txHash}'. The store is in-memory and may have been lost on server restart.`,
+      txHash,
+      error: `No settlement record found for transaction hash '${txHash}'. The store is in-memory and may have been lost on server restart.`,
+      consumedTx: consumed
+        ? { consumedAt: consumed.consumedAt, legacyRecovery: consumed.legacyRecovery }
+        : null,
     }, { status: 404 });
   }
 
