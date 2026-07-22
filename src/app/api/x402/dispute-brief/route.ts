@@ -33,7 +33,6 @@ import {
 } from "@/lib/x402/config";
 import { verifyPermit2Authorization } from "@/lib/x402/localVerify";
 import { parseDisputeBriefRequest } from "@/lib/x402/validation";
-import { generateDisputeBrief } from "@/lib/x402/disputeBrief";
 import { RawPaymentStruct, parsePaymentData } from "@/lib/contracts/types";
 import { getEscrowAddress as getEscrowContractAddress } from "@/lib/contracts/addresses";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
@@ -57,6 +56,7 @@ import { computeRequestHash, SERVICE_IDENTIFIER } from "@/lib/x402/requestHash";
 import {
   verifyWalletSignature,
 } from "@/lib/x402/walletAuth";
+import { generateAICaseBrief, type AIGenerationResult } from "@/lib/x402/ai/generate";
 
 // ---------------------------------------------------------------------------
 // Helper: build error response with correlation ID
@@ -383,29 +383,26 @@ async function handleRecovery(
       }, { status: 502 });
     }
 
-    const paymentData = parsePaymentData(raw);
-    const disputeRequest = {
-      paymentId: escrowPaymentIdStr,
-      disputeReason,
-      requestedOutcome,
-      agreementTitle: paymentData.agreementLabel || "",
-      clientAddress: paymentData.client,
-      workerAddress: paymentData.worker,
-      protectedAmount: `${paymentData.amount.toString()}`,
-      currentPaymentState: paymentData.state,
-      agreedDeliverables: paymentData.deliverableSummary || "",
-      deadline: "",
-      releaseTerms: paymentData.releaseRule || "",
-      evidenceReferences: [],
-    };
+    // raw payment validated to exist — data is read by generateAICaseBrief internally
 
-    const brief = generateDisputeBrief(disputeRequest, paymentData);
-    await store.recordBrief(escrowPaymentIdStr, brief);
+    const genResult = await generateAICaseBrief(
+      {
+        paymentId: escrowPaymentIdStr,
+        disputeReason,
+        requestedOutcome,
+      },
+      correlationId,
+      true,
+    );
+    const brief = genResult.brief;
+    await store.recordBrief(escrowPaymentIdStr, brief as unknown as Parameters<typeof store.recordBrief>[1]);
 
     return NextResponse.json({
       correlationId,
       recovery: true,
       mode: "paid_pending_brief",
+      generationMode: genResult.metadata.generationMode,
+      usedFallback: genResult.usedFallback,
       verifiedTxHash: txHash,
       verifiedAmount,
       verifiedFrom,
@@ -476,29 +473,25 @@ async function handleRecovery(
     }, { status: 502 });
   }
 
-  const paymentData = parsePaymentData(raw);
+  // raw payment validated to exist — data is read by generateAICaseBrief internally
 
-  const disputeRequest = {
-    paymentId: "1",
-    disputeReason,
-    requestedOutcome,
-    agreementTitle: paymentData.agreementLabel || "",
-    clientAddress: paymentData.client,
-    workerAddress: paymentData.worker,
-    protectedAmount: `${paymentData.amount.toString()}`,
-    currentPaymentState: paymentData.state,
-    agreedDeliverables: paymentData.deliverableSummary || "",
-    deadline: "",
-    releaseTerms: paymentData.releaseRule || "",
-    evidenceReferences: [],
-  };
-
-  const brief = generateDisputeBrief(disputeRequest, paymentData);
+  const genResult = await generateAICaseBrief(
+    {
+      paymentId: escrowPaymentIdStr,
+      disputeReason,
+      requestedOutcome,
+    },
+    correlationId,
+    true,
+  );
+  const brief = genResult.brief;
 
   return NextResponse.json({
     correlationId,
     recovery: true,
     mode: "legacy",
+    generationMode: genResult.metadata.generationMode,
+    usedFallback: genResult.usedFallback,
     verifiedTxHash: txHash,
     verifiedAmount,
     verifiedFrom,
@@ -897,25 +890,35 @@ async function handlePaymentRequest(
     );
   }
 
-  // --- Step 12: Generate the dispute brief ---
+  // --- Step 12: Generate the dispute brief (AI with deterministic fallback) ---
   // ONLY reached after confirmed on-chain settlement. If generation throws,
   // the settlement receipt is already saved — the brief can be recovered.
-  let brief: ReturnType<typeof generateDisputeBrief>;
+  let genResult: AIGenerationResult | undefined;
   try {
-    brief = generateDisputeBrief(disputeRequest, paymentData);
+    genResult = await generateAICaseBrief(
+      {
+        paymentId: disputeRequest.paymentId,
+        disputeReason: disputeRequest.disputeReason,
+        requestedOutcome: disputeRequest.requestedOutcome,
+        evidenceReferences: disputeRequest.evidenceReferences,
+        timelineEntries: disputeRequest.relevantTimelineEntries,
+      },
+      correlationId,
+      true,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(
       `[x402][${correlationId}] Brief generation failed after settled payment: ${message}`,
       err instanceof Error ? err.stack : "",
     );
-    // Settlement receipt is already saved as paid_pending_brief.
-    // Return settlement info — the brief can be regenerated on retry.
+    // Return paid_pending_brief — brief can be regenerated on retry
     return NextResponse.json(
       {
         correlationId,
         settlement: settlementReceipt,
         brief: null,
+        generationMode: "generation_failed",
         error: `Brief generation deferred: ${message}. The service fee has been paid. Retry with the same payment ID to regenerate.`,
       },
       {
@@ -933,28 +936,67 @@ async function handlePaymentRequest(
     );
   }
 
+  if (!genResult) {
+    return NextResponse.json(
+      {
+        correlationId,
+        settlement: settlementReceipt,
+        brief: null,
+        error: "Brief generation did not produce a result. Retry with the same payment ID.",
+      },
+      {
+        status: 200,
+        headers: {
+          "PAYMENT-RESPONSE": encodePaymentResponseHeader({
+            success: true,
+            transaction: settlementReceipt.txHash,
+            network: X402_NETWORK,
+            payer: settlementReceipt.from,
+          }),
+          "X-Payment-Id": paymentId,
+        },
+      },
+    );
+  }
+
+  const aiBrief = genResult.brief;
+  console.log(
+    `[x402][${correlationId}] Brief generated: mode=${genResult.metadata.generationMode}, ` +
+    `provider=${genResult.metadata.provider}, usedFallback=${genResult.usedFallback}`,
+  );
+
   // --- Step 13: Attach brief to settlement and mark fully settled ---
-  await store.recordBrief(paymentId, brief);
+  // The brief is stored as the AICaseBrief format alongside generation metadata.
+  await store.recordBrief(paymentId, aiBrief as unknown as Parameters<typeof store.recordBrief>[1]);
 
   // --- Step 14: Return the response ---
   const response: DisputeBriefResponse = {
     correlationId,
-    brief,
+    brief: aiBrief as unknown as DisputeBriefResponse["brief"],
     settlement: settlementReceipt,
   };
 
-  return NextResponse.json(response, {
-    status: 200,
-    headers: {
-      "PAYMENT-RESPONSE": encodePaymentResponseHeader({
-        success: true,
-        transaction: settlementReceipt.txHash,
-        network: X402_NETWORK,
-        payer: settlementReceipt.from,
-      }),
-      "X-Payment-Id": paymentId,
+  return NextResponse.json(
+    {
+      ...response,
+      generationMode: genResult.metadata.generationMode,
+      provider: genResult.metadata.provider,
+      model: genResult.metadata.model,
+      usedFallback: genResult.usedFallback,
     },
-  });
+    {
+      status: 200,
+      headers: {
+        "PAYMENT-RESPONSE": encodePaymentResponseHeader({
+          success: true,
+          transaction: settlementReceipt.txHash,
+          network: X402_NETWORK,
+          payer: settlementReceipt.from,
+        }),
+        "X-Payment-Id": paymentId,
+      },
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

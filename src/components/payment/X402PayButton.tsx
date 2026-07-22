@@ -22,6 +22,7 @@
 import { useState, useCallback, useMemo } from "react";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
+import AICaseBriefDisplay from "./AICaseBriefDisplay";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useSignTypedData, useReadContract, useBalance } from "wagmi";
@@ -144,9 +145,11 @@ export default function X402PayButton({
 
   const [flowState, setFlowState] = useState<FlowState>("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [briefData, setBriefData] = useState<string | null>(null);
+  const [briefData, setBriefData] = useState<unknown>(null);
   const [correlationId, setCorrelationId] = useState<string>("");
   const [settlement, setSettlement] = useState<SettlementInfo | null>(null);
+  const [generationMode, setGenerationMode] = useState<string>("");
+  const [usedFallback, setUsedFallback] = useState<boolean>(false);
   const [paymentNonce, setPaymentNonce] = useState<bigint>(BigInt(0));
 
   // -----------------------------------------------------------------------
@@ -368,7 +371,9 @@ export default function X402PayButton({
         });
       }
 
-      setBriefData(JSON.stringify(data.brief || data, null, 2));
+      setBriefData(data.brief || data);
+      setGenerationMode((data as Record<string, unknown>).generationMode as string || "");
+      setUsedFallback(Boolean((data as Record<string, unknown>).usedFallback));
       setFlowState("success");
       if (onBriefReady) onBriefReady(data.brief || (data as Record<string, unknown>));
     } catch (err: unknown) {
@@ -510,16 +515,45 @@ export default function X402PayButton({
           </p>
         )}
 
-        {briefData && (
-          <div className="rounded-[--radius-card] border border-border bg-page p-4 max-h-[500px] overflow-y-auto">
-            <p className="text-[12px] font-semibold text-muted uppercase tracking-wider mb-2">
-              Generated Brief
-            </p>
-            <pre className="text-[12px] font-[family-name:var(--font-ibm-plex-mono)] text-ink whitespace-pre-wrap break-words">
-              {briefData}
-            </pre>
+        {briefData ? (
+          <div className="max-h-[600px] overflow-y-auto">
+            <AICaseBriefDisplay
+              brief={briefData as Record<string, unknown>}
+              generationMode={generationMode}
+              usedFallback={usedFallback}
+            />
           </div>
-        )}
+        ) : null}
+
+        {/* Copy & download actions */}
+        {briefData ? (
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                navigator.clipboard.writeText(JSON.stringify(briefData, null, 2));
+              }}
+            >
+              Copy brief JSON
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                const blob = new Blob([JSON.stringify(briefData, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "reclaim-dispute-brief.json";
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              Download JSON
+            </Button>
+          </div>
+        ) : null}
 
         <Button
           variant="secondary"
@@ -528,6 +562,8 @@ export default function X402PayButton({
             setFlowState("idle");
             setBriefData(null);
             setSettlement(null);
+            setGenerationMode("");
+            setUsedFallback(false);
             setErrorMessage("");
           }}
         >

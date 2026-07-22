@@ -255,14 +255,27 @@ export class SupabasePaymentStore implements PaymentStore {
   // -----------------------------------------------------------------------
 
   async recordBrief(paymentId: PaymentIdentifier, brief: DisputeBrief): Promise<void> {
+    const briefRecord = brief as unknown as Record<string, unknown>;
+    const generationMode = briefRecord.generationMode || briefRecord.generation_mode;
+    const aiProvider = briefRecord.provider || briefRecord.ai_provider;
+    const aiModel = briefRecord.model || briefRecord.ai_model;
+
+    const updateData: Record<string, unknown> = {
+      state: "settled",
+      brief: brief as unknown as Record<string, unknown>,
+      delivered_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      generation_completed_at: new Date().toISOString(),
+      generation_status: "completed",
+    };
+
+    if (generationMode) updateData.generation_mode = generationMode;
+    if (aiProvider) updateData.ai_provider = aiProvider;
+    if (aiModel) updateData.ai_model = aiModel;
+
     const { error } = await this.getClient()
       .from("x402_payments")
-      .update({
-        state: "settled",
-        brief: brief as unknown as Record<string, unknown>,
-        delivered_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
+      .update(updateData)
       .eq("payment_identifier", paymentId)
       .eq("state", "paid_pending_brief");
 
