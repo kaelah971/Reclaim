@@ -49,20 +49,8 @@ import {
   encodePaymentResponseHeader,
 } from "@/lib/x402/shared";
 import {
-  getResult,
-  getError,
-  recordPending,
-  recordFailed,
-  recordSettlementReceipt,
-  recordBrief,
-  getAllEntries,
-  findByTxHash,
-  isTxHashConsumed,
-  consumeTxHash,
-  findConsumedTx,
-  setRequestHash,
-  getRequestHash,
-} from "@/lib/x402/paymentStore";
+  getPaymentStore,
+} from "@/lib/x402/paymentStore.supabase";
 import { settlePayment } from "@/lib/x402/settlement";
 import { findTransferEvents } from "@/lib/x402/settlement";
 import { computeRequestHash, SERVICE_IDENTIFIER } from "@/lib/x402/requestHash";
@@ -188,6 +176,7 @@ async function handleRecovery(
   body: Record<string, unknown>,
   correlationId: string,
 ): Promise<Response> {
+  const store = getPaymentStore();
   const txHash = recoveryTxHash as `0x${string}`;
 
   // --- Step R1: Validate txHash format ---
@@ -303,8 +292,8 @@ async function handleRecovery(
   const verifiedAmount = transfer.value.toString();
 
   // --- Step R6: Replay protection ---
-  if (isTxHashConsumed(txHash)) {
-    const consumed = findConsumedTx(txHash);
+  if (await store.isTxHashConsumed(txHash)) {
+    const consumed = await store.findConsumedTx(txHash);
     return NextResponse.json({
       correlationId,
       error: `Transaction ${txHash} has already been consumed for recovery (payment ${consumed?.paymentId}, at ${consumed?.consumedAt}). This transaction cannot be reused.`,
@@ -312,7 +301,7 @@ async function handleRecovery(
   }
 
   // --- Step R7: Determine paid_pending_brief or legacy ---
-  const existingRecord = findByTxHash(txHash);
+  const existingRecord = await store.findByTxHash(txHash);
 
   let escrowPaymentId: bigint;
   try {
@@ -338,7 +327,7 @@ async function handleRecovery(
       }, { status: 409 });
     }
 
-    const storedHash = getRequestHash(escrowPaymentIdStr);
+    const storedHash = await store.getRequestHash(escrowPaymentIdStr);
     if (storedHash) {
       const computedHash = computeRequestHash({
         paymentId: escrowPaymentIdStr,
@@ -360,7 +349,7 @@ async function handleRecovery(
     }
 
     // Consume txHash so it cannot be reused
-    consumeTxHash(txHash, escrowPaymentIdStr, {
+    await store.consumeTxHash(txHash, escrowPaymentIdStr, {
       recoveredPayer: verifiedFrom,
       recoveredRequestHash: storedHash,
     });
@@ -411,7 +400,7 @@ async function handleRecovery(
     };
 
     const brief = generateDisputeBrief(disputeRequest, paymentData);
-    recordBrief(escrowPaymentIdStr, brief);
+    await store.recordBrief(escrowPaymentIdStr, brief);
 
     return NextResponse.json({
       correlationId,
@@ -453,7 +442,7 @@ async function handleRecovery(
   }
 
   // Mark txHash as consumed — legacy, one-time only
-  consumeTxHash(txHash, "1", {
+  await store.consumeTxHash(txHash, "1", {
     legacyRecovery: true,
     recoveredPayer: verifiedFrom,
   });
@@ -553,6 +542,7 @@ async function handlePaymentRequest(
   request: Request,
   correlationId: string,
 ): Promise<Response> {
+  const store = getPaymentStore();
 
   // --- Step 0: Check server configuration ---
   if (!canProcessPayments()) {
@@ -641,7 +631,7 @@ async function handlePaymentRequest(
   const paymentId = paymentIdHeader || generatePaymentId();
 
   // Check if this payment ID was already settled
-  const cachedResult = getResult(paymentId);
+  const cachedResult = await store.getResult(paymentId);
   if (cachedResult) {
     console.log(
       `[x402][${correlationId}] Payment ${paymentId} already settled (${
@@ -675,7 +665,7 @@ async function handlePaymentRequest(
   }
 
   // Check if this payment ID previously failed
-  const previousError = getError(paymentId);
+  const previousError = await store.getError(paymentId);
   if (previousError) {
     return errorResponse(
       402,
@@ -685,7 +675,7 @@ async function handlePaymentRequest(
   }
 
   // Mark as pending
-  recordPending(paymentId);
+  await store.recordPending(paymentId);
 
   // --- Step 5: Cryptographic verification of the Permit2 authorization ---
   // The public Celo facilitator (api.x402.celo.org) only supports Celo
@@ -707,7 +697,7 @@ async function handlePaymentRequest(
       console.warn(
         `[x402][${correlationId}] Payment verification failed: ${reason}`,
       );
-      recordFailed(paymentId, `Verification failed: ${reason}`);
+      await store.recordFailed(paymentId, `Verification failed: ${reason}`);
       return NextResponse.json(
         {
           correlationId,
@@ -726,7 +716,7 @@ async function handlePaymentRequest(
     console.error(
       `[x402][${correlationId}] Payment verification error: ${message}`,
     );
-    recordFailed(paymentId, `Verification error: ${message}`);
+    await store.recordFailed(paymentId, `Verification error: ${message}`);
     return errorResponse(
       502,
       `Payment verification service unavailable: ${message}`,
@@ -739,13 +729,13 @@ async function handlePaymentRequest(
   try {
     body = await request.json();
   } catch {
-    recordFailed(paymentId, "Malformed JSON body.");
+    await store.recordFailed(paymentId, "Malformed JSON body.");
     return errorResponse(400, "Malformed JSON body.", correlationId);
   }
 
   const parseResult = parseDisputeBriefRequest(body);
   if (!parseResult.success) {
-    recordFailed(paymentId, "Request body validation failed.");
+    await store.recordFailed(paymentId, "Request body validation failed.");
     return errorResponse(
       400,
       "Request body validation failed.",
@@ -769,14 +759,14 @@ async function handlePaymentRequest(
     price: paymentPayload.payment.amount,
     payToAddress: X402_PAY_TO_ADDRESS,
   });
-  setRequestHash(paymentId, computedRequestHash);
+  await store.setRequestHash(paymentId, computedRequestHash);
 
   // --- Step 7: Convert paymentId to bigint ---
   let escrowPaymentId: bigint;
   try {
     escrowPaymentId = BigInt(disputeRequest.paymentId);
   } catch {
-    recordFailed(paymentId, "Invalid escrow paymentId format.");
+    await store.recordFailed(paymentId, "Invalid escrow paymentId format.");
     return errorResponse(
       400,
       "Invalid paymentId format.",
@@ -790,7 +780,7 @@ async function handlePaymentRequest(
   try {
     const result = await readOnChainPayment(escrowPaymentId, correlationId);
     if (!result) {
-      recordFailed(paymentId, `Escrow payment #${escrowPaymentId} not found.`);
+      await store.recordFailed(paymentId, `Escrow payment #${escrowPaymentId} not found.`);
       return errorResponse(
         404,
         `Payment #${escrowPaymentId.toString()} not found on-chain.`,
@@ -800,7 +790,7 @@ async function handlePaymentRequest(
     rawPayment = result;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    recordFailed(paymentId, `Failed to read payment data: ${message}`);
+    await store.recordFailed(paymentId, `Failed to read payment data: ${message}`);
     return errorResponse(
       500,
       `Failed to read payment data: ${message}`,
@@ -819,7 +809,7 @@ async function handlePaymentRequest(
     "Disputed",
   ];
   if (!disputableStates.includes(paymentData.state)) {
-    recordFailed(
+    await store.recordFailed(
       paymentId,
       `Payment state ${paymentData.state} is not disputable.`,
     );
@@ -850,7 +840,7 @@ async function handlePaymentRequest(
     console.error(
       `[x402][${correlationId}] Settlement failed: ${message}`,
     );
-    recordFailed(paymentId, `Settlement failed: ${message}`);
+    await store.recordFailed(paymentId, `Settlement failed: ${message}`);
     return errorResponse(
       502,
       `Payment settlement failed: ${message}`,
@@ -862,11 +852,11 @@ async function handlePaymentRequest(
   // Even if brief generation fails later, the settlement is recorded
   // and the buyer's payment is acknowledged. The brief can be recovered
   // or regenerated on a subsequent idempotent retry.
-  recordSettlementReceipt(paymentId, settlementReceipt);
+  await store.recordSettlementReceipt(paymentId, settlementReceipt);
 
   // --- Step 11: Verify settlement receipt integrity ---
   if (settlementReceipt.status !== "success") {
-    recordFailed(paymentId, "Settlement receipt status is not success.");
+    await store.recordFailed(paymentId, "Settlement receipt status is not success.");
     return errorResponse(
       502,
       "Settlement transaction did not succeed on-chain.",
@@ -875,7 +865,7 @@ async function handlePaymentRequest(
   }
 
   if (!settlementReceipt.txHash || !settlementReceipt.blockNumber) {
-    recordFailed(paymentId, "Settlement receipt missing txHash or blockNumber.");
+    await store.recordFailed(paymentId, "Settlement receipt missing txHash or blockNumber.");
     return errorResponse(
       502,
       "Settlement receipt is incomplete (missing txHash or blockNumber).",
@@ -886,7 +876,7 @@ async function handlePaymentRequest(
   // Verify the recipient is NOT the escrow contract
   const escrowAddr = getEscrowContractAddress(11142220);
   if (!escrowAddr) {
-    recordFailed(paymentId, "Escrow contract address not configured — cannot verify recipient safety.");
+    await store.recordFailed(paymentId, "Escrow contract address not configured — cannot verify recipient safety.");
     return errorResponse(
       500,
       "Escrow contract address is not configured. Settlement safety check failed.",
@@ -896,7 +886,7 @@ async function handlePaymentRequest(
   if (
     settlementReceipt.to.toLowerCase() === escrowAddr.toLowerCase()
   ) {
-    recordFailed(
+    await store.recordFailed(
       paymentId,
       "Settlement paid the escrow contract — this is forbidden.",
     );
@@ -944,7 +934,7 @@ async function handlePaymentRequest(
   }
 
   // --- Step 13: Attach brief to settlement and mark fully settled ---
-  recordBrief(paymentId, brief);
+  await store.recordBrief(paymentId, brief);
 
   // --- Step 14: Return the response ---
   const response: DisputeBriefResponse = {
@@ -995,13 +985,14 @@ async function authenticateWalletFromHeaders(
 }
 
 export async function GET(request: Request): Promise<Response> {
+  const store = getPaymentStore();
   const url = new URL(request.url);
   const paymentId = url.searchParams.get("paymentId");
   const txHash = url.searchParams.get("txHash");
 
   // Direct lookup by payment ID (UUID — not public, implicitly authenticated)
   if (paymentId) {
-    const result = getResult(paymentId);
+    const result = await store.getResult(paymentId);
     if (result) {
       return NextResponse.json({
         paymentId,
@@ -1013,7 +1004,7 @@ export async function GET(request: Request): Promise<Response> {
           : "Settlement confirmed but brief was not generated. Submit a POST with the same payment-id header to regenerate the brief at no additional cost.",
       });
     }
-    const err = getError(paymentId);
+    const err = await store.getError(paymentId);
     if (err) {
       return NextResponse.json({
         paymentId,
@@ -1028,8 +1019,8 @@ export async function GET(request: Request): Promise<Response> {
 
   // Search by transaction hash — security-restricted
   if (txHash) {
-    const found = findByTxHash(txHash);
-    const consumed = findConsumedTx(txHash);
+    const found = await store.findByTxHash(txHash);
+    const consumed = await store.findConsumedTx(txHash);
 
     if (found) {
       const payer = found.record.receipt?.from;
@@ -1083,7 +1074,7 @@ export async function GET(request: Request): Promise<Response> {
 
   // List all entries (admin/debug)
   const entries: Record<string, { status: string; txHash?: string; error?: string; createdAt: number }> = {};
-  for (const [id, record] of getAllEntries()) {
+  for (const [id, record] of await store.getAllEntries()) {
     entries[id] = {
       status: record.status,
       txHash: record.receipt?.txHash,
