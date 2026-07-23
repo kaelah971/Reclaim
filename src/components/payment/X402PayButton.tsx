@@ -19,13 +19,13 @@
 // All signing happens in the user's wallet.
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import AICaseBriefDisplay from "./AICaseBriefDisplay";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
-import { useSignTypedData, useReadContract, useBalance } from "wagmi";
+import { useSignTypedData, useReadContract, useWriteContract, useBalance, useWaitForTransactionReceipt } from "wagmi";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
 import {
@@ -96,12 +96,16 @@ export interface X402PayButtonProps {
 
 type FlowState =
   | "idle"
+  | "needs-approval"
+  | "approving"
   | "fetching-requirements"
   | "ready-to-sign"
   | "signing"
   | "submitting"
   | "settling"
   | "success"
+  | "checking-cached"
+  | "retrieving-brief"
   | "error"
   | "no-wallet"
   | "wrong-network"
@@ -150,6 +154,7 @@ export default function X402PayButton({
   const [settlement, setSettlement] = useState<SettlementInfo | null>(null);
   const [generationMode, setGenerationMode] = useState<string>("");
   const [usedFallback, setUsedFallback] = useState<boolean>(false);
+  const [paymentId, setPaymentId] = useState<string>("");
   const [paymentNonce, setPaymentNonce] = useState<bigint>(BigInt(0));
 
   // -----------------------------------------------------------------------
@@ -185,6 +190,82 @@ export default function X402PayButton({
   const hasSufficientBalance = useMemo(() => {
     return usdcBalanceRawBigInt >= requiredAtomic;
   }, [usdcBalanceRawBigInt, requiredAtomic]);
+
+  // -----------------------------------------------------------------------
+  // Read Permit2 allowance for USDC
+  // -----------------------------------------------------------------------
+
+  const {
+    data: permit2AllowanceRaw,
+    refetch: refetchAllowance,
+  } = useReadContract({
+    address: USDC_CELO_SEPOLIA,
+    abi: [
+      {
+        name: "allowance",
+        type: "function",
+        stateMutability: "view",
+        inputs: [
+          { name: "owner", type: "address" },
+          { name: "spender", type: "address" },
+        ],
+        outputs: [{ type: "uint256" }],
+      },
+    ],
+    functionName: "allowance",
+    args: wallet.address
+      ? [wallet.address as `0x${string}`, PERMIT2_ADDRESS as `0x${string}`]
+      : undefined,
+    chainId: 11142220,
+    query: { enabled: !!wallet.address && wallet.chainSupported },
+  });
+
+  const permit2Allowance = (permit2AllowanceRaw as bigint) ?? BigInt(0);
+  const hasSufficientAllowance = permit2Allowance >= requiredAtomic;
+
+  // -----------------------------------------------------------------------
+  // Approve USDC for Permit2
+  // -----------------------------------------------------------------------
+
+  const {
+    writeContract: approveUSDC,
+    data: approveTxHash,
+  } = useWriteContract();
+
+  const { isLoading: isApproving, isSuccess: isApproved } = useWaitForTransactionReceipt({
+    hash: approveTxHash,
+  });
+
+  useEffect(() => {
+    if (isApproved) {
+      refetchAllowance();
+      setFlowState("idle");
+      setErrorMessage("");
+    }
+  }, [isApproved, refetchAllowance]);
+
+  const handleApprove = useCallback(() => {
+    setFlowState("approving");
+    setErrorMessage("");
+    approveUSDC({
+      address: USDC_CELO_SEPOLIA,
+      abi: [
+        {
+          name: "approve",
+          type: "function",
+          stateMutability: "nonpayable",
+          inputs: [
+            { name: "spender", type: "address" },
+            { name: "amount", type: "uint256" },
+          ],
+          outputs: [{ type: "bool" }],
+        },
+      ],
+      functionName: "approve",
+      args: [PERMIT2_ADDRESS as `0x${string}`, requiredAtomic],
+      chainId: 11142220,
+    });
+  }, [approveUSDC, requiredAtomic]);
 
   // -----------------------------------------------------------------------
   // Generate a unique nonce for this payment attempt
@@ -335,16 +416,24 @@ export default function X402PayButton({
 
       const paymentSignatureHeader = btoa(JSON.stringify(paymentPayload));
 
-      // Step 5: Submit to API
+      // Step 5: Submit to API (include existing paymentId for idempotency)
       setFlowState("submitting");
+      const reqHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        "PAYMENT-SIGNATURE": paymentSignatureHeader,
+      };
+      if (paymentId) {
+        reqHeaders["X-Payment-Id"] = paymentId;
+      }
       const response = await fetch("/api/x402/dispute-brief", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "PAYMENT-SIGNATURE": paymentSignatureHeader,
-        },
+        headers: reqHeaders,
         body: JSON.stringify(disputeRequest),
       });
+
+      // Store payment ID from response for future idempotency
+      const responsePaymentId = response.headers.get("X-Payment-Id");
+      if (responsePaymentId) setPaymentId(responsePaymentId);
 
       const { data, raw } = await safeParseJSON(response);
 
@@ -400,28 +489,59 @@ export default function X402PayButton({
 
   const handleClick = useCallback(() => {
     requireWallet(() => {
-      // Check network
       if (!wallet.chainSupported) {
         setFlowState("wrong-network");
-        setErrorMessage(
-          "Please switch to Celo Sepolia network to use this service.",
-        );
+        setErrorMessage("Please switch to Celo Sepolia network.");
         return;
       }
-
-      // Check balance
       if (!hasSufficientBalance) {
         setFlowState("insufficient-balance");
-        setErrorMessage(
-          `Insufficient USDC balance. You need at least $${X402_DISPUTE_BRIEF_PRICE} USDC on Celo Sepolia.`,
-        );
+        setErrorMessage(`Insufficient USDC. Need at least $${X402_DISPUTE_BRIEF_PRICE}.`);
+        return;
+      }
+      if (!hasSufficientAllowance) {
+        setFlowState("needs-approval");
+        setErrorMessage(`Permit2 allowance is ${Number(permit2Allowance) / 10 ** USDC_DECIMALS} USDC — 0.01 needed.`);
         return;
       }
 
-      // Start payment flow
+      // If we already have a payment ID from a prior settlement, check cached state first
+      if (paymentId) {
+        handleCheckCached(paymentId);
+        return;
+      }
+
       handlePay();
     });
-  }, [requireWallet, wallet.chainSupported, hasSufficientBalance, handlePay]);
+  }, [requireWallet, wallet.chainSupported, hasSufficientBalance, hasSufficientAllowance, permit2Allowance, paymentId, handlePay]);
+
+  // Check cached/paid state without paying
+  const handleCheckCached = useCallback(async (pid: string) => {
+    setFlowState("checking-cached");
+    try {
+      const res = await fetch(`/api/x402/dispute-brief?paymentId=${encodeURIComponent(pid)}`);
+      const { data } = await safeParseJSON(res);
+      const body = data as Record<string, unknown>;
+      if (body.status === "settled" || body.status === "paid_pending_brief") {
+        setBriefData(body.brief || body);
+        setGenerationMode((body.generationMode as string) || "");
+        setUsedFallback(Boolean(body.usedFallback));
+        if ((body.settlement as Record<string, unknown>)?.txHash) {
+          const s = body.settlement as Record<string, unknown>;
+          setSettlement({ txHash: String(s.txHash), blockNumber: String(s.blockNumber ?? ""), from: String(s.from), to: String(s.to), amount: String(s.amount) });
+        }
+        setCorrelationId((body.paymentId as string) || pid);
+        setFlowState("success");
+        return;
+      }
+      if (body.status === "failed") {
+        setFlowState("idle");
+        setPaymentId("");
+        return;
+      }
+    } catch {}
+    setFlowState("idle");
+  }, []);
 
   // -----------------------------------------------------------------------
   // Derived display state
@@ -439,20 +559,28 @@ export default function X402PayButton({
 
   const buttonLabel = useMemo(() => {
     switch (flowState) {
+      case "checking-cached":
+        return "Checking existing brief...";
+      case "retrieving-brief":
+        return "Loading brief...";
       case "fetching-requirements":
-        return "Fetching requirements…";
+        return "Fetching requirements...";
+      case "needs-approval":
+        return "Approve 0.01 USDC first";
+      case "approving":
+        return "Confirming approval...";
       case "ready-to-sign":
-        return "Sign to pay…";
+        return "Sign to pay...";
       case "signing":
-        return "Sign in wallet…";
+        return "Sign in wallet...";
       case "submitting":
-        return "Submitting payment…";
+        return "Submitting payment...";
       case "settling":
-        return "Settling on-chain…";
+        return "Settling on-chain...";
       default:
-        return `Pay $${X402_DISPUTE_BRIEF_PRICE} and prepare brief`;
+        return paymentId ? "View prepared brief" : `Pay $${X402_DISPUTE_BRIEF_PRICE} and prepare brief`;
     }
-  }, [flowState]);
+  }, [flowState, paymentId]);
 
   // -----------------------------------------------------------------------
   // Render: success state — show the brief + settlement details
@@ -564,6 +692,7 @@ export default function X402PayButton({
             setSettlement(null);
             setGenerationMode("");
             setUsedFallback(false);
+            setPaymentId("");
             setErrorMessage("");
           }}
         >
@@ -657,6 +786,59 @@ export default function X402PayButton({
         <Notice variant="warning">
           <p className="text-[14px] leading-relaxed">{errorMessage}</p>
         </Notice>
+      )}
+
+      {/* Permit2 approval needed */}
+      {flowState === "needs-approval" && (
+        <div className="rounded-[--radius-card] border border-gold/30 bg-gold/5 p-4 space-y-3">
+          <p className="text-[14px] font-medium text-ink">
+            Permit2 allowance required
+          </p>
+          <p className="text-[13px] text-muted leading-relaxed">
+            Your wallet has {Number(permit2Allowance) / 10 ** USDC_DECIMALS} USDC approved to Permit2.
+            Approve exactly 0.01 USDC to continue with the x402 payment.
+          </p>
+          <div className="rounded-[--radius-card] border border-border bg-page p-3">
+            <p className="text-[12px] font-semibold text-muted uppercase tracking-wider">
+              Approval details
+            </p>
+            <div className="mt-1 space-y-1 text-[12px] font-[family-name:var(--font-ibm-plex-mono)]">
+              <div className="flex justify-between">
+                <span className="text-muted">Token</span>
+                <span className="text-ink">USDC ({USDC_CELO_SEPOLIA.slice(0, 6)}...{USDC_CELO_SEPOLIA.slice(-4)})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Spender</span>
+                <span className="text-ink">{PERMIT2_ADDRESS.slice(0, 10)}...{PERMIT2_ADDRESS.slice(-8)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Amount</span>
+                <span className="text-ink tabular-nums">{Number(requiredAtomic) / 10 ** USDC_DECIMALS} USDC ({requiredAtomic.toString()} atomic)</span>
+              </div>
+            </div>
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleApprove}
+            disabled={isApproving}
+          >
+            {isApproving ? "Approving..." : "Approve 0.01 USDC to Permit2"}
+          </Button>
+          <p className="text-[12px] text-muted">
+            This grants Permit2 permission to transfer exactly 0.01 USDC for the x402 settlement. You will sign a separate Permit2 authorization afterwards.
+          </p>
+        </div>
+      )}
+
+      {/* Approving transaction pending */}
+      {flowState === "approving" && (
+        <div className="flex items-center gap-3 text-[14px] text-muted">
+          <svg className="animate-spin h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="30 10" />
+          </svg>
+          {isApproving ? "Confirming approval transaction..." : "Waiting for wallet confirmation..."}
+        </div>
       )}
 
       {/* Loading / status states */}

@@ -39,6 +39,8 @@ function badgeVariant(
       return "disputed";
     case "Cancelled":
       return "missing";
+    case "Resolved":
+      return "settled";
     default:
       return "pending";
   }
@@ -64,6 +66,8 @@ function nextActionHint(state: PaymentState, isClient: boolean): string {
       return "Funds frozen";
     case "Cancelled":
       return "Cancelled";
+    case "Resolved":
+      return "Resolved";
   }
 }
 

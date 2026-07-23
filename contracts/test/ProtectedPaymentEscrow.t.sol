@@ -44,6 +44,14 @@ contract ProtectedPaymentEscrowTest is Test {
     event ReleaseRequested(uint256 indexed paymentId, address indexed worker);
     event PaymentReleased(uint256 indexed paymentId, address indexed client, address indexed worker, uint256 amount);
     event PaymentDisputed(uint256 indexed paymentId, address indexed disputer, bytes32 disputeReference);
+    event PaymentResolved(
+        uint256 indexed paymentId,
+        address indexed resolver,
+        address client,
+        address worker,
+        uint256 clientAmount,
+        uint256 workerAmount
+    );
     event PaymentCancelled(uint256 indexed paymentId, address indexed client);
     event ContractPaused();
     event ContractUnpaused();
@@ -116,6 +124,14 @@ contract ProtectedPaymentEscrowTest is Test {
 
         vm.prank(_worker);
         escrow.submitEvidenceHash(paymentId, EVIDENCE_HASH);
+    }
+
+    /// @dev Create, fund, accept, deliver, and open a dispute (client opens by default).
+    function _createAndDispute(address _client, address _worker) internal returns (uint256 paymentId) {
+        paymentId = _createFundAcceptDeliver(_client, _worker);
+
+        vm.prank(_client);
+        escrow.openDispute(paymentId, DISPUTE_REF);
     }
 
     // =========================================================================
@@ -1356,5 +1372,226 @@ contract ProtectedPaymentEscrowTest is Test {
 
         // Same inputs → same termsHash
         assertEq(escrow.getPayment(paymentId1).termsHash, escrow.getPayment(paymentId2).termsHash);
+    }
+
+    // =========================================================================
+    // 20. RESOLVE DISPUTE
+    // =========================================================================
+
+    /// @notice Owner resolves disputed payment with clientAmount=0 — worker gets full amount.
+    function test_ResolveDispute_FullWorkerRelease() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        // Worker receives full amount
+        assertEq(token.balanceOf(worker), workerBalanceBefore + PAYMENT_AMOUNT);
+        // Client receives nothing
+        assertEq(token.balanceOf(client), 10_000e6 - PAYMENT_AMOUNT);
+        // State is Resolved
+        assertEq(uint256(escrow.getPayment(paymentId).state), 8);
+        // Escrow balance is empty
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    /// @notice Owner resolves disputed payment with clientAmount=full — client gets full refund.
+    function test_ResolveDispute_FullClientRefund() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, PAYMENT_AMOUNT);
+
+        // Client receives full amount back
+        assertEq(token.balanceOf(client), clientBalanceBefore + PAYMENT_AMOUNT);
+        // Worker receives nothing
+        assertEq(token.balanceOf(worker), 0);
+        // State is Resolved
+        assertEq(uint256(escrow.getPayment(paymentId).state), 8);
+        // Escrow balance is empty
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    /// @notice Owner resolves with 40% client / 60% worker split.
+    function test_ResolveDispute_PartialSplit() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 clientAmount = (PAYMENT_AMOUNT * 40) / 100; // 40%
+        uint256 workerAmount = PAYMENT_AMOUNT - clientAmount; // 60%
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        // Each receives their exact split
+        assertEq(token.balanceOf(client), clientBalanceBefore + clientAmount);
+        assertEq(token.balanceOf(worker), workerBalanceBefore + workerAmount);
+        // Sum of splits equals total
+        assertEq(
+            token.balanceOf(client) - clientBalanceBefore + token.balanceOf(worker) - workerBalanceBefore,
+            PAYMENT_AMOUNT
+        );
+        // State is Resolved
+        assertEq(uint256(escrow.getPayment(paymentId).state), 8);
+    }
+
+    /// @notice Non-owner cannot resolve a dispute.
+    function test_ResolveDispute_RevertsNonOwner() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        vm.prank(stranger);
+        vm.expectRevert();
+        escrow.resolveDispute(paymentId, 0);
+    }
+
+    /// @notice Resolving a nonexistent payment reverts with PaymentNotFound.
+    function test_ResolveDispute_RevertsNonexistentPayment() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.PaymentNotFound.selector));
+        escrow.resolveDispute(999, 0);
+    }
+
+    /// @notice Resolving a Funded (non-disputed) payment reverts with InvalidState.
+    function test_ResolveDispute_RevertsFundedState() public {
+        uint256 paymentId = _createAndFund(client, worker);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.resolveDispute(paymentId, 0);
+    }
+
+    /// @notice Resolving an already-resolved payment reverts with InvalidState.
+    function test_ResolveDispute_RevertsAlreadyResolved() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        // First resolution succeeds
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        // Second resolution reverts — state is now Resolved (8), not Disputed (6)
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.resolveDispute(paymentId, 0);
+    }
+
+    /// @notice clientAmount exceeding the payment amount reverts with InvalidAmount.
+    function test_ResolveDispute_RevertsClientAmountExceedsTotal() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidAmount.selector));
+        escrow.resolveDispute(paymentId, PAYMENT_AMOUNT + 1);
+    }
+
+    /// @notice Verify exact client balance delta after resolution.
+    function test_ResolveDispute_ExactClientBalanceDelta() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 clientAmount = 300e6; // 30% to client
+        uint256 clientBalanceBefore = token.balanceOf(client);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        uint256 clientBalanceAfter = token.balanceOf(client);
+        assertEq(clientBalanceAfter - clientBalanceBefore, clientAmount);
+    }
+
+    /// @notice Verify exact worker balance delta after resolution.
+    function test_ResolveDispute_ExactWorkerBalanceDelta() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 clientAmount = 300e6; // 30% to client, 70% to worker
+        uint256 expectedWorkerDelta = PAYMENT_AMOUNT - clientAmount;
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        uint256 workerBalanceAfter = token.balanceOf(worker);
+        assertEq(workerBalanceAfter - workerBalanceBefore, expectedWorkerDelta);
+    }
+
+    /// @notice Escrow contract balance decreases by exactly the total payment amount.
+    function test_ResolveDispute_ExactEscrowBalanceDelta() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 escrowBalanceBefore = token.balanceOf(address(escrow));
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        uint256 escrowBalanceAfter = token.balanceOf(address(escrow));
+        assertEq(escrowBalanceBefore - escrowBalanceAfter, PAYMENT_AMOUNT);
+    }
+
+    /// @notice PaymentResolved event is emitted with correct parameters.
+    function test_ResolveDispute_EmitsCorrectEvent() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        uint256 clientAmount = 400e6;
+        uint256 workerAmount = PAYMENT_AMOUNT - clientAmount; // 600e6
+
+        // Check both indexed params (paymentId, resolver) and the data payload
+        vm.prank(owner);
+        vm.expectEmit(true, true, false, true);
+        emit PaymentResolved(paymentId, owner, client, worker, clientAmount, workerAmount);
+        escrow.resolveDispute(paymentId, clientAmount);
+    }
+
+    /// @notice After resolution, getPayment returns state 8 (Resolved).
+    function test_ResolveDispute_StateIsResolved() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), 8);
+    }
+
+    /// @notice Fuzz: for any valid clientAmount [0, total], the split is correct and state is Resolved.
+    function test_ResolveDispute_FuzzClientAmount(uint256 clientAmount) public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        // Bound clientAmount to [0, PAYMENT_AMOUNT]
+        clientAmount = bound(clientAmount, 0, PAYMENT_AMOUNT);
+        uint256 workerAmount = PAYMENT_AMOUNT - clientAmount;
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        // Verify splits
+        assertEq(token.balanceOf(client) - clientBalanceBefore, clientAmount);
+        assertEq(token.balanceOf(worker) - workerBalanceBefore, workerAmount);
+        // Verify state
+        assertEq(uint256(escrow.getPayment(paymentId).state), 8);
+    }
+
+    /// @notice Invariant: after resolution, client balance delta + worker balance delta = total amount.
+    function test_ResolveDispute_InvariantTotalValue(uint256 clientAmount) public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        clientAmount = bound(clientAmount, 0, PAYMENT_AMOUNT);
+
+        uint256 clientBalanceBefore = token.balanceOf(client);
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        uint256 clientDelta = token.balanceOf(client) - clientBalanceBefore;
+        uint256 workerDelta = token.balanceOf(worker) - workerBalanceBefore;
+
+        // Invariant: sum of balance deltas equals total payment amount
+        assertEq(clientDelta + workerDelta, PAYMENT_AMOUNT);
     }
 }

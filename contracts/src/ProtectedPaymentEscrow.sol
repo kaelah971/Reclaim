@@ -25,8 +25,9 @@ contract ProtectedPaymentEscrow is ReentrancyGuard, Ownable {
         DeliverySubmitted, // 3 — Worker submitted delivery evidence
         ReleaseRequested, // 4 — Worker requested funds release
         Released, // 5 — Funds released to worker (terminal)
-        Disputed, // 6 — Dispute opened (terminal)
-        Cancelled // 7 — Cancelled before funding (terminal)
+        Disputed, // 6 — Dispute opened
+        Cancelled, // 7 — Cancelled before funding (terminal)
+        Resolved // 8 — Dispute resolved by owner (terminal)
     }
 
     // =========================================================================
@@ -151,6 +152,8 @@ contract ProtectedPaymentEscrow is ReentrancyGuard, Ownable {
     event PaymentReleased(uint256 indexed paymentId, address indexed client, address indexed worker, uint256 amount);
 
     event PaymentDisputed(uint256 indexed paymentId, address indexed disputer, bytes32 disputeReference);
+
+    event PaymentResolved(uint256 indexed paymentId, address indexed resolver, address client, address worker, uint256 clientAmount, uint256 workerAmount);
 
     event PaymentCancelled(uint256 indexed paymentId, address indexed client);
 
@@ -364,6 +367,38 @@ contract ProtectedPaymentEscrow is ReentrancyGuard, Ownable {
         p.disputeReference = disputeReference;
 
         emit PaymentDisputed(paymentId, msg.sender, disputeReference);
+    }
+
+    /// @notice Owner resolves a dispute by splitting funds between client and worker.
+    /// @dev Only callable by owner. clientAmount + workerAmount must equal payment amount.
+    ///      For full worker release: clientAmount = 0.
+    ///      For full client refund: workerAmount = 0 (clientAmount = full amount).
+    ///      For partial: both > 0 and sum = full amount.
+    /// @param paymentId     The disputed payment to resolve.
+    /// @param clientAmount  Amount to return to client (in token's smallest unit).
+    function resolveDispute(uint256 paymentId, uint256 clientAmount) external nonReentrant onlyOwner {
+        Payment storage p = _payments[paymentId];
+        if (p.paymentId == 0) revert PaymentNotFound();
+        if (p.state != State.Disputed) revert InvalidState();
+        if (clientAmount > p.amount) revert InvalidAmount();
+
+        uint256 workerAmount = p.amount - clientAmount;
+        address clientAddr = p.client;
+        address workerAddr = p.worker;
+
+        // Effects
+        p.state = State.Resolved;
+        p.releasedAt = uint64(block.timestamp);
+
+        // Interactions — follow CEI
+        if (clientAmount > 0) {
+            escrowToken.safeTransfer(clientAddr, clientAmount);
+        }
+        if (workerAmount > 0) {
+            escrowToken.safeTransfer(workerAddr, workerAmount);
+        }
+
+        emit PaymentResolved(paymentId, msg.sender, clientAddr, workerAddr, clientAmount, workerAmount);
     }
 
     /// @notice Client cancels an unfunded payment.

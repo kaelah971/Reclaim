@@ -12,7 +12,8 @@ export type PaymentState =
   | "ReleaseRequested"
   | "Released"
   | "Disputed"
-  | "Cancelled";
+  | "Cancelled"
+  | "Resolved";
 
 export const PAYMENT_STATE_MAP: Readonly<Record<number, PaymentState>> = {
   0: "Created",
@@ -23,6 +24,7 @@ export const PAYMENT_STATE_MAP: Readonly<Record<number, PaymentState>> = {
   5: "Released",
   6: "Disputed",
   7: "Cancelled",
+  8: "Resolved",
 };
 
 export function resolvePaymentState(raw: number): PaymentState {
@@ -39,6 +41,7 @@ export const PAYMENT_STATE_LABELS: Readonly<Record<PaymentState, string>> = {
   Released: "Released",
   Disputed: "Disputed",
   Cancelled: "Cancelled",
+  Resolved: "Resolved",
 };
 
 // ---------------------------------------------------------------------------

@@ -2,26 +2,41 @@
   "contractName": "ProtectedPaymentEscrow",
   "network": "celo-sepolia",
   "chainId": 11142220,
-  "address": "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
-  "deploymentTransaction": "0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312",
-  "blockNumber": 31013036,
-  "blockHash": "0x3b366b982c57adb974d3b8f631de89fd876b5ab690532f27a57b4807b5c94097",
-  "deployer": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
-  "owner": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
-  "pauseAuthority": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
-  "constructorArgs": {
-    "_stablecoin": "0x01C5C0122039549AD1493B8220cABEdD739BC44E"
-  },
-  "escrowToken": {
-    "address": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
-    "symbol": "USDC",
-    "decimals": 6
-  },
   "rpcUrl": "https://forno.celo-sepolia.celo-testnet.org",
-  "explorer": {
-    "base": "https://celo-sepolia.blockscout.com",
-    "contract": "https://celo-sepolia.blockscout.com/address/0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
-    "deploymentTx": "https://celo-sepolia.blockscout.com/tx/0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312"
+  "canonicalVersion": "v2",
+  "versions": {
+    "v1": {
+      "address": "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
+      "deploymentTransaction": "0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312",
+      "blockNumber": 31013036,
+      "deployer": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "owner": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "constructorArgs": { "_stablecoin": "0x01C5C0122039549AD1493B8220cABEdD739BC44E" },
+      "escrowToken": { "address": "0x01C5C0122039549AD1493B8220cABEdD739BC44E", "symbol": "USDC", "decimals": 6 },
+      "features": { "resolveDispute": false },
+      "explorer": {
+        "contract": "https://celo-sepolia.blockscout.com/address/0x0fA826256a58F19Ad24Fc9384d81D313f2266F79",
+        "deploymentTx": "https://celo-sepolia.blockscout.com/tx/0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312"
+      },
+      "purpose": "historical payments",
+      "deployedAtUtc": "2026-07-17T14:03:44Z"
+    },
+    "v2": {
+      "address": "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+      "deploymentTransaction": "0x20ec89bc474ae6f4c72caedfb9878d3e80e1773e2efcf4a23dab18fa0b48b102",
+      "blockNumber": 31902616,
+      "deployer": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "owner": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "constructorArgs": { "_stablecoin": "0x01C5C0122039549AD1493B8220cABEdD739BC44E" },
+      "escrowToken": { "address": "0x01C5C0122039549AD1493B8220cABEdD739BC44E", "symbol": "USDC", "decimals": 6 },
+      "features": { "resolveDispute": true },
+      "explorer": {
+        "contract": "https://celo-sepolia.blockscout.com/address/0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+        "deploymentTx": "https://celo-sepolia.blockscout.com/tx/0x20ec89bc474ae6f4c72caedfb9878d3e80e1773e2efcf4a23dab18fa0b48b102"
+      },
+      "purpose": "all new payments with dispute resolution",
+      "deployedAtUtc": "2026-07-22T13:44:00Z"
+    }
   },
   "compiler": {
     "solc": "0.8.28",
@@ -34,18 +49,5 @@
     "artifact": "contracts/out/ProtectedPaymentEscrow.sol/ProtectedPaymentEscrow.json",
     "frontendModule": "src/lib/contracts/ProtectedPaymentEscrow.abi.ts",
     "regenerate": "forge build (in contracts/) then `npm run abi:export`"
-  },
-  "verification": {
-    "onChainChecks": {
-      "bytecodePresent": true,
-      "escrowTokenReadback": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
-      "ownerReadback": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
-      "pausedReadback": false,
-      "creationInputMatchesCurrentArtifact": true
-    },
-    "blockscoutSourceVerification": "completed"
-  },
-  "source": "contracts/broadcast/DeployProtectedPaymentEscrow.s.sol/11142220/run-latest.json",
-  "deployedAtTimestamp": 1784297024,
-  "deployedAtUtc": "2026-07-17T14:03:44Z"
+  }
 }

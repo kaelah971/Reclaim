@@ -57,6 +57,17 @@ import {
   verifyWalletSignature,
 } from "@/lib/x402/walletAuth";
 import { generateAICaseBrief, type AIGenerationResult } from "@/lib/x402/ai/generate";
+import { normalizeForJson } from "@/lib/x402/jsonSafe";
+
+// ---------------------------------------------------------------------------
+// Helper: JSON-safe response — normalizes all BigInt before serialization
+// ---------------------------------------------------------------------------
+
+function jsonSafe(data: unknown, init?: ResponseInit | number): NextResponse {
+  const status = typeof init === "number" ? init : (init as ResponseInit)?.status ?? 200;
+  const opts = typeof init === "number" ? undefined : init;
+  return jsonSafe(normalizeForJson(data), { ...opts, status } as ResponseInit);
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build error response with correlation ID
@@ -74,7 +85,7 @@ function errorResponse(
     error: message,
     details,
   };
-  return NextResponse.json(body, { status });
+  return jsonSafe(body, status);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +150,7 @@ function decodePaymentSignature(
   } catch {
     return {
       success: false,
-      error: NextResponse.json(
+      error: jsonSafe(
         {
           correlationId,
           status: 402,
@@ -181,7 +192,7 @@ async function handleRecovery(
 
   // --- Step R1: Validate txHash format ---
   if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Invalid recoveryTxHash format. Must be a 0x-prefixed 64-char hex.",
     }, { status: 400 });
@@ -193,7 +204,7 @@ async function handleRecovery(
   const escrowPaymentIdStr = typeof body.paymentId === "string" ? body.paymentId : "";
 
   if (!disputeReason || !requestedOutcome || !escrowPaymentIdStr) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Recovery requires disputeReason, requestedOutcome, and paymentId fields.",
     }, { status: 400 });
@@ -205,7 +216,7 @@ async function handleRecovery(
   const walletSignature = typeof body.walletSignature === "string" ? body.walletSignature : "";
 
   if (!walletAddress || !signedMessage || !walletSignature) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Recovery requires walletAddress, signedMessage, and walletSignature for payer authentication.",
     }, { status: 401 });
@@ -213,7 +224,7 @@ async function handleRecovery(
 
   const authResult = await verifyWalletSignature(walletAddress, signedMessage, walletSignature);
   if (!authResult.verified) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Wallet authentication failed: ${authResult.error}`,
     }, { status: 401 });
@@ -246,14 +257,14 @@ async function handleRecovery(
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(`[x402][${correlationId}] Recovery RPC error: ${message}`);
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Failed to verify transaction on-chain: ${message}`,
     }, { status: 502 });
   }
 
   if (!receipt || receipt.status !== "success") {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Transaction ${txHash} not found or not successful on-chain.`,
     }, { status: 404 });
@@ -273,14 +284,14 @@ async function handleRecovery(
   );
 
   if (matchingTransfers.length === 0) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Transaction ${txHash} does NOT contain a USDC Transfer from ${walletAddress} to ${payTo} for ${expectedAmount} atomic units.`,
     }, { status: 422 });
   }
 
   if (matchingTransfers.length > 1) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Transaction ${txHash} contains ${matchingTransfers.length} matching USDC Transfer events. Expected exactly one.`,
     }, { status: 422 });
@@ -294,7 +305,7 @@ async function handleRecovery(
   // --- Step R6: Replay protection ---
   if (await store.isTxHashConsumed(txHash)) {
     const consumed = await store.findConsumedTx(txHash);
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Transaction ${txHash} has already been consumed for recovery (payment ${consumed?.paymentId}, at ${consumed?.consumedAt}). This transaction cannot be reused.`,
     }, { status: 409 });
@@ -307,7 +318,7 @@ async function handleRecovery(
   try {
     escrowPaymentId = BigInt(escrowPaymentIdStr);
   } catch {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Invalid escrow paymentId.",
     }, { status: 400 });
@@ -321,7 +332,7 @@ async function handleRecovery(
     const existingPaymentId = existingRecord.paymentId;
 
     if (existingPaymentId !== escrowPaymentIdStr) {
-      return NextResponse.json({
+      return jsonSafe({
         correlationId,
         error: `Payment ID mismatch: transaction ${txHash} is bound to payment '${existingPaymentId}', not '${escrowPaymentIdStr}'.`,
       }, { status: 409 });
@@ -341,7 +352,7 @@ async function handleRecovery(
       });
 
       if (computedHash !== storedHash) {
-        return NextResponse.json({
+        return jsonSafe({
           correlationId,
           error: "Request hash mismatch. The submitted dispute details differ from the original settlement request. The brief cannot be regenerated with different details.",
         }, { status: 409 });
@@ -357,7 +368,7 @@ async function handleRecovery(
     // Read on-chain payment data
     const escrowAddress = getEscrowContractAddress(11142220);
     if (!escrowAddress) {
-      return NextResponse.json({
+      return jsonSafe({
         correlationId,
         error: "Escrow contract address not configured.",
       }, { status: 500 });
@@ -377,7 +388,7 @@ async function handleRecovery(
       })) as unknown as RawPaymentStruct;
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown RPC error";
-      return NextResponse.json({
+      return jsonSafe({
         correlationId,
         error: `Failed to read payment data: ${message}`,
       }, { status: 502 });
@@ -397,7 +408,7 @@ async function handleRecovery(
     const brief = genResult.brief;
     await store.recordBrief(escrowPaymentIdStr, brief as unknown as Parameters<typeof store.recordBrief>[1]);
 
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       recovery: true,
       mode: "paid_pending_brief",
@@ -425,14 +436,14 @@ async function handleRecovery(
   // ===================================================================
 
   if (escrowPaymentIdStr !== "1") {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Historical recovery is only available for Payment #1. The original request hash was lost for this transaction.",
     }, { status: 422 });
   }
 
   if (verifiedFrom.toLowerCase() !== KNOWN_SETTLEMENT_BUYER.toLowerCase()) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Historical recovery: transaction payer ${verifiedFrom} does not match the expected buyer ${KNOWN_SETTLEMENT_BUYER}.`,
     }, { status: 403 });
@@ -447,7 +458,7 @@ async function handleRecovery(
   // Read on-chain payment data
   const escrowAddress = getEscrowContractAddress(11142220);
   if (!escrowAddress) {
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: "Escrow contract address not configured.",
     }, { status: 500 });
@@ -467,7 +478,7 @@ async function handleRecovery(
     })) as unknown as RawPaymentStruct;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown RPC error";
-    return NextResponse.json({
+    return jsonSafe({
       correlationId,
       error: `Failed to read payment data: ${message}`,
     }, { status: 502 });
@@ -486,7 +497,7 @@ async function handleRecovery(
   );
   const brief = genResult.brief;
 
-  return NextResponse.json({
+  return jsonSafe({
     correlationId,
     recovery: true,
     mode: "legacy",
@@ -520,7 +531,7 @@ export async function POST(request: Request): Promise<Response> {
       `[x402][${correlationId}] Unhandled internal error: ${message}`,
       err instanceof Error ? err.stack : "",
     );
-    return NextResponse.json(
+    return jsonSafe(
       {
         correlationId,
         status: 500,
@@ -608,7 +619,7 @@ async function handlePaymentRequest(
     console.warn(
       `[x402][${correlationId}] Payment verification failed: ${verification.reason}`,
     );
-    return NextResponse.json(
+    return jsonSafe(
       {
         correlationId,
         status: 402,
@@ -643,7 +654,7 @@ async function handlePaymentRequest(
         "Settlement confirmed but brief generation was deferred. " +
         "The service fee has been paid; the brief will be regenerated on retry.";
     }
-    return NextResponse.json(response, {
+    return jsonSafe(normalizeForJson(response), {
       status: 200,
       headers: {
         "PAYMENT-RESPONSE": encodePaymentResponseHeader({
@@ -691,7 +702,7 @@ async function handlePaymentRequest(
         `[x402][${correlationId}] Payment verification failed: ${reason}`,
       );
       await store.recordFailed(paymentId, `Verification failed: ${reason}`);
-      return NextResponse.json(
+      return jsonSafe(
         {
           correlationId,
           status: 402,
@@ -913,7 +924,7 @@ async function handlePaymentRequest(
       err instanceof Error ? err.stack : "",
     );
     // Return paid_pending_brief — brief can be regenerated on retry
-    return NextResponse.json(
+    return jsonSafe(
       {
         correlationId,
         settlement: settlementReceipt,
@@ -937,7 +948,7 @@ async function handlePaymentRequest(
   }
 
   if (!genResult) {
-    return NextResponse.json(
+    return jsonSafe(
       {
         correlationId,
         settlement: settlementReceipt,
@@ -976,7 +987,7 @@ async function handlePaymentRequest(
     settlement: settlementReceipt,
   };
 
-  return NextResponse.json(
+  return jsonSafe(
     {
       ...response,
       generationMode: genResult.metadata.generationMode,
@@ -1036,7 +1047,7 @@ export async function GET(request: Request): Promise<Response> {
   if (paymentId) {
     const result = await store.getResult(paymentId);
     if (result) {
-      return NextResponse.json({
+      return jsonSafe({
         paymentId,
         status: result.brief ? "settled" : "paid_pending_brief",
         settlement: result.receipt,
@@ -1048,13 +1059,13 @@ export async function GET(request: Request): Promise<Response> {
     }
     const err = await store.getError(paymentId);
     if (err) {
-      return NextResponse.json({
+      return jsonSafe({
         paymentId,
         status: "failed",
         error: err,
       }, { status: 402 });
     }
-    return NextResponse.json({
+    return jsonSafe({
       error: `Payment identifier '${paymentId}' not found. It may have expired or never existed.`,
     }, { status: 404 });
   }
@@ -1071,7 +1082,7 @@ export async function GET(request: Request): Promise<Response> {
         : false;
 
       if (isAuthenticated) {
-        return NextResponse.json({
+        return jsonSafe({
           paymentId: found.paymentId,
           status: found.record.status,
           settlement: found.record.receipt,
@@ -1083,7 +1094,7 @@ export async function GET(request: Request): Promise<Response> {
       }
 
       // Unauthenticated — return public info only
-      return NextResponse.json({
+      return jsonSafe({
         txHash,
         publicSettlement: {
           status: found.record.status,
@@ -1105,7 +1116,7 @@ export async function GET(request: Request): Promise<Response> {
     }
 
     // Not in store — return what public info we have
-    return NextResponse.json({
+    return jsonSafe({
       txHash,
       error: `No settlement record found for transaction hash '${txHash}'. The store is in-memory and may have been lost on server restart.`,
       consumedTx: consumed
@@ -1124,7 +1135,7 @@ export async function GET(request: Request): Promise<Response> {
       createdAt: record.createdAt,
     };
   }
-  return NextResponse.json({ count: Object.keys(entries).length, entries });
+  return jsonSafe({ count: Object.keys(entries).length, entries });
 }
 
 // ---------------------------------------------------------------------------
