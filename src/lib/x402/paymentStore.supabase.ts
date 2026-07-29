@@ -426,6 +426,62 @@ export class SupabasePaymentStore implements PaymentStore {
     if (error || !data) return undefined;
     return data.request_hash ?? undefined;
   }
+
+  // -----------------------------------------------------------------------
+  // findByRequestHash — lookup a settled or pending payment by canonical hash
+  // -----------------------------------------------------------------------
+
+  async findByRequestHash(requestHash: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    const { data, error } = await this.getClient()
+      .from("x402_payments")
+      .select("*")
+      .eq("request_hash", requestHash)
+      .in("state", ["settled", "paid_pending_brief", "settlement_submitted", "authorization_verified", "pending"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return undefined;
+
+    const row = data as X402PaymentRow;
+    return {
+      paymentId: row.payment_identifier,
+      status: mapDbStateToPaymentStatus(row.state) ?? "pending",
+      receipt: row.settlement_receipt ?? undefined,
+      brief: row.brief ?? undefined,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // findByDisputeFields — pre-payment recovery lookup by dispute fields
+  // -----------------------------------------------------------------------
+
+  async findByDisputeFields(
+    escrowPaymentId: string,
+    disputeReason: string,
+    requestedOutcome: string,
+  ): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    const { data, error } = await this.getClient()
+      .from("x402_payments")
+      .select("*")
+      .eq("escrow_payment_id", escrowPaymentId)
+      .eq("dispute_reason", disputeReason)
+      .eq("requested_outcome", requestedOutcome)
+      .in("state", ["settled", "paid_pending_brief", "settlement_submitted", "authorization_verified", "pending"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) return undefined;
+
+    const row = data as X402PaymentRow;
+    return {
+      paymentId: row.payment_identifier,
+      status: mapDbStateToPaymentStatus(row.state) ?? "pending",
+      receipt: row.settlement_receipt ?? undefined,
+      brief: row.brief ?? undefined,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

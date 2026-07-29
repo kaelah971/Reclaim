@@ -19,20 +19,32 @@
 // All signing happens in the user's wallet.
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo } from "react";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import AICaseBriefDisplay from "./AICaseBriefDisplay";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
-import { useSignTypedData, useReadContract, useWriteContract, useBalance, useWaitForTransactionReceipt } from "wagmi";
+import {
+  useSignTypedData,
+  useReadContract,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+  useSwitchChain,
+} from "wagmi";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
-import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
+import { getCeloExplorerTxUrl, getCeloMainnetExplorerTxUrl } from "@/lib/web3/chains";
+import { normalizeForJson } from "@/lib/x402/jsonSafe";
 import {
   X402_NETWORK,
   X402_PAY_TO_ADDRESS,
   X402_SPENDER_ADDRESS,
   X402_DISPUTE_BRIEF_PRICE,
+  X402_FACILITATOR_NETWORK,
+  X402_FACILITATOR_USDC_MAINNET,
+  X402_PAY_TO_ADDRESS_FACILITATOR,
+  CELO_MAINNET_CHAIN_ID,
+  isFacilitatorMode,
 } from "@/lib/x402/config.public";
 
 // ---------------------------------------------------------------------------
@@ -58,14 +70,7 @@ function humanToAtomic(price: string): bigint {
   return whole * BigInt(10 ** USDC_DECIMALS) + BigInt(fraction);
 }
 
-/** Permit2 EIP-712 domain. */
-const PERMIT2_DOMAIN = {
-  name: "Permit2",
-  chainId: 11142220,
-  verifyingContract: PERMIT2_ADDRESS as `0x${string}`,
-} as const;
-
-/** Permit2 PermitTransferFrom typed-data type definitions. */
+/** Permit2 PermitTransferFrom typed-data type definitions (chain-agnostic). */
 const PERMIT2_TYPES = {
   PermitTransferFrom: [
     { name: "permitted", type: "TokenPermissions" },
@@ -109,6 +114,7 @@ type FlowState =
   | "error"
   | "no-wallet"
   | "wrong-network"
+  | "wrong-network-facilitator"
   | "insufficient-balance";
 
 interface SettlementInfo {
@@ -155,7 +161,32 @@ export default function X402PayButton({
   const [generationMode, setGenerationMode] = useState<string>("");
   const [usedFallback, setUsedFallback] = useState<boolean>(false);
   const [paymentId, setPaymentId] = useState<string>("");
-  const [paymentNonce, setPaymentNonce] = useState<bigint>(BigInt(0));
+
+  // -----------------------------------------------------------------------
+  // Mode detection — local (Sepolia) vs facilitator (mainnet)
+  // -----------------------------------------------------------------------
+
+  const facilitatorMode = isFacilitatorMode();
+
+  const activeNetwork = facilitatorMode
+    ? X402_FACILITATOR_NETWORK
+    : X402_NETWORK;
+  const activeUSDC = facilitatorMode
+    ? X402_FACILITATOR_USDC_MAINNET
+    : USDC_CELO_SEPOLIA;
+  const activePayTo = facilitatorMode
+    ? X402_PAY_TO_ADDRESS_FACILITATOR
+    : X402_PAY_TO_ADDRESS;
+  const activeChainId = facilitatorMode
+    ? CELO_MAINNET_CHAIN_ID
+    : 11142220;
+  const activeChainName = facilitatorMode ? "Celo Mainnet" : "Celo Sepolia";
+
+  // -----------------------------------------------------------------------
+  // Chain switching (for facilitator mode — switch to Celo mainnet)
+  // -----------------------------------------------------------------------
+
+  const { switchChain } = useSwitchChain();
 
   // -----------------------------------------------------------------------
   // Read USDC balance via ERC-20 balanceOf
@@ -164,7 +195,7 @@ export default function X402PayButton({
   const {
     data: usdcBalanceRaw,
   } = useReadContract({
-    address: USDC_CELO_SEPOLIA,
+    address: activeUSDC as `0x${string}`,
     abi: [
       {
         name: "balanceOf",
@@ -176,7 +207,7 @@ export default function X402PayButton({
     ],
     functionName: "balanceOf",
     args: wallet.address ? [wallet.address as `0x${string}`] : undefined,
-    chainId: 11142220,
+    chainId: activeChainId,
     query: { enabled: !!wallet.address && wallet.chainSupported },
   });
 
@@ -199,7 +230,7 @@ export default function X402PayButton({
     data: permit2AllowanceRaw,
     refetch: refetchAllowance,
   } = useReadContract({
-    address: USDC_CELO_SEPOLIA,
+    address: activeUSDC as `0x${string}`,
     abi: [
       {
         name: "allowance",
@@ -216,7 +247,7 @@ export default function X402PayButton({
     args: wallet.address
       ? [wallet.address as `0x${string}`, PERMIT2_ADDRESS as `0x${string}`]
       : undefined,
-    chainId: 11142220,
+    chainId: activeChainId,
     query: { enabled: !!wallet.address && wallet.chainSupported },
   });
 
@@ -236,19 +267,18 @@ export default function X402PayButton({
     hash: approveTxHash,
   });
 
-  useEffect(() => {
-    if (isApproved) {
-      refetchAllowance();
-      setFlowState("idle");
-      setErrorMessage("");
-    }
-  }, [isApproved, refetchAllowance]);
+  // When approval tx confirms, refetch allowance and transition to idle
+  if (flowState === "approving" && isApproved) {
+    refetchAllowance();
+    setFlowState("idle");
+    setErrorMessage("");
+  }
 
   const handleApprove = useCallback(() => {
     setFlowState("approving");
     setErrorMessage("");
     approveUSDC({
-      address: USDC_CELO_SEPOLIA,
+      address: activeUSDC as `0x${string}`,
       abi: [
         {
           name: "approve",
@@ -263,9 +293,9 @@ export default function X402PayButton({
       ],
       functionName: "approve",
       args: [PERMIT2_ADDRESS as `0x${string}`, requiredAtomic],
-      chainId: 11142220,
+      chainId: activeChainId,
     });
-  }, [approveUSDC, requiredAtomic]);
+  }, [approveUSDC, requiredAtomic, activeUSDC, activeChainId]);
 
   // -----------------------------------------------------------------------
   // Generate a unique nonce for this payment attempt
@@ -284,7 +314,6 @@ export default function X402PayButton({
     if (!wallet.address) throw new Error("Wallet not connected.");
 
     const nonce = generateNonce();
-    setPaymentNonce(nonce);
 
     // Deadline: 1 hour from now
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
@@ -295,9 +324,16 @@ export default function X402PayButton({
     // address (NEXT_PUBLIC_X402_SPENDER_ADDRESS), falling back to payTo.
     const spender = X402_SPENDER_ADDRESS as `0x${string}`;
 
+    // Permit2 EIP-712 domain — chainId depends on active settlement mode.
+    const permit2Domain = {
+      name: "Permit2",
+      chainId: activeChainId,
+      verifyingContract: PERMIT2_ADDRESS as `0x${string}`,
+    };
+
     const message = {
       permitted: {
-        token: USDC_CELO_SEPOLIA as `0x${string}`,
+        token: activeUSDC as `0x${string}`,
         amount: requiredAtomic,
       },
       spender,
@@ -306,7 +342,7 @@ export default function X402PayButton({
     } as const;
 
     const signature = await signTypedDataAsync({
-      domain: PERMIT2_DOMAIN,
+      domain: permit2Domain,
       types: PERMIT2_TYPES,
       primaryType: "PermitTransferFrom",
       message,
@@ -315,14 +351,68 @@ export default function X402PayButton({
     return {
       signature,
       from: wallet.address,
-      to: X402_PAY_TO_ADDRESS,
-      token: USDC_CELO_SEPOLIA,
+      to: activePayTo,
+      token: activeUSDC,
       amount: requiredAtomic.toString(),
       nonce: nonce.toString(),
       deadline: deadline.toString(),
       spender,
     };
-  }, [wallet.address, requiredAtomic, generateNonce, signTypedDataAsync]);
+  }, [wallet.address, requiredAtomic, generateNonce, signTypedDataAsync, activeUSDC, activeChainId, activePayTo]);
+
+  // -----------------------------------------------------------------------
+  // EIP-3009 TransferWithAuthorization — used in facilitator (mainnet) mode
+  // instead of Permit2. The facilitator's ExactEvmScheme uses EIP-3009 by
+  // default when assetTransferMethod is not "permit2" in extra.
+  // -----------------------------------------------------------------------
+
+  /** EIP-712 domain for USDC on Celo mainnet (verified on-chain). */
+  const USDC_EIP3009_DOMAIN = {
+    name: "USDC",
+    version: "2",
+    chainId: 42220,
+    verifyingContract: "0xcebA9300f2b948710d2653dD7B07f33A8B32118C" as `0x${string}`,
+  } as const;
+
+  /** EIP-3009 TransferWithAuthorization typed-data types. */
+  const EIP3009_TYPES = {
+    TransferWithAuthorization: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "validAfter", type: "uint256" },
+      { name: "validBefore", type: "uint256" },
+      { name: "nonce", type: "bytes32" },
+    ],
+  } as const;
+
+  const signEIP3009Authorization = useCallback(async () => {
+    if (!wallet.address) throw new Error("Wallet not connected.");
+
+    const now = Math.floor(Date.now() / 1000);
+    const validBefore = BigInt(now + 3600); // 1 hour deadline
+    const nonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(nonceBytes);
+    const nonce = "0x" + Array.from(nonceBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    const authorization = {
+      from: wallet.address as `0x${string}`,
+      to: activePayTo as `0x${string}`,
+      value: requiredAtomic,
+      validAfter: BigInt(0),
+      validBefore,
+      nonce: nonce as `0x${string}`,
+    };
+
+    const signature = await signTypedDataAsync({
+      domain: USDC_EIP3009_DOMAIN,
+      types: EIP3009_TYPES,
+      primaryType: "TransferWithAuthorization",
+      message: authorization,
+    });
+
+    return { authorization, signature };
+  }, [wallet.address, requiredAtomic, activePayTo, signTypedDataAsync]);
 
   // -----------------------------------------------------------------------
   // Submit the payment-gated request
@@ -340,19 +430,82 @@ export default function X402PayButton({
     setErrorMessage("");
 
     try {
+      // Include walletAddress in preflight body so the server can compute
+      // the canonical request hash including the payer (no signature needed).
+      const preflightBody = { ...disputeRequest, walletAddress: wallet.address };
       const initialResponse = await fetch("/api/x402/dispute-brief", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(disputeRequest),
+        body: JSON.stringify(normalizeForJson(preflightBody)),
       });
 
       if (initialResponse.status !== 402) {
         const { data, raw } = await safeParseJSON(initialResponse);
-        const serverError = (data as Record<string, unknown>).error || raw || "Unexpected response";
+        const body = data as Record<string, unknown>;
+        const serverError = body.error || raw || "Unexpected response";
+
+        // Pre-payment recovery: request already paid — brief exists.
+        if (initialResponse.ok && body.status === "settled" && body.brief) {
+          setCorrelationId((body.correlationId as string) || "");
+          setPaymentId((body.paymentId as string) || "");
+          if ((body.settlement as Record<string, unknown>)?.txHash) {
+            const s = body.settlement as Record<string, unknown>;
+            setSettlement({
+              txHash: String(s.txHash),
+              blockNumber: String(s.blockNumber ?? ""),
+              from: String(s.from),
+              to: String(s.to),
+              amount: String(s.amount),
+            });
+          }
+          setBriefData(body.brief || body);
+          setGenerationMode((body.generationMode as string) || "");
+          setFlowState("success");
+          if (onBriefReady) onBriefReady(body.brief);
+          return;
+        }
+
+        // Pre-payment recovery: request already paid — brief pending.
+        if (initialResponse.ok && body.status === "paid_pending_brief") {
+          // Retrigger as a brief-only recovery POST with paymentId header
+          const recoveryPid = (body.paymentId as string) || "";
+          if (recoveryPid) {
+            try {
+              setFlowState("retrieving-brief");
+              const recoveryRes = await fetch("/api/x402/dispute-brief", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Payment-Id": recoveryPid,
+                },
+                body: JSON.stringify(normalizeForJson(disputeRequest)),
+              });
+              const { data: recoveryData } = await safeParseJSON(recoveryRes);
+              const recBody = recoveryData as Record<string, unknown>;
+              if (recoveryRes.ok && recBody.brief) {
+                setCorrelationId((recBody.correlationId as string) || "");
+                setPaymentId(recoveryPid);
+                if ((recBody.settlement as Record<string, unknown>)?.txHash) {
+                  const s = recBody.settlement as Record<string, unknown>;
+                  setSettlement({ txHash: String(s.txHash), blockNumber: String(s.blockNumber ?? ""), from: String(s.from), to: String(s.to), amount: String(s.amount) });
+                }
+                setBriefData(recBody.brief || recBody);
+                setGenerationMode((recBody.generationMode as string) || "");
+                setFlowState("success");
+                if (onBriefReady) onBriefReady(recBody.brief);
+                return;
+              }
+            } catch {}
+            setFlowState("error");
+            setErrorMessage("Brief recovery failed. Please try again.");
+            return;
+          }
+        }
+
         if (initialResponse.ok && data.brief) {
           // Server returned brief without payment (unconfigured mode)
-          setCorrelationId((data.correlationId as string) || "");
-          setBriefData(JSON.stringify(data.brief, null, 2));
+          setCorrelationId((body.correlationId as string) || "");
+          setBriefData(JSON.stringify(normalizeForJson(data.brief), null, 2));
           setFlowState("success");
           if (onBriefReady) onBriefReady(data.brief);
           return;
@@ -402,34 +555,106 @@ export default function X402PayButton({
 
   const handleSignAndSubmit = useCallback(async () => {
     try {
-      // Step 3: Sign Permit2 authorization
       setFlowState("signing");
+
+      // Step 3: Sign authorization — Permit2 for local mode, EIP-3009 for facilitator
+      if (facilitatorMode) {
+        const { authorization, signature } = await signEIP3009Authorization();
+        // EIP-3009 payload: authorization + signature sent to official facilitator.
+        // Convert BigInt fields to decimal strings for JSON-safe wire format.
+        // The typed-data signing requires BigInt; the wire format requires strings.
+        const paymentPayload = {
+          scheme: "exact",
+          network: activeNetwork,
+          payment: {
+            authorization: {
+              from: authorization.from,
+              to: authorization.to,
+              value: authorization.value.toString(),
+              validAfter: authorization.validAfter.toString(),
+              validBefore: authorization.validBefore.toString(),
+              nonce: authorization.nonce,
+            },
+            signature,
+          },
+          requestId: crypto.randomUUID(),
+        };
+
+        const paymentSignatureHeader = btoa(JSON.stringify(normalizeForJson(paymentPayload)));
+
+        setFlowState("submitting");
+        const reqHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          "PAYMENT-SIGNATURE": paymentSignatureHeader,
+        };
+        if (paymentId) {
+          reqHeaders["X-Payment-Id"] = paymentId;
+        }
+        const response = await fetch("/api/x402/dispute-brief", {
+          method: "POST",
+          headers: reqHeaders,
+          body: JSON.stringify(normalizeForJson(disputeRequest)),
+        });
+
+        const responsePaymentId = response.headers.get("X-Payment-Id");
+        if (responsePaymentId) setPaymentId(responsePaymentId);
+
+        const { data, raw } = await safeParseJSON(response);
+
+        if (!response.ok) {
+          setFlowState("error");
+          const serverMsg = (data as Record<string, unknown>).error || raw || "Payment failed";
+          setErrorMessage(`${serverMsg} (HTTP ${response.status})`);
+          if (onError) onError(`${serverMsg} (HTTP ${response.status})`);
+          return;
+        }
+
+        setCorrelationId((data.correlationId as string) || "");
+        if (((data as Record<string, unknown>).settlement as Record<string, unknown>)?.txHash) {
+          const s = data.settlement as Record<string, unknown>;
+          setSettlement({
+            txHash: String(s.txHash),
+            blockNumber: String(s.blockNumber ?? "pending"),
+            from: String(s.from),
+            to: String(s.to),
+            amount: String(s.amount),
+          });
+        }
+        setBriefData(data.brief || data);
+        setGenerationMode((data as Record<string, unknown>).generationMode as string || "");
+        setUsedFallback(Boolean((data as Record<string, unknown>).usedFallback));
+        setFlowState("success");
+        if (onBriefReady) onBriefReady(data.brief || (data as Record<string, unknown>));
+        return;
+      }
+
+      // LOCAL mode — Permit2 authorization (existing flow)
       const paymentDetails = await signPermit2Authorization();
 
       // Step 4: Build payment payload
       const paymentPayload = {
         scheme: "exact",
-        network: X402_NETWORK,
+        network: activeNetwork,
         payment: paymentDetails,
         requestId: crypto.randomUUID(),
       };
 
-      const paymentSignatureHeader = btoa(JSON.stringify(paymentPayload));
+          const paymentSignatureHeader = btoa(JSON.stringify(normalizeForJson(paymentPayload)));
 
-      // Step 5: Submit to API (include existing paymentId for idempotency)
-      setFlowState("submitting");
-      const reqHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-        "PAYMENT-SIGNATURE": paymentSignatureHeader,
-      };
-      if (paymentId) {
-        reqHeaders["X-Payment-Id"] = paymentId;
-      }
-      const response = await fetch("/api/x402/dispute-brief", {
-        method: "POST",
-        headers: reqHeaders,
-        body: JSON.stringify(disputeRequest),
-      });
+          // Step 5: Submit to API (include existing paymentId for idempotency)
+          setFlowState("submitting");
+          const reqHeaders: Record<string, string> = {
+            "Content-Type": "application/json",
+            "PAYMENT-SIGNATURE": paymentSignatureHeader,
+          };
+          if (paymentId) {
+            reqHeaders["X-Payment-Id"] = paymentId;
+          }
+          const response = await fetch("/api/x402/dispute-brief", {
+            method: "POST",
+            headers: reqHeaders,
+            body: JSON.stringify(normalizeForJson(disputeRequest)),
+          });
 
       // Store payment ID from response for future idempotency
       const responsePaymentId = response.headers.get("X-Payment-Id");
@@ -481,41 +706,12 @@ export default function X402PayButton({
         if (onError) onError(message);
       }
     }
-  }, [signPermit2Authorization, disputeRequest, onBriefReady, onError]);
+  }, [signPermit2Authorization, signEIP3009Authorization, facilitatorMode, disputeRequest, onBriefReady, onError, activeNetwork, paymentId]);
 
   // -----------------------------------------------------------------------
-  // Wallet-gated click handler
-  // -----------------------------------------------------------------------
-
-  const handleClick = useCallback(() => {
-    requireWallet(() => {
-      if (!wallet.chainSupported) {
-        setFlowState("wrong-network");
-        setErrorMessage("Please switch to Celo Sepolia network.");
-        return;
-      }
-      if (!hasSufficientBalance) {
-        setFlowState("insufficient-balance");
-        setErrorMessage(`Insufficient USDC. Need at least $${X402_DISPUTE_BRIEF_PRICE}.`);
-        return;
-      }
-      if (!hasSufficientAllowance) {
-        setFlowState("needs-approval");
-        setErrorMessage(`Permit2 allowance is ${Number(permit2Allowance) / 10 ** USDC_DECIMALS} USDC — 0.01 needed.`);
-        return;
-      }
-
-      // If we already have a payment ID from a prior settlement, check cached state first
-      if (paymentId) {
-        handleCheckCached(paymentId);
-        return;
-      }
-
-      handlePay();
-    });
-  }, [requireWallet, wallet.chainSupported, hasSufficientBalance, hasSufficientAllowance, permit2Allowance, paymentId, handlePay]);
-
   // Check cached/paid state without paying
+  // -----------------------------------------------------------------------
+
   const handleCheckCached = useCallback(async (pid: string) => {
     setFlowState("checking-cached");
     try {
@@ -544,18 +740,63 @@ export default function X402PayButton({
   }, []);
 
   // -----------------------------------------------------------------------
+  // Wallet-gated click handler
+  // -----------------------------------------------------------------------
+
+  const handleClick = useCallback(() => {
+    requireWallet(() => {
+      // Mode-specific chain check: only the correct chain for the
+      // active settlement mode is allowed through.
+      const isCorrectChainForMode = facilitatorMode
+        ? wallet.chainId === CELO_MAINNET_CHAIN_ID
+        : wallet.chainId === 11142220;
+
+      if (!isCorrectChainForMode) {
+        if (facilitatorMode) {
+          setFlowState("wrong-network-facilitator");
+          setErrorMessage(
+            "AI brief payment uses Celo Mainnet. Please switch networks.",
+          );
+        } else {
+          setFlowState("wrong-network");
+          setErrorMessage("Please switch to Celo Sepolia network.");
+        }
+        return;
+      }
+      if (!hasSufficientBalance) {
+        setFlowState("insufficient-balance");
+        setErrorMessage(`Insufficient USDC. Need at least $${X402_DISPUTE_BRIEF_PRICE}.`);
+        return;
+      }
+      if (!hasSufficientAllowance && !facilitatorMode) {
+        setFlowState("needs-approval");
+        setErrorMessage(`Permit2 allowance is ${Number(permit2Allowance) / 10 ** USDC_DECIMALS} USDC — 0.01 needed.`);
+        return;
+      }
+
+      // If we already have a payment ID from a prior settlement, check cached state first
+      if (paymentId) {
+        handleCheckCached(paymentId);
+        return;
+      }
+
+      handlePay();
+    });
+  }, [requireWallet, facilitatorMode, wallet.chainId, hasSufficientBalance, hasSufficientAllowance, permit2Allowance, paymentId, handleCheckCached, handlePay]);
+
+  // -----------------------------------------------------------------------
   // Derived display state
   // -----------------------------------------------------------------------
 
-  const payToShort = X402_PAY_TO_ADDRESS
-    ? `${X402_PAY_TO_ADDRESS.slice(0, 6)}…${X402_PAY_TO_ADDRESS.slice(-4)}`
+  const payToShort = activePayTo
+    ? `${activePayTo.slice(0, 6)}…${activePayTo.slice(-4)}`
     : "Not configured";
 
   const isReady =
     wallet.isConnected &&
-    wallet.chainSupported &&
+    wallet.chainId === activeChainId &&
     hasSufficientBalance &&
-    X402_PAY_TO_ADDRESS.length > 0;
+    activePayTo.length > 0;
 
   const buttonLabel = useMemo(() => {
     switch (flowState) {
@@ -604,7 +845,11 @@ export default function X402PayButton({
               <div className="flex justify-between">
                 <span className="text-muted">Transaction</span>
                 <a
-                  href={getCeloExplorerTxUrl(settlement.txHash)}
+                  href={
+                    facilitatorMode
+                      ? getCeloMainnetExplorerTxUrl(settlement.txHash)
+                      : getCeloExplorerTxUrl(settlement.txHash)
+                  }
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-gold hover:underline truncate max-w-[200px]"
@@ -627,12 +872,16 @@ export default function X402PayButton({
               </div>
             </div>
             <a
-              href={getCeloExplorerTxUrl(settlement.txHash)}
+              href={
+                facilitatorMode
+                  ? getCeloMainnetExplorerTxUrl(settlement.txHash)
+                  : getCeloExplorerTxUrl(settlement.txHash)
+              }
               target="_blank"
               rel="noopener noreferrer"
               className="inline-block mt-2 text-[12px] text-gold hover:underline"
             >
-              View on Blockscout →
+              {facilitatorMode ? "View on Celoscan →" : "View on Blockscout →"}
             </a>
           </div>
         )}
@@ -717,6 +966,11 @@ export default function X402PayButton({
           Generate a structured dispute brief from on-chain payment data
           and your submitted details. No AI decides the outcome — people do.
         </p>
+        {facilitatorMode && (
+          <p className="mt-2 text-[12px] font-medium text-gold uppercase tracking-wider">
+            Track 2 — Celo x402 Facilitator
+          </p>
+        )}
       </div>
 
       {/* Price and payment info */}
@@ -730,7 +984,7 @@ export default function X402PayButton({
         <div className="flex items-center justify-between">
           <span className="text-[13px] text-muted">Network</span>
           <span className="text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-ink">
-            Celo Sepolia
+            {activeChainName}
           </span>
         </div>
         {wallet.address && usdcBalanceRawBigInt !== undefined && (
@@ -745,7 +999,7 @@ export default function X402PayButton({
             </span>
           </div>
         )}
-        {X402_PAY_TO_ADDRESS && (
+        {activePayTo && (
           <div className="flex items-center justify-between">
             <span className="text-[13px] text-muted">Service wallet</span>
             <span className="text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted">
@@ -781,6 +1035,25 @@ export default function X402PayButton({
         </Notice>
       )}
 
+      {/* Wrong network — facilitator mode (needs Celo mainnet) */}
+      {flowState === "wrong-network-facilitator" && (
+        <div className="rounded-[--radius-card] border border-gold/30 bg-gold/5 p-4 space-y-3">
+          <p className="text-[14px] font-medium text-ink">
+            AI brief payment uses Celo Mainnet
+          </p>
+          <p className="text-[13px] text-muted leading-relaxed">
+            {errorMessage}
+          </p>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => switchChain({ chainId: CELO_MAINNET_CHAIN_ID })}
+          >
+            Switch to Celo Mainnet
+          </Button>
+        </div>
+      )}
+
       {/* Insufficient balance warning */}
       {flowState === "insufficient-balance" && (
         <Notice variant="warning">
@@ -805,7 +1078,7 @@ export default function X402PayButton({
             <div className="mt-1 space-y-1 text-[12px] font-[family-name:var(--font-ibm-plex-mono)]">
               <div className="flex justify-between">
                 <span className="text-muted">Token</span>
-                <span className="text-ink">USDC ({USDC_CELO_SEPOLIA.slice(0, 6)}...{USDC_CELO_SEPOLIA.slice(-4)})</span>
+                <span className="text-ink">USDC ({activeUSDC.slice(0, 6)}...{activeUSDC.slice(-4)})</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted">Spender</span>
@@ -864,11 +1137,15 @@ export default function X402PayButton({
           {flowState === "fetching-requirements" &&
             "Fetching payment requirements…"}
           {flowState === "signing" &&
-            "Please sign the Permit2 authorization in your wallet…"}
+            (facilitatorMode
+              ? "Please sign the authorization in your wallet…"
+              : "Please sign the Permit2 authorization in your wallet…")}
           {flowState === "submitting" &&
             "Submitting payment to server…"}
           {flowState === "settling" &&
-            "Settling payment on-chain (Permit2)…"}
+            (facilitatorMode
+              ? "Settling via Celo x402 facilitator…"
+              : "Settling payment on-chain (Permit2)…")}
         </div>
       )}
 
@@ -879,9 +1156,9 @@ export default function X402PayButton({
             Confirm payment of ${X402_DISPUTE_BRIEF_PRICE} USDC
           </p>
           <p className="text-[13px] text-muted leading-relaxed">
-            You will be prompted to sign a Permit2 authorization in your wallet.
-            This authorizes the transfer of USDC from your wallet to the service
-            wallet. Gas fees (CELO) for settlement are covered by the service.
+            {facilitatorMode
+              ? "You will be prompted to sign an EIP-3009 TransferWithAuthorization in your wallet. This authorizes the transfer of USDC to the service wallet via the official Celo x402 facilitator. Gas fees are covered by the facilitator."
+              : "You will be prompted to sign a Permit2 authorization in your wallet. This authorizes the transfer of USDC from your wallet to the service wallet. Gas fees (CELO) for settlement are covered by the service."}
           </p>
           <div className="flex gap-3">
             <Button
@@ -922,17 +1199,17 @@ export default function X402PayButton({
           Connect your wallet to proceed.
         </p>
       )}
-      {wallet.isConnected && !wallet.chainSupported && (
+      {wallet.isConnected && wallet.chainId !== activeChainId && (
         <p className="text-[12px] text-muted text-center">
-          Switch to Celo Sepolia network to continue.
+          Switch to {activeChainName} network to continue.
         </p>
       )}
-      {wallet.isConnected && wallet.chainSupported && !hasSufficientBalance && (
+      {wallet.isConnected && wallet.chainId === activeChainId && !hasSufficientBalance && (
         <p className="text-[12px] text-gold text-center">
-          Insufficient USDC balance. Get testnet USDC from the Celo faucet.
+          Insufficient USDC balance. {facilitatorMode ? "Add USDC to your wallet on Celo Mainnet." : "Get testnet USDC from the Celo faucet."}
         </p>
       )}
-      {!X402_PAY_TO_ADDRESS && (
+      {!activePayTo && (
         <p className="text-[12px] text-muted text-center">
           x402 payment processing is not configured.
         </p>

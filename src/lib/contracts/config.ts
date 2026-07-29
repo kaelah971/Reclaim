@@ -31,6 +31,7 @@ export function getEscrowContractConfig() {
   return {
     address: getEscrowContractAddress(),
     abi: protectedPaymentEscrowABI,
+    chainId: CELO_CHAIN_ID,
   } as const;
 }
 

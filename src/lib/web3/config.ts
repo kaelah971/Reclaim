@@ -1,7 +1,7 @@
 import { http, createConfig, cookieStorage, createStorage } from "wagmi";
 import { injected, walletConnect } from "wagmi/connectors";
 import type { CreateConnectorFn } from "wagmi";
-import { celoChain } from "./chains";
+import { celoChain, celoMainnetChain } from "./chains";
 
 const walletConnectProjectId =
   process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
@@ -20,10 +20,11 @@ function buildConnectors(): CreateConnectorFn[] {
 }
 
 export const wagmiConfig = createConfig({
-  chains: [celoChain],
+  chains: [celoChain, celoMainnetChain],
   connectors: buildConnectors(),
   transports: {
     [celoChain.id]: http(process.env.NEXT_PUBLIC_CELO_RPC_URL || undefined),
+    [celoMainnetChain.id]: http("https://forno.celo.org"),
   },
   ssr: true,
   storage: createStorage({

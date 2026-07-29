@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { CELO_NETWORK_NAME } from "@/lib/web3/chains";
+import { CELO_NETWORK_NAME, getChainName } from "@/lib/web3/chains";
 import { useWalletGate } from "@/providers/WalletGateProvider";
 
 interface WalletMenuData {
@@ -68,9 +68,7 @@ export default function WalletAccountMenu({
             aria-hidden="true"
           />
           <span className="text-[13px] text-muted">
-            {wallet.chainSupported
-              ? CELO_NETWORK_NAME
-              : `Chain ID: ${wallet.chainId} — unsupported`}
+            {getChainName(wallet.chainId)}
           </span>
         </div>
       </div>

@@ -19,6 +19,7 @@ import type {
   PaymentRequirement,
   PaymentRequirementsLegacy,
   PaymentIdentifier,
+  SettlementMode,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,58 @@ import type {
 export const facilitatorClient = new HTTPFacilitatorClient({
   url: "https://api.x402.celo.org",
 });
+
+// ---------------------------------------------------------------------------
+// Settlement mode — controls which provider is used at runtime
+// ---------------------------------------------------------------------------
+
+/**
+ * Settlement mode:
+ *  - "local" (default): Use local Permit2 verification + on-chain settlement
+ *    on Celo Sepolia. Requires X402_RELAYER_PRIVATE_KEY.
+ *  - "celo-facilitator": Use the official Celo x402 facilitator API
+ *    (https://api.x402.celo.org) on Celo MAINNET. Does NOT require
+ *    a relayer key — the facilitator broadcasts the settlement tx.
+ *
+ * CRITICAL: If celo-facilitator mode is set and the facilitator is
+ * unreachable, the system MUST throw — never silently fall back to local.
+ */
+export const X402_SETTLEMENT_MODE: SettlementMode =
+  (process.env.X402_SETTLEMENT_MODE as SettlementMode) || "local";
+
+/** USDC token address on Celo mainnet (used by the official facilitator). */
+export const X402_FACILITATOR_USDC_MAINNET =
+  "0xcebA9300f2b948710d2653dD7B07f33A8B32118C";
+
+/** CAIP-2 network identifier for Celo mainnet (used by the official facilitator). */
+export const X402_FACILITATOR_NETWORK = "eip155:42220" as const;
+
+/**
+ * payTo address for the official Celo x402 facilitator.
+ *
+ * This is the registered Track 2 wallet that the facilitator recognizes
+ * as the settlement destination. Defaults to the known mainnet wallet.
+ * Override via X402_PAY_TO_ADDRESS_FACILITATOR if needed.
+ */
+export const X402_PAY_TO_ADDRESS_FACILITATOR: string =
+  process.env.X402_PAY_TO_ADDRESS_FACILITATOR ||
+  "0x85522bdE267d05bf8CE8813F97c75417b7894A33";
+
+/**
+ * x402 facilitator API key — required for /settle (and /verify in some setups).
+ * Server-only. Never exposed to browser or logs.
+ */
+export function requireFacilitatorApiKey(): string {
+  if (X402_SETTLEMENT_MODE !== "celo-facilitator") return "";
+  const key = process.env.X402_API_KEY;
+  if (!key) {
+    throw new Error(
+      "X402_API_KEY is required for Celo facilitator settlement mode. " +
+        "Set it in .env.local (server-only, never NEXT_PUBLIC).",
+    );
+  }
+  return key;
+}
 
 // ---------------------------------------------------------------------------
 // Environment variables (server-only)

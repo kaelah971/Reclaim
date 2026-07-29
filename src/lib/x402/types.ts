@@ -14,6 +14,10 @@
 // fields (SettlementReceipt, PaymentIdentifier, etc.).
 // ---------------------------------------------------------------------------
 
+// ---- Settlement mode ----
+/** Controls which settlement provider is active at runtime. */
+export type SettlementMode = "celo-facilitator" | "local";
+
 // ---- Re-exports from the official @x402/core library ----
 export type {
   // PaymentRequired is the full 402 response (v2: x402Version, resource, accepts[], extensions)

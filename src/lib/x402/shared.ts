@@ -4,6 +4,10 @@
 // HTTP header encoding/decoding functions are re-exported from @x402/core/http.
 // Our custom verifyPaymentPayload function validates the payment against our
 // server configuration (scheme, network, token, recipient, amount).
+//
+// Settlement-mode awareness: when X402_SETTLEMENT_MODE=celo-facilitator,
+// the functions in this module advertise and validate against Celo mainnet
+// (eip155:42220) instead of the default Sepolia (eip155:11142220).
 // ---------------------------------------------------------------------------
 
 // ---- Re-export official x402 header helpers ----
@@ -18,7 +22,13 @@ export {
 
 import {
   getX402ServerConfig,
+  X402_SETTLEMENT_MODE,
+  X402_FACILITATOR_NETWORK,
+  X402_FACILITATOR_USDC_MAINNET,
+  X402_PAY_TO_ADDRESS_FACILITATOR,
   X402_NETWORK,
+  X402_USDC_ADDRESS,
+  X402_PAY_TO_ADDRESS,
   getDisputeBriefPriceAtomic,
   validatePayToAddress,
 } from "./config";
@@ -36,6 +46,77 @@ import type {
 export const SUPPORTED_SCHEME = "exact" as const;
 
 // ---------------------------------------------------------------------------
+// Settlement-mode-aware helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the active settlement mode's CAIP-2 network identifier.
+ * - celo-facilitator → "eip155:42220" (Celo mainnet)
+ * - local (default)  → "eip155:11142220" (Celo Sepolia)
+ */
+export function getActivePaymentNetwork(): string {
+  if (X402_SETTLEMENT_MODE === "celo-facilitator") {
+    return X402_FACILITATOR_NETWORK;
+  }
+  return X402_NETWORK;
+}
+
+/**
+ * Returns the active settlement mode's payTo (revenue wallet) address.
+ * - celo-facilitator → the registered Track 2 wallet
+ * - local (default)  → X402_PAY_TO_ADDRESS (server env)
+ */
+export function getActivePaymentPayTo(): string {
+  if (X402_SETTLEMENT_MODE === "celo-facilitator") {
+    return X402_PAY_TO_ADDRESS_FACILITATOR;
+  }
+  validatePayToAddress();
+  return X402_PAY_TO_ADDRESS;
+}
+
+/**
+ * Returns a verification config object for the active settlement mode.
+ * Contains { network, usdcAddress, payToAddress } — the values that
+ * payment payloads will be validated against.
+ */
+export function getActiveVerificationConfig(): {
+  network: string;
+  usdcAddress: string;
+  payToAddress: string;
+} {
+  if (X402_SETTLEMENT_MODE === "celo-facilitator") {
+    return {
+      network: X402_FACILITATOR_NETWORK,
+      usdcAddress: X402_FACILITATOR_USDC_MAINNET,
+      payToAddress: X402_PAY_TO_ADDRESS_FACILITATOR,
+    };
+  }
+  // local mode — use the server's Sepolia configuration
+  validatePayToAddress();
+  const config = getX402ServerConfig();
+  return {
+    network: config.network,
+    usdcAddress: config.usdcAddress,
+    payToAddress: config.payToAddress,
+  };
+}
+
+/**
+ * Is the server running in Celo-facilitator (mainnet) settlement mode?
+ */
+export function isFacilitatorMode(): boolean {
+  return X402_SETTLEMENT_MODE === "celo-facilitator";
+}
+
+/**
+ * Returns the facilitator's Track 2 wallet address (payTo).
+ * Only meaningful when `isFacilitatorMode()` is true.
+ */
+export function getFacilitatorPayTo(): string {
+  return X402_PAY_TO_ADDRESS_FACILITATOR;
+}
+
+// ---------------------------------------------------------------------------
 // Payment requirement header helpers (custom — builds our legacy format)
 // ---------------------------------------------------------------------------
 
@@ -44,17 +125,30 @@ export const SUPPORTED_SCHEME = "exact" as const;
  * in the PAYMENT-REQUIRED header (402 response).
  */
 export function buildPaymentRequirements(): PaymentRequirementsLegacy {
-  validatePayToAddress();
-  const config = getX402ServerConfig();
+  // Use the active settlement mode's network, asset, and payTo.
+  // In celo-facilitator mode this advertises Celo mainnet; in local mode
+  // it advertises Celo Sepolia.
+  const active = getActiveVerificationConfig();
+  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
+    ? (process.env.X402_DISPUTE_BRIEF_PRICE || "0.01")
+    : getX402ServerConfig().disputeBriefPrice;
+
+  // Asset decimals: USDC always has 6 decimals on both networks.
+  const assetDecimals = 6;
+
   return {
     accepts: [
       {
         scheme: SUPPORTED_SCHEME,
-        price: `$${config.disputeBriefPrice}`,
-        network: config.network,
-        payTo: config.payToAddress,
-        asset: config.usdcAddress,
-        assetDecimals: config.usdcDecimals,
+        price: `$${price}`,
+        network: active.network,
+        payTo: active.payToAddress,
+        asset: active.usdcAddress,
+        assetDecimals,
+        // EIP-3009 requires the token's EIP-712 domain in extra
+        ...(X402_SETTLEMENT_MODE === "celo-facilitator"
+          ? { extra: { name: "USDC", version: "2" } }
+          : {}),
       },
     ],
     description: "Reclaim dispute preparation brief",
@@ -112,6 +206,11 @@ const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 export function verifyPaymentPayload(
   payload: PaymentPayloadCustom,
 ): { valid: boolean; reason?: string } {
+  // Use the active settlement mode's expected network, USDC address, and payTo.
+  // In celo-facilitator mode: validates against Celo mainnet values.
+  // In local mode: validates against Celo Sepolia values (unchanged behavior).
+  const verifyConfig = getActiveVerificationConfig();
+
   // Check scheme
   if (payload.scheme !== SUPPORTED_SCHEME) {
     return {
@@ -120,11 +219,11 @@ export function verifyPaymentPayload(
     };
   }
 
-  // Check network
-  if (payload.network !== X402_NETWORK) {
+  // Check network against the active mode's expected network
+  if (payload.network !== verifyConfig.network) {
     return {
       valid: false,
-      reason: `Unsupported network: ${payload.network}. Expected: ${X402_NETWORK}`,
+      reason: `Unsupported network: ${payload.network}. Expected: ${verifyConfig.network}`,
     };
   }
 
@@ -152,20 +251,19 @@ export function verifyPaymentPayload(
     };
   }
 
-  // Validate token matches our USDC address
-  const config = getX402ServerConfig();
-  if (payment.token.toLowerCase() !== config.usdcAddress.toLowerCase()) {
+  // Validate token matches the active mode's USDC address
+  if (payment.token.toLowerCase() !== verifyConfig.usdcAddress.toLowerCase()) {
     return {
       valid: false,
-      reason: `Payment token ${payment.token} does not match expected ${config.usdcAddress}.`,
+      reason: `Payment token ${payment.token} does not match expected ${verifyConfig.usdcAddress}.`,
     };
   }
 
-  // Validate recipient matches our pay-to address
-  if (payment.to.toLowerCase() !== config.payToAddress.toLowerCase()) {
+  // Validate recipient matches the active mode's pay-to address
+  if (payment.to.toLowerCase() !== verifyConfig.payToAddress.toLowerCase()) {
     return {
       valid: false,
-      reason: `Payment recipient ${payment.to} does not match service wallet ${config.payToAddress}.`,
+      reason: `Payment recipient ${payment.to} does not match service wallet ${verifyConfig.payToAddress}.`,
     };
   }
 
@@ -199,14 +297,20 @@ export function verifyPaymentPayload(
 // ---------------------------------------------------------------------------
 
 export function getVerificationRequirement(): PaymentRequirement {
-  validatePayToAddress();
-  const config = getX402ServerConfig();
+  const active = getActiveVerificationConfig();
+  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
+    ? (process.env.X402_DISPUTE_BRIEF_PRICE || "0.01")
+    : getX402ServerConfig().disputeBriefPrice;
+
   return {
     scheme: SUPPORTED_SCHEME,
-    price: `$${config.disputeBriefPrice}`,
-    network: config.network,
-    payTo: config.payToAddress,
-    asset: config.usdcAddress,
-    assetDecimals: config.usdcDecimals,
+    price: `$${price}`,
+    network: active.network,
+    payTo: active.payToAddress,
+    asset: active.usdcAddress,
+    assetDecimals: 6, // USDC always 6 decimals
+    ...(X402_SETTLEMENT_MODE === "celo-facilitator"
+      ? { extra: { name: "USDC", version: "2" } }
+      : {}),
   };
 }

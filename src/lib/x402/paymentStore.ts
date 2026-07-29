@@ -87,6 +87,12 @@ export interface PaymentStore {
 
   /** I3.1: Retrieve the canonical request hash for a payment. */
   getRequestHash(paymentId: PaymentIdentifier): Promise<string | undefined>;
+
+  /** Lookup a payment by canonical request hash (duplicate prevention). */
+  findByRequestHash(requestHash: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined>;
+
+  /** Recovery pre-check: find by escrow payment ID + dispute fields (no payer needed). */
+  findByDisputeFields(escrowPaymentId: string, disputeReason: string, requestedOutcome: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +212,31 @@ export class InMemoryPaymentStore implements PaymentStore {
 
   async getRequestHash(paymentId: PaymentIdentifier): Promise<string | undefined> {
     return requestHashStore.get(paymentId);
+  }
+
+  async findByRequestHash(requestHash: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    pruneExpired();
+    for (const [paymentId, record] of store) {
+      const storedHash = requestHashStore.get(paymentId);
+      if (storedHash === requestHash) {
+        return { paymentId, status: record.status, receipt: record.receipt, brief: record.brief };
+      }
+    }
+    return undefined;
+  }
+
+  async findByDisputeFields(escrowPaymentId: string, disputeReason: string, requestedOutcome: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    pruneExpired();
+    for (const [paymentId, record] of store) {
+      const storedHash = requestHashStore.get(paymentId);
+      if (storedHash &&
+        storedHash.includes(disputeReason) &&
+        storedHash.includes(requestedOutcome) &&
+        storedHash.includes(escrowPaymentId)) {
+        return { paymentId, status: record.status, receipt: record.receipt, brief: record.brief };
+      }
+    }
+    return undefined;
   }
 }
 

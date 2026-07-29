@@ -94,6 +94,34 @@ No new deployment is required for normal frontend development.
 
 No new deployment should be made without an explicit migration decision.
 
+## Celo Agentic Payments & DeFi Hackathon
+
+Reclaim is registered for **Track 2 — Most x402 Payments** in the
+[Celo Agentic Payments & DeFi Hackathon](https://celobuilders.xyz).
+
+| Field | Value |
+|-------|-------|
+| Hackathon | Celo Agentic Payments & DeFi Hackathon |
+| Track | Most x402 Payments (Track 2) |
+| Registration ID | `629aafee-b989-4ec6-929c-a4acdf2caebd` |
+| Registered payTo | `0x85522bdE267d05bf8CE8813F97c75417b7894A33` |
+| Attribution Tag | `celo_b7de8bf7e64e` |
+| Official Facilitator | `https://x402.celo.org` |
+| Leaderboard | https://dune.com/celo/agentic-payments-defai-hackathon |
+
+### Settlement Modes
+
+| Mode | Network | Track 2 | Description |
+|------|---------|---------|-------------|
+| `celo-facilitator` | Celo mainnet (`eip155:42220`) | Yes | Official facilitator verifies and settles; facilitator broadcasts settlement tx. No relayer key. |
+| `local` (default) | Celo Sepolia (`eip155:11142220`) | No | Self-settled via Permit2 + relayer wallet. Development only. |
+
+**Critical**: `celo-facilitator` mode never silently falls back to local settlement.
+A facilitator failure must fail safely. A successful-looking payment that bypasses
+the facilitator is unacceptable in Track 2 mode.
+
+Configure via `X402_SETTLEMENT_MODE=celo-facilitator` in `.env.local`.
+
 ## x402 Paid Service: Dispute Preparation Brief
 
 Reclaim implements the **x402 v2** payment protocol for one paid service: automated
