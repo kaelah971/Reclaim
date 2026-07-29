@@ -158,6 +158,28 @@ export function getDisputeBriefPriceAtomic(): bigint {
 }
 
 /**
+ * Price of the evidence quality check service in human-readable USDC.
+ * This is a configurable small amount — default "0.01" USDC.
+ */
+export const X402_EVIDENCE_CHECK_PRICE: string =
+  process.env.X402_EVIDENCE_CHECK_PRICE ||
+  process.env.NEXT_PUBLIC_X402_EVIDENCE_CHECK_PRICE ||
+  "0.01";
+
+/**
+ * Price of the evidence quality check service in atomic USDC units.
+ * USDC on Celo uses 6 decimals, so "0.01" = 10_000 atomic units.
+ */
+export function getEvidenceCheckPriceAtomic(): bigint {
+  const price = process.env.X402_EVIDENCE_CHECK_PRICE_ATOMIC;
+  if (price) {
+    const parsed = BigInt(price);
+    if (parsed > BigInt(0)) return parsed;
+  }
+  return toAtomicUnits(X402_EVIDENCE_CHECK_PRICE);
+}
+
+/**
  * Convert a human-readable USDC string to atomic units (bigint).
  * e.g. "0.01" with 6 decimals → 10000n
  */

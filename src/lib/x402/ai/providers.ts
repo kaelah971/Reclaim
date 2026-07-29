@@ -499,6 +499,241 @@ export class DeepSeekProvider implements DisputeBriefAIProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Generic structured JSON generation (reusable across all schemas)
+// ---------------------------------------------------------------------------
+
+const DEEPSEEK_STRUCTURED_JSON_URL = "https://api.deepseek.com/v1/chat/completions";
+const OPENAI_STRUCTURED_JSON_URL = "https://api.openai.com/v1/chat/completions";
+const ANTHROPIC_STRUCTURED_JSON_URL = "https://api.anthropic.com/v1/messages";
+
+/**
+ * Sends a system + user prompt to the configured AI provider and returns
+ * the parsed JSON response. Handles retries, markdown stripping, and
+ * provider-specific API differences.
+ *
+ * Used by both dispute brief generation and evidence quality assessment.
+ */
+export async function generateStructuredJSON(
+  systemPrompt: string,
+  userMessage: string,
+  correlationId: string,
+): Promise<Record<string, unknown>> {
+  const providerId = (process.env.AI_PROVIDER || "").toLowerCase();
+  const apiKey = process.env.AI_API_KEY || "";
+  const model = process.env.AI_MODEL || "deepseek-v4-pro";
+  const maxRetries = 2;
+  const timeoutMs = 60000;
+
+  if (!apiKey) {
+    throw { code: "NO_API_KEY", message: "AI API key not configured", retryable: false };
+  }
+
+  if (providerId === "anthropic") {
+    return generateStructuredJSONAnthropic(systemPrompt, userMessage, apiKey, model, maxRetries, timeoutMs, correlationId);
+  }
+
+  // DeepSeek and OpenAI both use OpenAI-compatible chat completions endpoint
+  const baseUrl = providerId === "openai"
+    ? OPENAI_STRUCTURED_JSON_URL
+    : DEEPSEEK_STRUCTURED_JSON_URL;
+
+  return generateStructuredJSONOpenAICompat(
+    systemPrompt, userMessage, baseUrl, apiKey, model, providerId,
+    maxRetries, timeoutMs, correlationId,
+  );
+}
+
+async function generateStructuredJSONOpenAICompat(
+  systemPrompt: string,
+  userMessage: string,
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  providerId: string,
+  maxRetries: number,
+  timeoutMs: number,
+  correlationId: string,
+): Promise<Record<string, unknown>> {
+  let lastError: AIProviderError | undefined;
+
+  const jsonInstruction =
+    "\n\nReturn ONLY a valid JSON object. No markdown, no code fences, no explanation.";
+
+  // Only OpenAI supports response_format; DeepSeek ignores it but we keep the body clean
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage + jsonInstruction },
+    ],
+    temperature: 0.3,
+    max_tokens: 4000,
+  };
+
+  if (providerId === "openai") {
+    body.response_format = { type: "json_object" };
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const response = await fetch(baseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const status = response.status;
+        const rawBody = await response.text().catch(() => "");
+        const safeBody = rawBody
+          .replace(/sk-[a-zA-Z0-9]+/g, "[REDACTED]")
+          .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
+          .slice(0, 200);
+
+        const retryable = status === 429 || status === 503 || status >= 500;
+        lastError = { code: `${providerId.toUpperCase()}_HTTP_${status}`, message: safeBody, retryable, statusCode: status };
+        if (!retryable) break;
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+      const data = await response.json() as Record<string, unknown>;
+      const content = (data as { choices?: Array<{ message?: { content?: string } }> })
+        .choices?.[0]?.message?.content;
+
+      if (!content) {
+        lastError = { code: `${providerId.toUpperCase()}_EMPTY_RESPONSE`, message: "No content in response", retryable: false };
+        break;
+      }
+
+      // Strip markdown code fences
+      let jsonContent = content.trim();
+      if (jsonContent.startsWith("```")) {
+        jsonContent = jsonContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+      }
+
+      try {
+        return JSON.parse(jsonContent) as Record<string, unknown>;
+      } catch {
+        lastError = { code: `${providerId.toUpperCase()}_INVALID_JSON`, message: "Response is not valid JSON", retryable: true };
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      if ((err as { name?: string }).name === "AbortError") {
+        lastError = { code: `${providerId.toUpperCase()}_TIMEOUT`, message: `Timed out after ${timeoutMs}ms`, retryable: true };
+      } else if ((err as { code?: string }).code) {
+        throw err; // re-throw our own structured errors
+      } else {
+        lastError = { code: `${providerId.toUpperCase()}_NETWORK_ERROR`, message, retryable: true };
+      }
+      if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+
+  throw lastError ?? { code: "STRUCTURED_JSON_FAILED", message: "All retries exhausted", retryable: false };
+}
+
+async function generateStructuredJSONAnthropic(
+  systemPrompt: string,
+  userMessage: string,
+  apiKey: string,
+  model: string,
+  maxRetries: number,
+  timeoutMs: number,
+  _correlationId: string,
+): Promise<Record<string, unknown>> {
+  let lastError: AIProviderError | undefined;
+
+  const schemaInstruction =
+    "\n\nIMPORTANT: Return ONLY a valid JSON object. No markdown, no explanation, no code fences.";
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const response = await fetch(ANTHROPIC_STRUCTURED_JSON_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          system: systemPrompt,
+          max_tokens: 4000,
+          messages: [
+            { role: "user", content: userMessage + schemaInstruction },
+          ],
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const status = response.status;
+        const rawBody = await response.text().catch(() => "");
+        const safeBody = rawBody.slice(0, 200);
+        const retryable = status === 429 || status >= 500;
+        lastError = { code: `ANTHROPIC_HTTP_${status}`, message: safeBody, retryable, statusCode: status };
+        if (!retryable) break;
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+      const data = await response.json() as Record<string, unknown>;
+      const content = (data as { content?: Array<{ type: string; text: string }> })
+        .content?.find((c) => c.type === "text")?.text;
+
+      if (!content) {
+        lastError = { code: "ANTHROPIC_EMPTY_RESPONSE", message: "No content in response", retryable: false };
+        break;
+      }
+
+      let jsonContent = content.trim();
+      if (jsonContent.startsWith("```")) {
+        jsonContent = jsonContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+      }
+
+      try {
+        return JSON.parse(jsonContent) as Record<string, unknown>;
+      } catch {
+        lastError = { code: "ANTHROPIC_INVALID_JSON", message: "Response is not valid JSON", retryable: true };
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      if ((err as { name?: string }).name === "AbortError") {
+        lastError = { code: "ANTHROPIC_TIMEOUT", message: `Timed out after ${timeoutMs}ms`, retryable: true };
+      } else if ((err as { code?: string }).code) {
+        throw err;
+      } else {
+        lastError = { code: "ANTHROPIC_NETWORK_ERROR", message, retryable: true };
+      }
+      if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+
+  throw lastError ?? { code: "ANTHROPIC_UNKNOWN", message: "All retries exhausted", retryable: false };
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 

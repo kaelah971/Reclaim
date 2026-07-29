@@ -2,6 +2,7 @@ import { keccak256, stringToHex } from "viem";
 import { z } from "zod";
 
 export const SERVICE_IDENTIFIER = "reclaim-dispute-brief-v1";
+export const EVIDENCE_CHECK_SERVICE_IDENTIFIER = "evidence-quality-check";
 
 // ---------------------------------------------------------------------------
 // Strict canonical identity — Zod-validated before hashing
@@ -25,6 +26,26 @@ export const canonicalRequestIdentitySchema = z.object({
 });
 
 export type CanonicalRequestIdentity = z.infer<typeof canonicalRequestIdentitySchema>;
+
+// ---------------------------------------------------------------------------
+// Evidence-check canonical identity — separate schema for evidence quality checks
+// ---------------------------------------------------------------------------
+
+export const evidenceCheckIdentitySchema = z.object({
+  service: z.literal("evidence-quality-check"),
+  escrowChainId: z.string().optional(),
+  escrowContractAddress: addressSchema.optional(),
+  escrowPaymentId: z.string().min(1),
+  payer: addressSchema,
+  paymentNetwork: z.string().min(1),
+  asset: z.string().min(1),
+  payTo: addressSchema,
+  amount: z.string().min(1),
+  scheme: z.string().min(1),
+  evidenceInputHash: z.string().min(1),
+});
+
+export type EvidenceCheckIdentity = z.infer<typeof evidenceCheckIdentitySchema>;
 
 // ---------------------------------------------------------------------------
 // Legacy loose type (kept for backward compatibility in local-mode tests)
@@ -64,6 +85,37 @@ export function computeCanonicalRequestHash(identity: CanonicalRequestIdentity):
     identity.escrowPaymentId,
     identity.disputeReason,
     identity.requestedOutcome,
+    identity.payer.toLowerCase(),
+    identity.paymentNetwork,
+    identity.amount,
+    identity.payTo.toLowerCase(),
+    identity.scheme,
+    identity.asset.toLowerCase(),
+  );
+
+  return keccak256(stringToHex(parts.join(":")));
+}
+
+// ---------------------------------------------------------------------------
+// Compute evidence check request hash from a validated evidence-check identity
+// ---------------------------------------------------------------------------
+
+export function computeEvidenceCheckHash(identity: EvidenceCheckIdentity): string {
+  // Validate before hashing
+  evidenceCheckIdentitySchema.parse(identity);
+
+  const parts: string[] = [];
+
+  if (identity.escrowChainId && identity.escrowContractAddress) {
+    parts.push(
+      `escrow:${identity.escrowChainId}:${identity.escrowContractAddress.toLowerCase()}`,
+    );
+  }
+
+  parts.push(
+    identity.service,
+    identity.escrowPaymentId,
+    identity.evidenceInputHash,
     identity.payer.toLowerCase(),
     identity.paymentNetwork,
     identity.amount,

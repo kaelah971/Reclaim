@@ -38,6 +38,13 @@ export const X402_SPENDER_ADDRESS =
 export const X402_DISPUTE_BRIEF_PRICE =
   process.env.NEXT_PUBLIC_X402_DISPUTE_BRIEF_PRICE || "0.01";
 
+/**
+ * Price of the evidence quality check service in human-readable USDC.
+ * Exposed so the pay button can display it before the user pays.
+ */
+export const X402_EVIDENCE_CHECK_PRICE =
+  process.env.NEXT_PUBLIC_X402_EVIDENCE_CHECK_PRICE || "0.01";
+
 // ---------------------------------------------------------------------------
 // Facilitator (Track 2) mainnet configuration
 // ---------------------------------------------------------------------------

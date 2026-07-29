@@ -30,6 +30,7 @@ import {
   X402_USDC_ADDRESS,
   X402_PAY_TO_ADDRESS,
   getDisputeBriefPriceAtomic,
+  X402_EVIDENCE_CHECK_PRICE,
   validatePayToAddress,
 } from "./config";
 import type {
@@ -162,6 +163,50 @@ export function buildPaymentRequirements(): PaymentRequirementsLegacy {
  */
 export function buildPaymentRequiredHeader(): string {
   return Buffer.from(JSON.stringify(buildPaymentRequirements())).toString("base64");
+}
+
+// ---------------------------------------------------------------------------
+// Evidence-check-specific payment requirements
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the legacy PaymentRequirements object for the evidence quality check
+ * service. Uses the same settlement-mode-aware configuration as dispute-brief
+ * but advertises a different description and uses the evidence-check price.
+ */
+export function buildEvidenceCheckPaymentRequirements(): PaymentRequirementsLegacy {
+  const active = getActiveVerificationConfig();
+  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
+    ? "0.01"
+    : X402_EVIDENCE_CHECK_PRICE;
+
+  // Asset decimals: USDC always has 6 decimals on both networks.
+  const assetDecimals = 6;
+
+  return {
+    accepts: [
+      {
+        scheme: SUPPORTED_SCHEME,
+        price: `$${price}`,
+        network: active.network,
+        payTo: active.payToAddress,
+        asset: active.usdcAddress,
+        assetDecimals,
+        ...(X402_SETTLEMENT_MODE === "celo-facilitator"
+          ? { extra: { name: "USDC", version: "2" } }
+          : {}),
+      },
+    ],
+    description: "Reclaim evidence quality check",
+    mimeType: "application/json",
+  };
+}
+
+/**
+ * Build the full PAYMENT-REQUIRED header value for evidence quality check.
+ */
+export function buildEvidenceCheckHeader(): string {
+  return Buffer.from(JSON.stringify(buildEvidenceCheckPaymentRequirements())).toString("base64");
 }
 
 // ---------------------------------------------------------------------------

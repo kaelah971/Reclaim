@@ -8,6 +8,9 @@ import Select from "../ui/Select";
 import Button from "../ui/Button";
 import FileSelectionField from "./FileSelectionField";
 import Notice from "../ui/Notice";
+import EvidenceQualityResult, {
+  type EvidenceQualityResultData,
+} from "./EvidenceQualityResult";
 import { PAYMENT_TOKEN_SYMBOL } from "@/lib/web3/tokens";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -38,10 +41,14 @@ export function buildEvidenceManifest(data: EvidenceFormData): string {
 
 interface EvidenceFormProps {
   onSubmit?: (data: EvidenceFormData) => void;
-  onCheckStrength?: () => void;
+  onCheckStrength?: (data: EvidenceFormData) => void;
   submitted?: boolean;
   onReset?: () => void;
   className?: string;
+  checkStrengthState?: "idle" | "checking" | "paid" | "settled";
+  checkStrengthResult?: EvidenceQualityResultData | null;
+  onImproveEvidence?: () => void;
+  onCopyResultJson?: () => void;
 }
 
 export default function EvidenceForm({
@@ -50,6 +57,10 @@ export default function EvidenceForm({
   submitted = false,
   onReset,
   className = "",
+  checkStrengthState = "idle",
+  checkStrengthResult = null,
+  onImproveEvidence,
+  onCopyResultJson,
 }: EvidenceFormProps) {
   const [form, setForm] = useState<EvidenceFormData>({
     title: "",
@@ -288,14 +299,66 @@ export default function EvidenceForm({
 
       <div className="flex items-center gap-3">
         <Button onClick={handleSubmit}>Add evidence</Button>
-        <button
-          type="button"
-          className="text-[14px] font-medium text-gold hover:text-gold/80 transition-colors"
-          onClick={() => onCheckStrength?.()}
-        >
-          Check evidence strength — 0.01 {PAYMENT_TOKEN_SYMBOL}
-        </button>
+
+        {/* ---- Evidence strength check button (state-dependent) ---- */}
+        {checkStrengthState === "idle" && (
+          <button
+            type="button"
+            className="text-[14px] font-medium text-gold hover:text-gold/80 transition-colors"
+            onClick={() => onCheckStrength?.(form)}
+          >
+            Check evidence strength — 0.01 {PAYMENT_TOKEN_SYMBOL}
+          </button>
+        )}
+
+        {checkStrengthState === "checking" && (
+          <span className="inline-flex items-center gap-2 text-[14px] text-muted">
+            <svg
+              className="animate-spin h-4 w-4"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <circle
+                cx="8"
+                cy="8"
+                r="6"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeDasharray="30 10"
+              />
+            </svg>
+            Checking payment status…
+          </span>
+        )}
+
+        {checkStrengthState === "paid" && (
+          <button
+            type="button"
+            className="text-[14px] font-medium text-gold hover:text-gold/80 transition-colors"
+            onClick={() => onCheckStrength?.(form)}
+          >
+            Generate check — payment confirmed
+          </button>
+        )}
+
+        {checkStrengthState === "settled" && (
+          <span className="text-[14px] font-medium text-ink">
+            Evidence check complete
+          </span>
+        )}
       </div>
+
+      {/* ---- Evidence quality result (shown when settled) ---- */}
+      {checkStrengthState === "settled" && checkStrengthResult && (
+        <div className="mt-8 rounded-[--radius-card] border border-border bg-surface p-6 md:p-8">
+          <EvidenceQualityResult
+            result={checkStrengthResult}
+            onImproveEvidence={onImproveEvidence}
+            onCopyJson={onCopyResultJson}
+          />
+        </div>
+      )}
     </div>
   );
 }
