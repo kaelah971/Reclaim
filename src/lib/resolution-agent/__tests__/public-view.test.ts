@@ -123,7 +123,7 @@ describe("Public View", () => {
   it("excludes encrypted secret ciphertext", () => {
     const agent = makeTestAgent();
     const view = toResolutionAgentPublicView(agent);
-    const raw = view as Record<string, unknown>;
+    const raw = view as unknown as Record<string, unknown>;
     expect(raw).not.toHaveProperty("encryptedSecret");
     expect(raw).not.toHaveProperty("ciphertext");
     expect(raw).not.toHaveProperty("iv");
@@ -133,7 +133,7 @@ describe("Public View", () => {
   it("excludes internal lease/lock data", () => {
     const agent = makeTestAgent();
     const view = toResolutionAgentPublicView(agent);
-    const raw = view as Record<string, unknown>;
+    const raw = view as unknown as Record<string, unknown>;
     expect(raw).not.toHaveProperty("leaseToken");
     expect(raw).not.toHaveProperty("lockOwner");
     expect(raw).not.toHaveProperty("workerLock");
