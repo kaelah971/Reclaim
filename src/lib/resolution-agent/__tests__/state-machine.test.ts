@@ -36,10 +36,11 @@ function makeTestAgent(
     observation: null,
     caseWalletAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
     encryptedSecret: {
-      _brand: "EncryptedWalletSecret",
+      version: 1,
+      algorithm: "AES-256-GCM",
       ciphertext: "test-ciphertext",
       iv: "test-iv",
-      tag: "test-tag",
+      authenticationTag: "test-tag",
     },
     settledToolIds: [],
     currentRunningToolId: null,

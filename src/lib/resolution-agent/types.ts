@@ -131,14 +131,20 @@ export interface AgentExpiry {
 }
 
 // ---------------------------------------------------------------------------
-// Encrypted Wallet Secret (opaque — ciphertext only)
+// Encrypted Wallet Secret (versioned authenticated-encryption envelope)
 // ---------------------------------------------------------------------------
 
+export const ENCRYPTED_WALLET_SECRET_VERSION = 1 as const;
+
+export const ENCRYPTED_WALLET_SECRET_ALGORITHM = "AES-256-GCM" as const;
+
 export interface EncryptedWalletSecret {
-  _brand: "EncryptedWalletSecret";
+  version: typeof ENCRYPTED_WALLET_SECRET_VERSION;
+  algorithm: typeof ENCRYPTED_WALLET_SECRET_ALGORITHM;
   ciphertext: string;
   iv: string;
-  tag: string;
+  authenticationTag: string;
+  keyVersionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,10 +250,12 @@ export const agentStatusSchema = z.enum(AGENT_STATES);
 export const agentToolIdSchema = z.enum(AGENT_TOOL_IDS);
 
 export const encryptedWalletSecretSchema = z.object({
-  _brand: z.literal("EncryptedWalletSecret"),
+  version: z.literal(ENCRYPTED_WALLET_SECRET_VERSION),
+  algorithm: z.literal(ENCRYPTED_WALLET_SECRET_ALGORITHM),
   ciphertext: z.string().min(1),
   iv: z.string().min(1),
-  tag: z.string().min(1),
+  authenticationTag: z.string().min(1),
+  keyVersionId: z.string().optional(),
 });
 
 export const agentCaseIdentitySchema = z.object({

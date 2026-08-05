@@ -120,10 +120,11 @@ describe("Zod Schemas", () => {
 
   it("validates encrypted wallet secret", () => {
     const secret = {
-      _brand: "EncryptedWalletSecret" as const,
+      version: 1,
+      algorithm: "AES-256-GCM",
       ciphertext: "abc123",
       iv: "def456",
-      tag: "ghi789",
+      authenticationTag: "ghi789",
     };
     expect(encryptedWalletSecretSchema.parse(secret)).toEqual(secret);
   });

@@ -52,3 +52,42 @@ export class ToolNotAllowlistedError extends Error {
     this.name = "ToolNotAllowlistedError";
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wallet Encryption / Decryption Errors
+// ---------------------------------------------------------------------------
+
+export class WalletEncryptionConfigurationError extends Error {
+  constructor(message: string) {
+    super(`Wallet encryption configuration error: ${message}`);
+    this.name = "WalletEncryptionConfigurationError";
+  }
+}
+
+export class WalletEncryptionError extends Error {
+  constructor(message: string) {
+    super(`Wallet encryption error: ${message}`);
+    this.name = "WalletEncryptionError";
+  }
+}
+
+export class WalletDecryptionError extends Error {
+  constructor(message: string) {
+    super(`Wallet decryption error: ${message}`);
+    this.name = "WalletDecryptionError";
+  }
+}
+
+export class InvalidEncryptedWalletSecretError extends Error {
+  constructor(message: string) {
+    super(`Invalid encrypted wallet secret: ${message}`);
+    this.name = "InvalidEncryptedWalletSecretError";
+  }
+}
+
+export class InvalidCaseWalletPrivateKeyError extends Error {
+  constructor(message: string) {
+    super(`Invalid case wallet private key: ${message}`);
+    this.name = "InvalidCaseWalletPrivateKeyError";
+  }
+}

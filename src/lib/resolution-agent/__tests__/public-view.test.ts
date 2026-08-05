@@ -60,10 +60,11 @@ function makeTestAgent(
     },
     caseWalletAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
     encryptedSecret: {
-      _brand: "EncryptedWalletSecret",
+      version: 1,
+      algorithm: "AES-256-GCM",
       ciphertext: "encrypted-key-ciphertext-base64",
       iv: "encryption-iv-base64",
-      tag: "auth-tag-base64",
+      authenticationTag: "auth-tag-base64",
     },
     settledToolIds: ["evidence-quality-check"],
     currentRunningToolId: null,
@@ -127,7 +128,9 @@ describe("Public View", () => {
     expect(raw).not.toHaveProperty("encryptedSecret");
     expect(raw).not.toHaveProperty("ciphertext");
     expect(raw).not.toHaveProperty("iv");
-    expect(raw).not.toHaveProperty("tag");
+    expect(raw).not.toHaveProperty("authenticationTag");
+    expect(raw).not.toHaveProperty("version");
+    expect(raw).not.toHaveProperty("algorithm");
   });
 
   it("excludes internal lease/lock data", () => {
@@ -149,8 +152,8 @@ describe("Public View", () => {
     expect(json).not.toContain("encrypted-key-ciphertext-base64");
     expect(json).not.toContain("encryption-iv-base64");
     expect(json).not.toContain("auth-tag-base64");
-    expect(json).not.toContain("_brand");
-    expect(json).not.toContain("EncryptedWalletSecret");
+    expect(json).not.toContain("\"version\":");
+    expect(json).not.toContain("\"algorithm\":");
 
     // The wallet address IS in the public view
     expect(json).toContain("0xcccccccccccccccccccccccccccccccccccccccc");
@@ -173,7 +176,8 @@ describe("Public View", () => {
     expect(errorMessage).not.toContain(
       "encrypted-key-ciphertext-base64",
     );
-    expect(errorMessage).not.toContain("_brand");
+    expect(errorMessage).not.toContain("version");
+    expect(errorMessage).not.toContain("algorithm");
   });
 
   it("budget values are serialized as strings (bigint-safe)", () => {
@@ -201,7 +205,7 @@ describe("Public View", () => {
 
     // Convert to plain object and check all keys
     const keys = Object.keys(view);
-    const forbiddenKeys = ["encryptedSecret", "ciphertext", "iv", "tag", "_brand"];
+    const forbiddenKeys = ["encryptedSecret", "ciphertext", "iv", "authenticationTag", "version", "algorithm"];
     for (const key of forbiddenKeys) {
       expect(keys).not.toContain(key);
     }
