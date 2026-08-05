@@ -1,6 +1,6 @@
 # Reclaim — Pay with proof.
 
-Protected payments on Celo with clear terms, delivery evidence, fair review, and on-chain settlement.
+Protected payments on Celo with clear terms, delivery evidence, autonomous resolution preparation, fair human review, and on-chain settlement.
 
 ## Getting Started
 
@@ -404,3 +404,34 @@ correlation ID, and an optional transaction hash.
 - **x402 v2 paid service:** Dispute preparation brief API endpoint
   (`POST /api/x402/dispute-brief`) with HTTP 402 payment-gated flow,
   deterministic brief generation, and Permit2-style payment verification
+
+## Future Roadmap
+
+### Resolution Agent
+
+Reclaim is building an autonomous resolution agent that operates per-payment-case
+server-side. The agent reads the agreement and escrow state, examines evidence,
+creates a resolution plan, purchases allowlisted x402 services within a fixed
+per-case budget, requests missing evidence, and prepares a neutral reviewer-ready
+brief — all without browser interaction. It stops before final human judgment.
+The escrow model is unchanged: the client funds escrow, the worker contributes
+delivery and evidence, the agent prepares the case, people decide, and the
+contract settles.
+
+### Mutual Security Bonds (Future Scope)
+
+Reclaim may later support optional mutual security bonds for higher-risk
+agreements.
+
+In that future model:
+
+- the client deposits the protected payment amount;
+- one or both parties may also deposit a separate security bond;
+- bond rules are agreed before work starts;
+- bonds remain separate from the service payment;
+- bond distribution follows explicit contract rules after resolution;
+- the feature is optional and must not make ordinary workers fund every job.
+
+This is NOT part of the current hackathon MVP. Currently, the client funds the
+escrow payment and the worker contributes delivery and evidence — neither party
+deposits a security bond.
