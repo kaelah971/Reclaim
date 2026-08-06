@@ -31,59 +31,35 @@ import { generateLeaseToken } from "./lease";
 import { transitionAgentStatus } from "../state-machine";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
+  CASE_REFRESH_PRICE_ATOMIC,
 } from "../tools";
 import {
   AGENT_FACILITATOR_NETWORK,
   AGENT_MAINNET_USDC_ADDRESS,
   AGENT_PAY_TO_ADDRESS,
-  type AgentCaseIdentity,
 } from "../types";
 import {
   computeEvidenceCheckHash,
   EVIDENCE_CHECK_SERVICE_IDENTIFIER,
 } from "../../x402/requestHash";
 import type { EvidenceCheckIdentity } from "../../x402/requestHash";
+import {
+  computeCaseRefreshHashFromInput,
+} from "../../x402/caseRefreshRequestHash";
 
 // ---------------------------------------------------------------------------
 // Canonical tool configuration constants
 // ---------------------------------------------------------------------------
 
-const CANONICAL_TOOL_ID = "evidence-quality-check" as const;
 const CANONICAL_PRICE = EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC;
 const CANONICAL_NETWORK = AGENT_FACILITATOR_NETWORK;
 const CANONICAL_ASSET = AGENT_MAINNET_USDC_ADDRESS;
 const CANONICAL_PAY_TO = AGENT_PAY_TO_ADDRESS;
 
-// ---------------------------------------------------------------------------
-// Compute canonical request hash for recovery
-// ---------------------------------------------------------------------------
-
-function computeRecoveryRequestHash(
-  caseIdentity: AgentCaseIdentity,
-  payer: string,
-  caseVersionHash: string,
-  evidenceVersionHash: string,
-): string {
-  // Build a deterministic evidence input hash from the case/evidence version
-  // hashes. This ensures recovery creates the same request hash every time
-  // for the same agent state, even without the original observation data.
-  const evidenceInputHash = `${EVIDENCE_CHECK_SERVICE_IDENTIFIER}:${caseIdentity.escrowPaymentId}:${caseVersionHash}:${evidenceVersionHash}`;
-
-  const identity: EvidenceCheckIdentity = {
-    service: EVIDENCE_CHECK_SERVICE_IDENTIFIER,
-    escrowChainId: caseIdentity.escrowChainId,
-    escrowContractAddress: caseIdentity.escrowContractAddress,
-    escrowPaymentId: caseIdentity.escrowPaymentId,
-    payer: payer.toLowerCase(),
-    paymentNetwork: CANONICAL_NETWORK,
-    asset: CANONICAL_ASSET.toLowerCase(),
-    payTo: CANONICAL_PAY_TO.toLowerCase(),
-    amount: String(CANONICAL_PRICE),
-    scheme: "exact",
-    evidenceInputHash,
-  };
-  return computeEvidenceCheckHash(identity);
-}
+const CANONICAL_TOOL_IDS = [
+  "evidence-quality-check",
+  "case-refresh",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Recover a missing tool execution from durable state
@@ -93,6 +69,8 @@ function computeRecoveryRequestHash(
 // the missing execution using the persisted plan hashes and canonical config.
 //
 // The budget is ALREADY reserved — no additional budget change occurs.
+//
+// Supports both evidence-quality-check and case-refresh tool IDs.
 // ---------------------------------------------------------------------------
 
 async function recoverMissingExecution(params: {
@@ -101,25 +79,66 @@ async function recoverMissingExecution(params: {
 }): Promise<ActionExecutionResult | null> {
   const { agent, store } = params;
 
-  // Only recover for evidence-quality-check with currentRunningToolId set
-  if (agent.currentRunningToolId !== CANONICAL_TOOL_ID) return null;
+  // Only recover when currentRunningToolId is a known tool ID
+  const toolId = agent.currentRunningToolId;
+  if (!toolId || !(CANONICAL_TOOL_IDS as readonly string[]).includes(toolId)) {
+    return null;
+  }
 
   const plan = agent.plan;
   if (!plan) return null;
 
-  // Use the plan's hashes — these are the ones the tool was planned with
   const caseVersionHash = plan.caseVersionHash;
   const evidenceVersionHash = plan.evidenceVersionHash;
 
   if (!caseVersionHash || !evidenceVersionHash) return null;
 
+  // Resolve canonical config based on tool
+  const price = toolId === "case-refresh" ? CASE_REFRESH_PRICE_ATOMIC : CANONICAL_PRICE;
+
   // Reconstruct the deterministic request hash
-  const requestHash = computeRecoveryRequestHash(
-    agent.identity,
-    agent.caseWalletAddress,
-    caseVersionHash,
-    evidenceVersionHash,
-  );
+  let requestHash: string;
+  if (toolId === "case-refresh") {
+    const fallbackInput = {
+      escrowPaymentId: agent.identity.escrowPaymentId,
+      agreementLabel: "Case Refresh (recovery)",
+      deliverableSummary: `Recovery for ${agent.identity.escrowPaymentId}`,
+      deliveryFormat: "digital",
+      releaseRule: "standard",
+      evidenceExpectation: "Relevant evidence for dispute resolution",
+      escrowState: "unknown",
+      caseVersionHash,
+      evidenceVersionHash,
+      evidenceAvailability: "none",
+      evidenceCount: 0,
+      openEvidenceRequests: [],
+      fulfilledEvidenceRequests: [],
+    };
+    requestHash = computeCaseRefreshHashFromInput(
+      fallbackInput,
+      agent.caseWalletAddress,
+      CANONICAL_NETWORK,
+      CANONICAL_ASSET,
+      CANONICAL_PAY_TO,
+      String(price),
+    );
+  } else {
+    const evidenceInputHash = `${EVIDENCE_CHECK_SERVICE_IDENTIFIER}:${agent.identity.escrowPaymentId}:${caseVersionHash}:${evidenceVersionHash}`;
+    const identity: EvidenceCheckIdentity = {
+      service: EVIDENCE_CHECK_SERVICE_IDENTIFIER,
+      escrowChainId: agent.identity.escrowChainId,
+      escrowContractAddress: agent.identity.escrowContractAddress,
+      escrowPaymentId: agent.identity.escrowPaymentId,
+      payer: agent.caseWalletAddress.toLowerCase(),
+      paymentNetwork: CANONICAL_NETWORK,
+      asset: CANONICAL_ASSET.toLowerCase(),
+      payTo: CANONICAL_PAY_TO.toLowerCase(),
+      amount: String(CANONICAL_PRICE),
+      scheme: "exact",
+      evidenceInputHash,
+    };
+    requestHash = computeEvidenceCheckHash(identity);
+  }
 
   // Check if execution already exists
   const existing = await store.getToolExecutionByRequestHash(
@@ -128,7 +147,6 @@ async function recoverMissingExecution(params: {
   );
 
   if (existing) {
-    // Execution already exists — budget should already be reserved
     return { kind: "recovered", recoveryOutcome: "existing_execution_found" };
   }
 
@@ -136,19 +154,17 @@ async function recoverMissingExecution(params: {
   try {
     await store.createToolExecution(
       agent.id,
-      CANONICAL_TOOL_ID,
+      toolId,
       requestHash,
-      CANONICAL_PRICE,
+      price,
       CANONICAL_NETWORK,
       CANONICAL_ASSET,
       CANONICAL_PAY_TO,
     );
   } catch {
-    // Execution may have been created concurrently — idempotent
     return { kind: "recovered", recoveryOutcome: "execution_created_concurrently" };
   }
 
-  // Set execution state to "reserved" and bind hashes
   await store.updateToolExecution(agent.id, requestHash, {
     state: "reserved",
     case_version_hash: caseVersionHash,
@@ -161,7 +177,7 @@ async function recoverMissingExecution(params: {
     "Recovered missing tool execution after process interruption",
     null,
     null,
-    { toolId: CANONICAL_TOOL_ID, requestHash },
+    { toolId, requestHash },
   );
 
   return { kind: "recovered", recoveryOutcome: "execution_recovered" };

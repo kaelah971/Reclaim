@@ -242,7 +242,7 @@ describe("createProductionActionExecutor", () => {
     expect(deps.store.reserveToolExecutionAtomically).toHaveBeenCalled();
   });
 
-  it("case-refresh returns unsupported_action", async () => {
+  it("case-refresh is wired to adapter", async () => {
     const executor = createProductionActionExecutor(deps.dependencies);
     const agent = makeAgent();
     const plan = agent.plan!;
@@ -253,8 +253,9 @@ describe("createProductionActionExecutor", () => {
       agent, plan, action, leaseContext: lease, now: Date.now(),
     });
 
-    expect(result.kind).toBe("unsupported_action");
-    expect((result as any).actionKind).toBe("case-refresh");
+    // case-refresh is now supported — with proper deps it should not return unsupported_action
+    // Without a CaseRefreshGenerator, it will fail recoverable
+    expect(result.kind).not.toBe("unsupported_action");
   });
 
   it("Dispute Brief returns unsupported_action", async () => {
@@ -359,7 +360,7 @@ describe("createProductionRecoveryHandler", () => {
     expect(result.kind).toBe("recovered");
   });
 
-  it("case-refresh returns unsupported_action in recovery", async () => {
+  it("case-refresh is wired to recovery handler", async () => {
     const handler = createProductionRecoveryHandler(deps.dependencies);
     const agent = makeAgent();
     const execution = makeToolExecutionRow("case-refresh", "paid_pending_result");
@@ -369,8 +370,8 @@ describe("createProductionRecoveryHandler", () => {
       agent, execution, leaseContext: lease, now: Date.now(),
     });
 
-    expect(result.kind).toBe("unsupported_action");
-    expect((result as any).actionKind).toBe("case-refresh");
+    // case-refresh is now supported — with proper deps it should not return unsupported_action
+    expect(result.kind).not.toBe("unsupported_action");
   });
 
   it("Dispute Brief returns unsupported_action in recovery", async () => {

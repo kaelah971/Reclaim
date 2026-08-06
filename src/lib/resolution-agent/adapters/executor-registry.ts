@@ -16,9 +16,11 @@ import type {
   LeaseContext,
 } from "../worker/types";
 import type { ToolExecutionRow } from "../store/types";
-import type { EvidenceQualityCheckDependencies } from "./types";
+import type { EvidenceQualityCheckDependencies, CaseRefreshDependencies } from "./types";
 import { executeEvidenceQualityCheck } from "./evidence-quality-check";
 import { recoverPaidEvidenceQualityCheck } from "./recovery";
+import { executeCaseRefresh } from "./case-refresh";
+import { recoverPaidCaseRefresh } from "./case-refresh-recovery";
 
 // ---------------------------------------------------------------------------
 // Factory: createProductionActionExecutor
@@ -46,9 +48,6 @@ export function createProductionActionExecutor(
       const { agent, plan, action, leaseContext, now } = params;
 
       if (action.kind !== "run_tool") {
-        // Non-tool actions (create_evidence_request, wait_for_evidence,
-        // ready_for_human_review, budget_exhausted, waiting_for_human_approval,
-        // no_action) are skipped by the executor — the planner handles them.
         return { kind: "skipped", reason: `Non-tool action: ${action.kind}` };
       }
 
@@ -64,7 +63,17 @@ export function createProductionActionExecutor(
           });
         }
 
-        case "case-refresh":
+        case "case-refresh": {
+          return executeCaseRefresh({
+            agent,
+            plan,
+            action,
+            leaseContext,
+            now,
+            dependencies: dependencies as unknown as CaseRefreshDependencies,
+          });
+        }
+
         case "reclaim-dispute-brief-v1": {
           return {
             kind: "unsupported_action",
@@ -73,7 +82,6 @@ export function createProductionActionExecutor(
         }
 
         default: {
-          // Type-safe exhaustive check — this branch should be unreachable
           return {
             kind: "unsupported_action",
             actionKind: (action as { toolId: string }).toolId,
@@ -115,7 +123,16 @@ export function createProductionRecoveryHandler(
           });
         }
 
-        case "case-refresh":
+        case "case-refresh": {
+          return recoverPaidCaseRefresh({
+            agent,
+            execution,
+            leaseContext,
+            now,
+            dependencies: dependencies as unknown as CaseRefreshDependencies,
+          });
+        }
+
         case "reclaim-dispute-brief-v1": {
           return {
             kind: "unsupported_action",

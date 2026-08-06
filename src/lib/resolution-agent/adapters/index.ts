@@ -11,8 +11,16 @@ export {
 } from "./evidence-quality-check";
 
 export {
+  executeCaseRefresh,
+} from "./case-refresh";
+
+export {
   recoverPaidEvidenceQualityCheck,
 } from "./recovery";
+
+export {
+  recoverPaidCaseRefresh,
+} from "./case-refresh-recovery";
 
 export {
   createProductionActionExecutor,
@@ -25,17 +33,27 @@ export {
 } from "./evidence-quality-input";
 
 export {
+  buildCaseRefreshInput,
+} from "./case-refresh-input";
+
+export {
   normalizeEvidenceQualityResult,
 } from "./evidence-quality-result";
+
+export {
+  normalizeCaseRefreshResult,
+} from "./case-refresh-result";
 
 export type {
   ResolutionAgentX402SettlementClient,
   X402SettlementResult,
   EvidenceQualityCheckGenerator,
+  CaseRefreshGenerator,
   ResolutionAgentWalletDecryptor,
   ResolutionAgentPaymentStore,
   EvidenceQualityCheckStore,
   EvidenceQualityCheckDependencies,
+  CaseRefreshDependencies,
 } from "./types";
 
 export {

@@ -14,6 +14,8 @@ import type { ToolExecutionRow } from "../store/types";
 import type { EvidenceQualityGenerationResult } from "../../x402/ai/evidenceQualityGenerate";
 import type { FacilitatorSettlementReceipt } from "../../x402/settlementProvider";
 import type { ServiceInput } from "./evidence-quality-input";
+import type { CaseRefreshInput } from "../../x402/caseRefreshValidation";
+import type { CaseRefreshGenerationResult } from "../../x402/caseRefreshGenerate";
 
 // ---------------------------------------------------------------------------
 // X402 Settlement Client (injected)
@@ -38,6 +40,16 @@ export interface ResolutionAgentX402SettlementClient {
     asset: string;
     payTo: string;
   }): Promise<X402SettlementResult>;
+
+  settleCaseRefresh(params: {
+    payerAccount: Account;
+    requestHash: string;
+    serviceInput: CaseRefreshInput;
+    expectedPriceAtomic: bigint;
+    network: string;
+    asset: string;
+    payTo: string;
+  }): Promise<X402SettlementResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +60,16 @@ export interface EvidenceQualityCheckGenerator {
   generate(params: {
     serviceInput: ServiceInput;
   }): Promise<EvidenceQualityGenerationResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Case Refresh Generator (injected)
+// ---------------------------------------------------------------------------
+
+export interface CaseRefreshGenerator {
+  generate(params: {
+    serviceInput: CaseRefreshInput;
+  }): Promise<CaseRefreshGenerationResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +174,18 @@ export interface EvidenceQualityCheckDependencies {
   store: EvidenceQualityCheckStore;
   settlementClient: ResolutionAgentX402SettlementClient;
   generator: EvidenceQualityCheckGenerator;
+  walletDecryptor: ResolutionAgentWalletDecryptor;
+  paymentStore: ResolutionAgentPaymentStore;
+}
+
+// ---------------------------------------------------------------------------
+// Case Refresh Dependencies
+// ---------------------------------------------------------------------------
+
+export interface CaseRefreshDependencies {
+  store: EvidenceQualityCheckStore;
+  settlementClient: ResolutionAgentX402SettlementClient;
+  generator: CaseRefreshGenerator;
   walletDecryptor: ResolutionAgentWalletDecryptor;
   paymentStore: ResolutionAgentPaymentStore;
 }
