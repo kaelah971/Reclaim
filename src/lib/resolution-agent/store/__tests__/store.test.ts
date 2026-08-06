@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
+import type { SupabaseResolutionAgentStore } from "../supabase";
+import type { ResolutionAgent } from "../../types";
 
 // ---------------------------------------------------------------------------
 // Determine whether integration tests should run
@@ -164,7 +166,7 @@ new SupabaseResolutionAgentStore(mockClient as any);
 const integrationDescribe = hasSupabaseConfig ? describe : describe.skip;
 
 integrationDescribe("SupabaseResolutionAgentStore — integration", () => {
-  let store: any;
+  let store: SupabaseResolutionAgentStore;
 
   beforeAll(async () => {
     const { createClient } = await import("@supabase/supabase-js");
@@ -182,10 +184,12 @@ integrationDescribe("SupabaseResolutionAgentStore — integration", () => {
 
   const TEST_AGENT_ID = `test_store_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  function makeIntegrationTestAgent(overrides: Record<string, unknown> = {}) {
+  function makeIntegrationTestAgent(
+    overrides: Partial<ResolutionAgent> = {},
+  ) {
     return {
       id: TEST_AGENT_ID,
-      goal: "Prepare this payment case for fair human review.",
+      goal: "Prepare this payment case for fair human review." as const,
       status: "draft" as const,
       identity: {
         escrowPaymentId: `pay_int_${Date.now()}`,
@@ -222,7 +226,7 @@ integrationDescribe("SupabaseResolutionAgentStore — integration", () => {
       pausedAt: null as number | null,
       closedAt: null as number | null,
       ...overrides,
-    };
+    } as ResolutionAgent;
   }
 
   afterAll(async () => {
