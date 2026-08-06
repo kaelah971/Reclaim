@@ -331,13 +331,8 @@ async function createExecution(params: {
 
   // ---- Step 6a: Version check (concurrency guard) -------------------------
   const currentVersion = await store.getAgentVersion(agent.id);
-  // We use a simple approach: the version in store should match what we
-  // expect based on the agent we loaded. Since the store's updateAgent
-  // uses optimistic concurrency based on the version column and the
-  // agent object may not have a `version` property, we compare by
-  // attempting the update and handling concurrency errors there.
 
-  // ---- Step 6b: Reserve budget -------------------------------------------
+  // ---- Step 6b: Compute in-memory budget reservation ----------------------
   let updatedBudget;
   try {
     updatedBudget = reserveAmount(agent.budget, CANONICAL_PRICE);
@@ -348,69 +343,35 @@ async function createExecution(params: {
     };
   }
 
-  // ---- Step 6c: Create tool execution row ---------------------------------
-  try {
-    await store.createToolExecution(
-      agent.id,
-      CANONICAL_TOOL_ID,
-      requestHash,
-      CANONICAL_PRICE,
-      CANONICAL_NETWORK,
-      CANONICAL_ASSET,
-      CANONICAL_PAY_TO,
-    );
-  } catch {
-    // Execution already exists (race) — return recoverable
-    return {
-      kind: "failed_recoverable",
-      reason: "Tool execution already exists (race condition)",
-    };
-  }
-
-  // Update the execution to "reserved" state
-  await store.updateToolExecution(agent.id, requestHash, {
-    state: "reserved",
-    case_version_hash: plan.caseVersionHash,
-    evidence_version_hash: plan.evidenceVersionHash,
-  });
-
-  // ---- Step 6d: Persist reservation in agent ------------------------------
+  // ---- Step 6c: Atomically persist reservation + transition ---------------
+  // CRITICAL: budget reservation MUST be persisted BEFORE the execution row
+  // is created.  If the process crashes after the budget is reserved but
+  // before the execution exists, recovery can recompute the deterministic
+  // request hash from the agent's currentRunningToolId and case identity.
+  //
+  // A single updateAgent call atomically:
+  //   1. reserves 10000 atomic USDC (reservedAtomic += 10000)
+  //   2. sets currentRunningToolId = "evidence-quality-check"
+  //   3. transitions active → running_tool
+  //   4. validates version (optimistic concurrency)
+  //
+  // These four writes commit together or not at all via the version gate.
   const reservedAgent: ResolutionAgent = {
     ...agent,
     budget: updatedBudget,
+    currentRunningToolId: CANONICAL_TOOL_ID,
   };
-  let currentAgentVersion = currentVersion;
-  let currentAgent: ResolutionAgent;
-  try {
-    currentAgent = await store.updateAgent(reservedAgent, currentAgentVersion);
-    currentAgentVersion++;
-  } catch {
-    // Failed to persist budget reservation — mark execution as failed_unpaid
-    await store.updateToolExecution(agent.id, requestHash, {
-      state: "failed_unpaid",
-      failure_reason: "Failed to persist budget reservation (concurrency conflict)",
-    });
-    return {
-      kind: "failed_recoverable",
-      reason: "Failed to persist budget reservation",
-    };
-  }
+  const runningAgent = transitionAgentStatus(reservedAgent, "running_tool", { now });
 
-  // ---- Step 6e: Transition agent to running_tool --------------------------
-  const runningAgent = transitionAgentStatus(currentAgent, "running_tool", { now });
+  let currentAgentVersion = currentVersion;
   let agentAfterTransition: ResolutionAgent;
   try {
     agentAfterTransition = await store.updateAgent(runningAgent, currentAgentVersion);
     currentAgentVersion++;
   } catch {
-    // Transition failed — mark execution as failed_recoverable
-    await store.updateToolExecution(agent.id, requestHash, {
-      state: "failed_recoverable",
-      failure_reason: "Failed to transition agent to running_tool",
-    });
     return {
       kind: "failed_recoverable",
-      reason: "Failed to transition agent to running_tool",
+      reason: "Failed to reserve budget — agent version conflict or status change",
     };
   }
 
@@ -422,6 +383,37 @@ async function createExecution(params: {
     "running_tool",
     { toolId: CANONICAL_TOOL_ID, requestHash },
   );
+
+  // ---- Step 6d: Create durable execution row ------------------------------
+  // The budget is already reserved.  If execution creation fails (unique
+  // constraint from a race), release the reservation and revert.
+  try {
+    await store.createToolExecution(
+      agent.id,
+      CANONICAL_TOOL_ID,
+      requestHash,
+      CANONICAL_PRICE,
+      CANONICAL_NETWORK,
+      CANONICAL_ASSET,
+      CANONICAL_PAY_TO,
+    );
+  } catch {
+    await releaseReservationAndRevert(
+      store, agent, agentAfterTransition, requestHash, now, currentAgentVersion,
+      "Tool execution creation failed (unique constraint race)",
+    );
+    return {
+      kind: "failed_recoverable",
+      reason: "Tool execution creation failed (unique constraint race)",
+    };
+  }
+
+  // Update execution to "reserved" — setup is complete
+  await store.updateToolExecution(agent.id, requestHash, {
+    state: "reserved",
+    case_version_hash: plan.caseVersionHash,
+    evidence_version_hash: plan.evidenceVersionHash,
+  });
 
   // ---- Step 6f: Decrypt case wallet ---------------------------------------
   let account;
@@ -608,7 +600,40 @@ async function createExecution(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: release reservation and mark execution as failed
+// Helper: release reservation and revert agent to active
+// Used when execution creation fails uniquely after budget was reserved.
+// ---------------------------------------------------------------------------
+
+async function releaseReservationAndRevert(
+  store: EvidenceQualityCheckDependencies["store"],
+  originalAgent: ResolutionAgent,
+  runningAgent: ResolutionAgent,
+  requestHash: string,
+  now: number,
+  currentVersion: number,
+  reason: string,
+): Promise<void> {
+  const releasedAgent: ResolutionAgent = {
+    ...runningAgent,
+    budget: releaseReservation(runningAgent.budget, CANONICAL_PRICE),
+    currentRunningToolId: null,
+  };
+  const activeAgent = transitionAgentStatus(releasedAgent, "active", { now });
+
+  await store.updateAgent(activeAgent, currentVersion).catch(() => { /* best effort */ });
+
+  await store.appendEvent(
+    originalAgent.id,
+    "tool_execution_failed",
+    reason,
+    "running_tool",
+    "active",
+    { toolId: CANONICAL_TOOL_ID, requestHash },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: release reservation and mark execution as failed_unpaid
 // ---------------------------------------------------------------------------
 
 async function releaseReservationAndMarkFailed(
@@ -620,21 +645,14 @@ async function releaseReservationAndMarkFailed(
   currentVersion: number,
   reason: string,
 ): Promise<void> {
-  // Release the reserved budget
   const releasedAgent: ResolutionAgent = {
     ...runningAgent,
     budget: releaseReservation(runningAgent.budget, CANONICAL_PRICE),
+    currentRunningToolId: null,
   };
-
-  // Transition back to active
   const activeAgent = transitionAgentStatus(releasedAgent, "active", { now });
 
-  // Persist the agent update
-  try {
-    await store.updateAgent(activeAgent, currentVersion);
-  } catch {
-    // Best effort
-  }
+  await store.updateAgent(activeAgent, currentVersion).catch(() => { /* best effort */ });
 
   // Mark execution as failed_unpaid
   await store.updateToolExecution(originalAgent.id, requestHash, {
