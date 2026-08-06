@@ -299,6 +299,32 @@ export class SupabaseResolutionAgentStore {
   }
 
   // -------------------------------------------------------------------------
+  // Tool Executions — list by agent
+  // -------------------------------------------------------------------------
+
+  /**
+   * Lists all tool executions for a given agent, ordered by creation date
+   * (most recent first). Used by the observation service to build the prior
+   * context of settled tool results.
+   */
+  async listToolExecutions(agentId: string): Promise<ToolExecutionRow[]> {
+    const { data, error } = await this.client
+      .from(TABLE_TOOL_EXECUTIONS)
+      .select("*")
+      .eq("agent_id", agentId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error(
+        `[SupabaseResolutionAgentStore] listToolExecutions failed: ${error.message}`,
+      );
+      return [];
+    }
+
+    return (data as ToolExecutionRow[]) ?? [];
+  }
+
+  // -------------------------------------------------------------------------
   // Tool Executions — update
   // -------------------------------------------------------------------------
 
