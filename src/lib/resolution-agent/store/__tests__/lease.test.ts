@@ -27,24 +27,58 @@ function makeRow(overrides: Record<string, unknown> = {}) {
 
 type MockClient = Record<string, unknown>;
 
+interface FilterRecord {
+  op: string;
+  column: string;
+  value: unknown;
+}
+
+interface FilteringMock {
+  filters: FilterRecord[];
+}
+
 /**
  * Creates a mock Supabase client where the SELECT returns `row` and
  * the UPDATE succeeds, returning a row with our new owner token.
- * The client records which filters were applied so tests can inspect them.
+ * The client records full filters (op + column + value) so tests
+ * can verify correct operator semantics.
+ *
+ * The handler enforces:
+ *   - .is() must NOT receive a non-null string for lease_owner
+ *   - .eq() must NOT receive null for lease_owner
+ * This prevents the original .is(lease_owner, nonNullToken) bug.
  */
 function mockAcquireSuccess(row: Record<string, unknown>): {
   client: MockClient;
-  filters: string[];
+  filtering: FilteringMock;
 } {
-  const filters: string[] = [];
+  const filters: FilterRecord[] = [];
 
-  function makeUpdateChain() {
+  function makeUpdateChain(): Record<string, unknown> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler: any = {
-      eq: (_col: unknown, _val: unknown) => { filters.push(`eq:${_col}`); return handler; },
-      is: (_col: unknown, _val: unknown) => { filters.push(`is:${_col}`); return handler; },
-      in: (_col: unknown, _vals: unknown) => { filters.push(`in:${_col}`); return handler; },
-      lte: (_col: unknown, _val: unknown) => { filters.push(`lte:${_col}`); return handler; },
+      eq: (col: string, val: unknown) => {
+        if (col === "lease_owner" && val === null) {
+          throw new Error("BUG: .eq('lease_owner', null) — use .is('lease_owner', null) for IS NULL");
+        }
+        filters.push({ op: "eq", column: col, value: val });
+        return handler;
+      },
+      is: (col: string, val: unknown) => {
+        if (col === "lease_owner" && typeof val === "string") {
+          throw new Error("BUG: .is('lease_owner', nonNullString) — use .eq('lease_owner', value) for equality");
+        }
+        filters.push({ op: "is", column: col, value: val });
+        return handler;
+      },
+      in: (col: string, vals: unknown) => {
+        filters.push({ op: "in", column: col, value: vals });
+        return handler;
+      },
+      lte: (col: string, val: unknown) => {
+        filters.push({ op: "lte", column: col, value: val });
+        return handler;
+      },
       select: () => handler,
       maybeSingle: () => Promise.resolve({
         data: { lease_owner: OWNER_TOKEN, lease_expires_at: EXPIRES_AT, status: "active" },
@@ -63,7 +97,7 @@ function mockAcquireSuccess(row: Record<string, unknown>): {
         update: () => makeUpdateChain(),
       }),
     },
-    filters,
+    filtering: { filters },
   };
 }
 
@@ -106,25 +140,45 @@ function mockAcquireFastFail(row: Record<string, unknown>): MockClient {
 describe("tryAcquireAgentLease — null semantics", () => {
   it("unleased acquisition includes IS NULL filter", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const { client, filters } = mockAcquireSuccess(makeRow());
+    const { client, filtering } = mockAcquireSuccess(makeRow());
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const store = new SupabaseResolutionAgentStore(client as any);
     await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
 
-    const hasIsNull = filters.some((f) => f === "is:lease_owner");
-    expect(hasIsNull).toBe(true);
+    const isNullFilter = filtering.filters.find(
+      (f) => f.column === "lease_owner",
+    );
+    expect(isNullFilter).toBeDefined();
+    expect(isNullFilter!.op).toBe("is");
+    expect(isNullFilter!.value).toBeNull();
+  });
+
+  it("unleased acquisition NEVER uses .eq for null lease_owner", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const { client, filtering } = mockAcquireSuccess(makeRow());
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const store = new SupabaseResolutionAgentStore(client as any);
+    await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
+
+    const eqOnLeaseOwner = filtering.filters.filter(
+      (f) => f.column === "lease_owner" && f.op === "eq",
+    );
+    expect(eqOnLeaseOwner).toHaveLength(0);
   });
 
   it("unleased acquisition includes status IN filter", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const { client, filters } = mockAcquireSuccess(makeRow());
+    const { client, filtering } = mockAcquireSuccess(makeRow());
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const store = new SupabaseResolutionAgentStore(client as any);
     await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
 
-    const hasStatusIn = filters.some((f) => f === "in:status");
+    const hasStatusIn = filtering.filters.some(
+      (f) => f.op === "in" && f.column === "status",
+    );
     expect(hasStatusIn).toBe(true);
   });
 
@@ -163,8 +217,6 @@ describe("tryAcquireAgentLease — null semantics", () => {
 describe("tryAcquireAgentLease — renewal race", () => {
   it("stale acquisition of expired lease fails after concurrent renewal (0 rows)", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    // Simulate: row was expired when read, but renewal extended it.
-    // The UPDATE with .lte("lease_expires_at", nowISO) must match 0 rows.
     const client = mockAcquireFail(makeRow({
       lease_owner: "original-owner",
       lease_expires_at: new Date(NOW - 5000).toISOString(),
@@ -177,9 +229,9 @@ describe("tryAcquireAgentLease — renewal race", () => {
     expect(result).toBeNull();
   });
 
-  it("expired lease acquisition includes lte filter on lease_expires_at", async () => {
+  it("expired lease acquisition uses .eq NOT .is for non-null owner", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const { client, filters } = mockAcquireSuccess(makeRow({
+    const { client, filtering } = mockAcquireSuccess(makeRow({
       lease_owner: "old-owner",
       lease_expires_at: new Date(NOW - 10000).toISOString(),
     }));
@@ -188,7 +240,45 @@ describe("tryAcquireAgentLease — renewal race", () => {
     const store = new SupabaseResolutionAgentStore(client as any);
     await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
 
-    const hasLte = filters.some((f) => f === "lte:lease_expires_at");
+    const ownerFilter = filtering.filters.find(
+      (f) => f.column === "lease_owner",
+    );
+    expect(ownerFilter).toBeDefined();
+    expect(ownerFilter!.op).toBe("eq");
+    expect(ownerFilter!.value).toBe("old-owner");
+  });
+
+  it("expired lease acquisition NEVER uses .is() for non-null owner", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const { client, filtering } = mockAcquireSuccess(makeRow({
+      lease_owner: "old-owner",
+      lease_expires_at: new Date(NOW - 10000).toISOString(),
+    }));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const store = new SupabaseResolutionAgentStore(client as any);
+    await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
+
+    const isOnOwner = filtering.filters.filter(
+      (f) => f.column === "lease_owner" && f.op === "is",
+    );
+    expect(isOnOwner).toHaveLength(0);
+  });
+
+  it("expired lease acquisition includes lte filter on lease_expires_at", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const { client, filtering } = mockAcquireSuccess(makeRow({
+      lease_owner: "old-owner",
+      lease_expires_at: new Date(NOW - 10000).toISOString(),
+    }));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const store = new SupabaseResolutionAgentStore(client as any);
+    await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
+
+    const hasLte = filtering.filters.some(
+      (f) => f.op === "lte" && f.column === "lease_expires_at",
+    );
     expect(hasLte).toBe(true);
   });
 });
@@ -200,13 +290,16 @@ describe("tryAcquireAgentLease — renewal race", () => {
 describe("tryAcquireAgentLease — status race", () => {
   it("update includes status IN predicate", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const { client, filters } = mockAcquireSuccess(makeRow());
+    const { client, filtering } = mockAcquireSuccess(makeRow());
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const store = new SupabaseResolutionAgentStore(client as any);
     await store.tryAcquireAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
 
-    expect(filters).toContain("in:status");
+    const hasStatusIn = filtering.filters.some(
+      (f) => f.op === "in" && f.column === "status",
+    );
+    expect(hasStatusIn).toBe(true);
   });
 
   it("status changed to paused → 0 rows, returns null", async () => {
@@ -340,11 +433,20 @@ describe("tryAcquireAgentLease — return validation", () => {
 describe("renewAgentLease — atomicity", () => {
   it("renewal includes status IN predicate", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const filters: string[] = [];
+    const filters: FilterRecord[] = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler: any = {
-      eq: (col: string) => { filters.push(`eq:${col}`); return handler; },
-      in: (col: string) => { filters.push(`in:${col}`); return handler; },
+      eq: (col: string, val: unknown) => {
+        if (col === "lease_owner" && val === null) {
+          throw new Error("BUG: .eq('lease_owner', null)");
+        }
+        filters.push({ op: "eq", column: col, value: val });
+        return handler;
+      },
+      in: (col: string, vals: unknown) => {
+        filters.push({ op: "in", column: col, value: vals });
+        return handler;
+      },
     };
 
     const client = { from: () => ({ update: () => handler }) };
@@ -352,9 +454,45 @@ describe("renewAgentLease — atomicity", () => {
     const store = new SupabaseResolutionAgentStore(client as any);
     await store.renewAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
 
-    expect(filters).toContain("eq:agent_id");
-    expect(filters).toContain("eq:lease_owner");
-    expect(filters).toContain("in:status");
+    expect(filters.some((f) => f.op === "eq" && f.column === "agent_id")).toBe(true);
+    expect(filters.some((f) => f.op === "eq" && f.column === "lease_owner")).toBe(true);
+    expect(filters.some((f) => f.op === "in" && f.column === "status")).toBe(true);
+  });
+
+  it("renewal uses .eq NOT .is for non-null ownerToken", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const filters: FilterRecord[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handler: any = {
+      eq: (col: string, val: unknown) => {
+        filters.push({ op: "eq", column: col, value: val });
+        return handler;
+      },
+      is: (col: string, val: unknown) => {
+        if (col === "lease_owner" && typeof val === "string") {
+          throw new Error("BUG: .is('lease_owner', nonNullString) in renewal");
+        }
+        filters.push({ op: "is", column: col, value: val });
+        return handler;
+      },
+      in: (col: string) => {
+        filters.push({ op: "in", column: col, value: undefined });
+        return handler;
+      },
+    };
+
+    const client = { from: () => ({ update: () => handler }) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const store = new SupabaseResolutionAgentStore(client as any);
+    await store.renewAgentLease(AGENT_ID, OWNER_TOKEN, NOW);
+
+    // Renewal must use .eq for the non-null ownerToken
+    expect(filters.some((f) => f.op === "eq" && f.column === "lease_owner")).toBe(true);
+    // Must NOT use .is for lease_owner
+    const isOnLeaseOwner = filters.filter(
+      (f) => f.column === "lease_owner" && f.op === "is",
+    );
+    expect(isOnLeaseOwner).toHaveLength(0);
   });
 });
 

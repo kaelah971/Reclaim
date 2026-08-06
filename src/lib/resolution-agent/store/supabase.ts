@@ -591,8 +591,15 @@ export class SupabaseResolutionAgentStore {
         updated_at: new Date().toISOString(),
       })
       .eq("agent_id", agentId)
-      .in("status", runnableStatuses)
-      .is("lease_owner", existingOwner ?? null);
+      .in("status", runnableStatuses);
+
+    // PostgreSQL IS NULL vs equality: .is() must only be used for null.
+    // Non-null lease owner tokens require .eq() for exact string match.
+    if (existingOwner === null) {
+      updateQuery = updateQuery.is("lease_owner", null);
+    } else {
+      updateQuery = updateQuery.eq("lease_owner", existingOwner);
+    }
 
     // If the previous lease existed (even if expired), the database
     // predicate must also require that lease_expires_at has not
