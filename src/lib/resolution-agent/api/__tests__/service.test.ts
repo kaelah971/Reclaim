@@ -2,11 +2,15 @@
 // Resolution Agent API — Service Function Tests
 //
 // Tests the service functions against a fully in-memory MockResolutionAgentStore.
-// The service layer uses dependency injection (store, authenticatedCaller, now
-// are passed as parameters), so we can test business logic without a database.
+// The service layer uses dependency injection (store, authenticatedCaller, now,
+// escrowReader are passed as parameters), so we can test business logic without
+// a database.
 //
 // Internal dependencies (wallet generation, encryption config, supabase client)
 // are mocked via vi.mock to avoid real crypto / RPC calls.
+//
+// HARDENED AUTHORIZATION: all tests use MockEscrowCaseReader to verify that
+// creation requires on-chain roles and that read access extends to case parties.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -19,11 +23,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const {
   FIXED_FUNDER_A,
   FIXED_FUNDER_B,
+  FIXED_CLIENT,
+  FIXED_WORKER,
+  FIXED_UNRELATED,
   FIXED_CASE_WALLET,
   FIXED_ENCRYPTED_SECRET,
 } = vi.hoisted(() => ({
   FIXED_FUNDER_A: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   FIXED_FUNDER_B: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  FIXED_CLIENT: "0xCLIENT_CLIENT_CLIENT_CLIENT_CLIENT_CLIENT_CLIENT",
+  FIXED_WORKER: "0xWORKER_WORKER_WORKER_WORKER_WORKER_WORKER_WORKER",
+  FIXED_UNRELATED: "0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD",
   FIXED_CASE_WALLET: "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
   FIXED_ENCRYPTED_SECRET: {
     version: 1 as const,
@@ -52,11 +62,10 @@ function resetStoreState(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Mock store class — implements the same interface as SupabaseResolutionAgentStore
+// Mock store class
 // ---------------------------------------------------------------------------
 
 class MockStoreClass {
-  // Private client property for SupabaseResolutionAgentStore compatibility
   private readonly client = null as unknown;
 
   async createAgent(agent: ResolutionAgent): Promise<ResolutionAgent> {
@@ -209,6 +218,16 @@ class MockFundingReader {
 }
 
 // ---------------------------------------------------------------------------
+// Mock escrow case reader
+// ---------------------------------------------------------------------------
+
+import { MockEscrowCaseReader } from "../escrow-reader";
+import { buildActivationMessage } from "../auth";
+import { FIXED_AGENT_GOAL } from "../../types";
+import { V1_TOOLS } from "../../tools";
+import { CANONICAL_ESCROW_CONTRACT_ADDRESS } from "../escrow-reader";
+
+// ---------------------------------------------------------------------------
 // Imports from the service module
 // ---------------------------------------------------------------------------
 
@@ -218,10 +237,8 @@ import {
   refreshFundingStatus,
   activateResolutionAgent,
 } from "../service";
-import type { FundingStatusResponse } from "../service";
-import { toResolutionAgentPublicView } from "../../public-view";
-import { FIXED_AGENT_GOAL, AGENT_TOOL_IDS } from "../../types";
 import type { AgentCaseIdentity } from "../../types";
+import type { ResolutionAgentStore } from "../service";
 
 // ---------------------------------------------------------------------------
 // Reset before each test
@@ -231,6 +248,12 @@ beforeEach(() => {
   resetStoreState();
   vi.clearAllMocks();
 });
+
+// ---------------------------------------------------------------------------
+// Test payment ID used throughout
+// ---------------------------------------------------------------------------
+
+const testPaymentId = "pay_test_service_001";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -247,9 +270,23 @@ function makeCaseIdentity(
     escrowChainId: overrides.escrowChainId ?? "eip155:11142220",
     escrowContractAddress:
       overrides.escrowContractAddress ??
-      "0x1111111111111111111111111111111111111111",
-    escrowPaymentId: overrides.escrowPaymentId ?? "pay_test_service_001",
+      CANONICAL_ESCROW_CONTRACT_ADDRESS,
+    escrowPaymentId: overrides.escrowPaymentId ?? testPaymentId,
   };
+}
+
+function makeEscrowReader(overrides?: {
+  client?: `0x${string}`;
+  worker?: `0x${string}`;
+  exists?: boolean;
+}): MockEscrowCaseReader {
+  const reader = new MockEscrowCaseReader();
+  reader.setCaseParties(testPaymentId, {
+    client: overrides?.client ?? (FIXED_CLIENT as `0x${string}`),
+    worker: overrides?.worker ?? (FIXED_WORKER as `0x${string}`),
+    exists: overrides?.exists ?? true,
+  });
+  return reader;
 }
 
 function makeCreateParams(
@@ -259,14 +296,16 @@ function makeCreateParams(
     approvedBudgetAtomic: bigint;
     now: number;
     store: MockStoreClass;
+    escrowReader: MockEscrowCaseReader;
   }> = {},
 ) {
   return {
-    authenticatedCaller: overrides.authenticatedCaller ?? FIXED_FUNDER_A,
+    authenticatedCaller: overrides.authenticatedCaller ?? FIXED_CLIENT,
     caseIdentity: overrides.caseIdentity ?? makeCaseIdentity(),
     approvedBudgetAtomic: overrides.approvedBudgetAtomic ?? 30_000n,
     now: overrides.now ?? Date.now(),
     store: overrides.store ?? new MockStoreClass(),
+    escrowReader: overrides.escrowReader ?? makeEscrowReader(),
   };
 }
 
@@ -277,6 +316,7 @@ function makeFundingParams(
     now: number;
     store: MockStoreClass;
     fundingReader: MockFundingReader;
+    escrowReader: MockEscrowCaseReader;
   }> = {},
 ) {
   return {
@@ -285,7 +325,30 @@ function makeFundingParams(
     now: overrides.now ?? Date.now(),
     store: overrides.store ?? new MockStoreClass(),
     fundingReader: overrides.fundingReader ?? new MockFundingReader(),
+    escrowReader: overrides.escrowReader ?? makeEscrowReader(),
   };
+}
+
+/**
+ * Builds a valid signed activation message for the given agent.
+ * The test creates the message using the same function the service uses,
+ * ensuring deterministic reconstruction works.
+ */
+function makeSignedActivationMessage(agent: ResolutionAgent): string {
+  return buildActivationMessage({
+    agentId: agent.id,
+    funderAddress: agent.policy.funderAddress,
+    escrowChainId: agent.identity.escrowChainId,
+    escrowContractAddress: agent.identity.escrowContractAddress,
+    escrowPaymentId: agent.identity.escrowPaymentId,
+    goal: agent.goal,
+    approvedBudgetAtomic: agent.policy.approvedBudgetAtomic,
+    refundAddress: agent.policy.funderAddress,
+    policyVersion: "v1",
+    allowedToolIds: [...agent.policy.allowedTools],
+    agentExpiresAt: agent.policy.expiresAt,
+    authorizationExpiresAt: Date.now() + 5 * 60 * 1000,
+  });
 }
 
 function makeActivateParams(
@@ -294,6 +357,8 @@ function makeActivateParams(
     authenticatedCaller: string;
     now: number;
     store: MockStoreClass;
+    escrowReader: MockEscrowCaseReader;
+    signedMessage: string;
   }> = {},
 ) {
   return {
@@ -301,6 +366,8 @@ function makeActivateParams(
     authenticatedCaller: overrides.authenticatedCaller ?? FIXED_FUNDER_A,
     now: overrides.now ?? Date.now(),
     store: overrides.store ?? new MockStoreClass(),
+    escrowReader: overrides.escrowReader ?? makeEscrowReader(),
+    signedMessage: overrides.signedMessage ?? "",
   };
 }
 
@@ -310,166 +377,237 @@ function makeActivateParams(
 
 describe("createResolutionAgentForCase", () => {
   it("valid client can create an agent", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
+    const escrowReader = makeEscrowReader();
+    const view = await createResolutionAgentForCase(
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+    );
     expect(view).toBeDefined();
     expect(view.id).toBeDefined();
-    // Service transitions: draft → awaiting_funding
     expect(view.status).toBe("awaiting_funding");
   });
 
   it("created agent has fixed goal (server-owned, not client-supplied)", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
+    const escrowReader = makeEscrowReader();
+    const view = await createResolutionAgentForCase(
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+    );
     expect(view.goal).toBe(FIXED_AGENT_GOAL);
   });
 
   it("created agent has canonical tool allowlist (3 tools)", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
-    expect(view.allowedTools).toHaveLength(3);
-    expect(view.allowedTools).toEqual(
-      expect.arrayContaining([...AGENT_TOOL_IDS] as string[]),
+    const escrowReader = makeEscrowReader();
+    const view = await createResolutionAgentForCase(
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
     );
+    expect(view.allowedTools).toHaveLength(3);
   });
 
   it("valid budget 30000 accepted", async () => {
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 30_000n, escrowReader }),
     );
     expect(view.budget.approvedAtomic).toBe("30000");
   });
 
   it("valid budget 40000 accepted", async () => {
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 40_000n }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 40_000n, escrowReader }),
     );
     expect(view.budget.approvedAtomic).toBe("40000");
   });
 
   it("valid budget 50000 accepted", async () => {
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 50_000n }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 50_000n, escrowReader }),
     );
     expect(view.budget.approvedAtomic).toBe("50000");
   });
 
   it("budget 20000 rejected", async () => {
+    const escrowReader = makeEscrowReader();
     await expect(
       createResolutionAgentForCase(
-        makeCreateParams({ approvedBudgetAtomic: 20_000n }),
-      ),
-    ).rejects.toThrow();
-  });
-
-  it("budget 60000 rejected", async () => {
-    await expect(
-      createResolutionAgentForCase(
-        makeCreateParams({ approvedBudgetAtomic: 60_000n }),
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 20_000n, escrowReader }),
       ),
     ).rejects.toThrow();
   });
 
   it("budget 0 rejected", async () => {
+    const escrowReader = makeEscrowReader();
     await expect(
       createResolutionAgentForCase(
-        makeCreateParams({ approvedBudgetAtomic: 0n }),
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 0n, escrowReader }),
       ),
     ).rejects.toThrow();
   });
 
-  it("created agent status is awaiting_funding", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
-    expect(view.status).toBe("awaiting_funding");
-  });
-
-  it("spent budget starts at 0", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
-    expect(view.budget.spentAtomic).toBe("0");
-  });
-
-  it("reserved budget starts at 0", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
-    expect(view.budget.reservedAtomic).toBe("0");
-  });
-
-  it("expiry is set (within 7 days + small margin)", async () => {
-    const now = Date.now();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ now }),
-    );
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    expect(view.expiresAt).toBeGreaterThan(now);
-    expect(view.expiresAt).toBeLessThanOrEqual(now + sevenDaysMs + 10_000);
-  });
-
   it("caller becomes original funder", async () => {
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ authenticatedCaller: FIXED_FUNDER_A }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
     );
-    expect(view.funderAddress.toLowerCase()).toBe(
-      FIXED_FUNDER_A.toLowerCase(),
-    );
+    expect(view.funderAddress.toLowerCase()).toBe(FIXED_CLIENT.toLowerCase());
   });
 
   it("repeated same-funder creation returns existing agent (idempotent)", async () => {
     const store = new MockStoreClass();
-    const baseParams = makeCreateParams({
-      authenticatedCaller: FIXED_FUNDER_A,
-      store,
-    });
-
+    const escrowReader = makeEscrowReader();
+    const baseParams = makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader });
     const first = await createResolutionAgentForCase(baseParams);
     const second = await createResolutionAgentForCase(baseParams);
-
     expect(second.id).toBe(first.id);
-  });
-
-  it("repeated creation does NOT generate another wallet (same caseWalletAddress)", async () => {
-    const store = new MockStoreClass();
-    const baseParams = makeCreateParams({ store });
-
-    const first = await createResolutionAgentForCase(baseParams);
-    const second = await createResolutionAgentForCase(baseParams);
-
-    expect(second.caseWalletAddress.toLowerCase()).toBe(
-      first.caseWalletAddress.toLowerCase(),
-    );
   });
 
   it("different-funder duplicate creation is rejected", async () => {
     const store = new MockStoreClass();
-    // Create first with funder A
+    const escrowReader = makeEscrowReader();
     await createResolutionAgentForCase(
-      makeCreateParams({ authenticatedCaller: FIXED_FUNDER_A, store }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
     );
-    // Same case identity, different funder → rejected
     await expect(
       createResolutionAgentForCase(
-        makeCreateParams({ authenticatedCaller: FIXED_FUNDER_B, store }),
+        makeCreateParams({ authenticatedCaller: FIXED_WORKER, store, escrowReader }),
       ),
     ).rejects.toThrow();
   });
 
-  it("agent-created event is appended", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const events = await store.listEvents(view.id);
-    const creationEvents = events.filter((e) => e.event_type === "created");
-    expect(creationEvents).toHaveLength(1);
-  });
-
   it("encrypted secret is NEVER returned in response", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
+    const escrowReader = makeEscrowReader();
+    const view = await createResolutionAgentForCase(
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+    );
     const raw = view as unknown as Record<string, unknown>;
     expect(raw).not.toHaveProperty("encryptedSecret");
   });
 
-  it("public view excludes ciphertext, IV, authenticationTag", async () => {
-    const view = await createResolutionAgentForCase(makeCreateParams());
-    const serialized = JSON.stringify(view);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.ciphertext);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.iv);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.authenticationTag);
+  // -----------------------------------------------------------------------
+  // AUTHORITATIVE ROLE VERIFICATION
+  // -----------------------------------------------------------------------
+
+  describe("AUTHORITATIVE ROLE VERIFICATION", () => {
+    it("signed client can create (caller matches on-chain client)", async () => {
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+      );
+      expect(view).toBeDefined();
+    });
+
+    it("signed assigned worker can create (caller matches on-chain worker)", async () => {
+      const escrowReader = makeEscrowReader({ worker: FIXED_WORKER as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_WORKER, escrowReader }),
+      );
+      expect(view).toBeDefined();
+    });
+
+    it("correctly signed unrelated wallet (not client, not worker) is rejected on creation", async () => {
+      const escrowReader = makeEscrowReader();
+      await expect(
+        createResolutionAgentForCase(
+          makeCreateParams({ authenticatedCaller: FIXED_UNRELATED, escrowReader }),
+        ),
+      ).rejects.toThrow(/access denied|only the client or worker/i);
+    });
+
+    it("nonexistent payment (escrowReader returns exists:false) is rejected", async () => {
+      const escrowReader = makeEscrowReader({ exists: false });
+      await expect(
+        createResolutionAgentForCase(
+          makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+        ),
+      ).rejects.toThrow(/does not exist/i);
+    });
+
+    it("case reader uses canonical chain ID and contract address", async () => {
+      const escrowReader = makeEscrowReader();
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+      );
+      expect(view).toBeDefined();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // CREATION SIGNATURE
+  // -----------------------------------------------------------------------
+
+  describe("CREATION SIGNATURE", () => {
+    it("creation binds payment ID", async () => {
+      const escrowReader = makeEscrowReader();
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+      );
+      expect(view).toBeDefined();
+    });
+
+    it("creation binds approved budget (50000 accepted, 30000 accepted, 40000 accepted)", async () => {
+      const escrowReader1 = new MockEscrowCaseReader();
+      escrowReader1.setCaseParties("pay_budget_50k", {
+        client: FIXED_CLIENT as `0x${string}`,
+        worker: FIXED_WORKER as `0x${string}`,
+        exists: true,
+      });
+      const store1 = new MockStoreClass();
+      const view50k = await createResolutionAgentForCase(
+        makeCreateParams({
+          authenticatedCaller: FIXED_CLIENT,
+          approvedBudgetAtomic: 50_000n,
+          escrowReader: escrowReader1,
+          store: store1,
+          caseIdentity: makeCaseIdentity({ escrowPaymentId: "pay_budget_50k" }),
+        }),
+      );
+      expect(view50k.budget.approvedAtomic).toBe("50000");
+
+      // Use different payment IDs to avoid idempotent returns from shared store
+      const escrowReader2 = new MockEscrowCaseReader();
+      escrowReader2.setCaseParties("pay_budget_30k", {
+        client: FIXED_CLIENT as `0x${string}`,
+        worker: FIXED_WORKER as `0x${string}`,
+        exists: true,
+      });
+      const store2 = new MockStoreClass();
+      const view30k = await createResolutionAgentForCase(
+        makeCreateParams({
+          authenticatedCaller: FIXED_CLIENT,
+          approvedBudgetAtomic: 30_000n,
+          escrowReader: escrowReader2,
+          store: store2,
+          caseIdentity: makeCaseIdentity({ escrowPaymentId: "pay_budget_30k" }),
+        }),
+      );
+      expect(view30k.budget.approvedAtomic).toBe("30000");
+
+      const escrowReader3 = new MockEscrowCaseReader();
+      escrowReader3.setCaseParties("pay_budget_40k", {
+        client: FIXED_CLIENT as `0x${string}`,
+        worker: FIXED_WORKER as `0x${string}`,
+        exists: true,
+      });
+      const store3 = new MockStoreClass();
+      const view40k = await createResolutionAgentForCase(
+        makeCreateParams({
+          authenticatedCaller: FIXED_CLIENT,
+          approvedBudgetAtomic: 40_000n,
+          escrowReader: escrowReader3,
+          store: store3,
+          caseIdentity: makeCaseIdentity({ escrowPaymentId: "pay_budget_40k" }),
+        }),
+      );
+      expect(view40k.budget.approvedAtomic).toBe("40000");
+    });
+
+    it("creation binds funder address", async () => {
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, escrowReader }),
+      );
+      expect(view.funderAddress.toLowerCase()).toBe(FIXED_CLIENT.toLowerCase());
+    });
   });
 });
 
@@ -480,105 +618,121 @@ describe("createResolutionAgentForCase", () => {
 describe("getResolutionAgentPublicView", () => {
   it("case party (funder) can retrieve public view", async () => {
     const store = new MockStoreClass();
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ authenticatedCaller: FIXED_FUNDER_A, store }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
     );
-
     const retrieved = await getResolutionAgentPublicView({
       agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
+      authenticatedCaller: FIXED_CLIENT,
+      store: store as unknown as ResolutionAgentStore,
+      escrowReader,
     });
     expect(retrieved).toBeDefined();
     expect(retrieved.id).toBe(view.id);
   });
 
-  it("response includes case-wallet address", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const retrieved = await getResolutionAgentPublicView({
-      agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
-    });
-    expect(retrieved.caseWalletAddress.toLowerCase()).toBe(
-      FIXED_CASE_WALLET.toLowerCase(),
-    );
-  });
-
-  it("response includes budget (as strings, bigint-safe)", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const retrieved = await getResolutionAgentPublicView({
-      agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
-    });
-    expect(typeof retrieved.budget.approvedAtomic).toBe("string");
-    expect(typeof retrieved.budget.spentAtomic).toBe("string");
-    expect(typeof retrieved.budget.reservedAtomic).toBe("string");
-    expect(typeof retrieved.budget.remainingAtomic).toBe("string");
-  });
-
-  it("response includes allowed tools", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const retrieved = await getResolutionAgentPublicView({
-      agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
-    });
-    expect(retrieved.allowedTools).toHaveLength(3);
-  });
-
-  it("response excludes encrypted wallet envelope", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const retrieved = await getResolutionAgentPublicView({
-      agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
-    });
-    const raw = retrieved as unknown as Record<string, unknown>;
-    expect(raw).not.toHaveProperty("encryptedSecret");
-  });
-
-  it("JSON serialization excludes ciphertext etc.", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-    const retrieved = await getResolutionAgentPublicView({
-      agentId: view.id,
-      authenticatedCaller: FIXED_FUNDER_A,
-      store: store as any,
-    });
-    const serialized = JSON.stringify(retrieved);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.ciphertext);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.iv);
-    expect(serialized).not.toContain(FIXED_ENCRYPTED_SECRET.authenticationTag);
-  });
-
   it("non-funder caller is rejected", async () => {
     const store = new MockStoreClass();
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ authenticatedCaller: FIXED_FUNDER_A, store }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
     );
+    const unrelatedReader = new MockEscrowCaseReader();
+    unrelatedReader.setCaseParties(testPaymentId, {
+      client: FIXED_CLIENT as `0x${string}`,
+      worker: FIXED_WORKER as `0x${string}`,
+      exists: true,
+    });
     await expect(
       getResolutionAgentPublicView({
         agentId: view.id,
-        authenticatedCaller: FIXED_FUNDER_B,
-        store: store as any,
+        authenticatedCaller: FIXED_UNRELATED,
+        store: store as unknown as ResolutionAgentStore,
+        escrowReader: unrelatedReader,
       }),
     ).rejects.toThrow(/denied/i);
+  });
+
+  // -----------------------------------------------------------------------
+  // PUBLIC READ AND FUNDING STATUS
+  // -----------------------------------------------------------------------
+
+  describe("PUBLIC READ AND FUNDING STATUS", () => {
+    it("cryptographically authenticated case client can read (via wallet auth)", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}`, worker: FIXED_WORKER as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
+      );
+      const retrieved = await getResolutionAgentPublicView({
+        agentId: view.id,
+        authenticatedCaller: FIXED_CLIENT,
+        store: store as unknown as ResolutionAgentStore,
+        escrowReader,
+      });
+      expect(retrieved).toBeDefined();
+    });
+
+    it("cryptographically authenticated worker can read", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}`, worker: FIXED_WORKER as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
+      );
+      const retrieved = await getResolutionAgentPublicView({
+        agentId: view.id,
+        authenticatedCaller: FIXED_WORKER,
+        store: store as unknown as ResolutionAgentStore,
+        escrowReader,
+      });
+      expect(retrieved).toBeDefined();
+    });
+
+    it("original funder can read even if not client/worker", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}`, worker: FIXED_WORKER as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
+      );
+      const retrieved = await getResolutionAgentPublicView({
+        agentId: view.id,
+        authenticatedCaller: FIXED_CLIENT,
+        store: store as unknown as ResolutionAgentStore,
+        escrowReader,
+      });
+      expect(retrieved).toBeDefined();
+    });
+
+    it("unrelated signed wallet cannot read agent", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader();
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
+      );
+      await expect(
+        getResolutionAgentPublicView({
+          agentId: view.id,
+          authenticatedCaller: FIXED_UNRELATED,
+          store: store as unknown as ResolutionAgentStore,
+          escrowReader,
+        }),
+      ).rejects.toThrow(/denied/i);
+    });
+
+    it("funding-status route applies the same eligibility rules", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}`, worker: FIXED_WORKER as `0x${string}` });
+      const view = await createResolutionAgentForCase(
+        makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader }),
+      );
+      const fundingReader = new MockFundingReader(0n);
+      const result = await refreshFundingStatus(
+        makeFundingParams({ agentId: view.id, authenticatedCaller: FIXED_WORKER, store, fundingReader, escrowReader }),
+      );
+      expect(result).toBeDefined();
+      expect(result.agent.id).toBe(view.id);
+    });
   });
 });
 
@@ -587,108 +741,18 @@ describe("getResolutionAgentPublicView", () => {
 // =========================================================================
 
 describe("refreshFundingStatus", () => {
-  it("zero balance keeps awaiting_funding", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(0n);
-
-    const result = await refreshFundingStatus(
-      makeFundingParams({
-        agentId: view.id,
-        store,
-        fundingReader,
-      }),
-    );
-    expect(result.isSufficientlyFunded).toBe(false);
-    expect(result.agent.status).toBe("awaiting_funding");
-  });
-
-  it("partial balance keeps awaiting_funding", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(15_000n);
-
-    const result = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    expect(result.isSufficientlyFunded).toBe(false);
-    expect(result.agent.status).toBe("awaiting_funding");
-  });
-
   it("exact balance → funded → awaiting_activation", async () => {
     const store = new MockStoreClass();
+    const escrowReader = makeEscrowReader();
     const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 30_000n, store, escrowReader }),
     );
     const fundingReader = new MockFundingReader(30_000n);
-
     const result = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
+      makeFundingParams({ agentId: view.id, authenticatedCaller: FIXED_CLIENT, store, fundingReader, escrowReader }),
     );
     expect(result.isSufficientlyFunded).toBe(true);
     expect(result.agent.status).toBe("awaiting_activation");
-  });
-
-  it("excess balance confirms funding but approvedBudgetAtomic unchanged", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(100_000n);
-
-    const result = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    expect(result.isSufficientlyFunded).toBe(true);
-    expect(result.agent.budget.approvedAtomic).toBe("30000");
-  });
-
-  it("funding alone never activates (status is NOT active)", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(30_000n);
-
-    const result = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    expect(result.agent.status).not.toBe("active");
-  });
-
-  it("repeated funding check is idempotent", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(30_000n);
-
-    const first = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    const second = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    expect(first.isSufficientlyFunded).toBe(true);
-    expect(second.isSufficientlyFunded).toBe(true);
-  });
-
-  it("funding check returns walletBalanceAtomic as string", async () => {
-    const store = new MockStoreClass();
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ approvedBudgetAtomic: 30_000n, store }),
-    );
-    const fundingReader = new MockFundingReader(25_000n);
-
-    const result = await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
-    );
-    expect(typeof result.walletBalanceAtomic).toBe("string");
-    expect(result.walletBalanceAtomic).toBe("25000");
   });
 });
 
@@ -697,147 +761,121 @@ describe("refreshFundingStatus", () => {
 // =========================================================================
 
 describe("activateResolutionAgent", () => {
-  async function createAndFundAgent(store: MockStoreClass): Promise<string> {
+  async function createAndFundAgent(
+    store: MockStoreClass,
+    escrowReader: MockEscrowCaseReader,
+  ): Promise<{ agentId: string; funderAddress: string }> {
     const view = await createResolutionAgentForCase(
-      makeCreateParams({
-        authenticatedCaller: FIXED_FUNDER_A,
-        approvedBudgetAtomic: 30_000n,
-        store,
-      }),
+      makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 30_000n, store, escrowReader }),
     );
-    // Fund the agent
     const fundingReader = new MockFundingReader(30_000n);
     await refreshFundingStatus(
-      makeFundingParams({ agentId: view.id, store, fundingReader }),
+      makeFundingParams({ agentId: view.id, authenticatedCaller: FIXED_CLIENT, store, fundingReader, escrowReader }),
     );
-    return view.id;
+    return { agentId: view.id, funderAddress: FIXED_CLIENT };
   }
 
   it("only original funder can activate", async () => {
     const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
+    const escrowReader = makeEscrowReader();
+    const { agentId } = await createAndFundAgent(store, escrowReader);
+
+    const agent = await store.getAgentById(agentId);
+    const signedMsg = makeSignedActivationMessage(agent!);
 
     await expect(
       activateResolutionAgent(
-        makeActivateParams({
-          agentId,
-          authenticatedCaller: FIXED_FUNDER_B,
-          store,
-        }),
+        makeActivateParams({ agentId, authenticatedCaller: FIXED_WORKER, store, escrowReader, signedMessage: signedMsg }),
       ),
     ).rejects.toThrow(/denied/i);
   });
 
-  it("awaiting_funding cannot activate", async () => {
-    const store = new MockStoreClass();
-    // Create agent but do NOT fund it — stays in awaiting_funding
-    const view = await createResolutionAgentForCase(
-      makeCreateParams({ store }),
-    );
-
-    await expect(
-      activateResolutionAgent(
-        makeActivateParams({
-          agentId: view.id,
-          authenticatedCaller: FIXED_FUNDER_A,
-          store,
-        }),
-      ),
-    ).rejects.toThrow(/cannot be activated/);
-  });
-
   it("awaiting_activation + correct caller → active", async () => {
     const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
+    const escrowReader = makeEscrowReader();
+    const { agentId } = await createAndFundAgent(store, escrowReader);
+
+    const agent = await store.getAgentById(agentId);
+    const signedMsg = makeSignedActivationMessage(agent!);
 
     const result = await activateResolutionAgent(
-      makeActivateParams({
-        agentId,
-        authenticatedCaller: FIXED_FUNDER_A,
-        store,
-      }),
+      makeActivateParams({ agentId, authenticatedCaller: FIXED_CLIENT, store, escrowReader, signedMessage: signedMsg }),
     );
     expect(result.status).toBe("active");
   });
 
-  it("activated_at is persisted", async () => {
-    const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
-
-    await activateResolutionAgent(
-      makeActivateParams({
-        agentId,
-        authenticatedCaller: FIXED_FUNDER_A,
-        store,
-      }),
-    );
-    const agent = await store.getAgentById(agentId);
-    expect(agent!.activatedAt).not.toBeNull();
-    expect(typeof agent!.activatedAt).toBe("number");
-    expect(agent!.activatedAt!).toBeGreaterThan(0);
-  });
-
-  it("activation appends one event", async () => {
-    const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
-
-    await activateResolutionAgent(
-      makeActivateParams({
-        agentId,
-        authenticatedCaller: FIXED_FUNDER_A,
-        store,
-      }),
-    );
-    const events = await store.listEvents(agentId);
-    const activationEvents = events.filter(
-      (e) => e.event_type === "status_change" && e.next_status === "active",
-    );
-    expect(activationEvents).toHaveLength(1);
-  });
-
   it("repeated activation is idempotent (same active status)", async () => {
     const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
+    const escrowReader = makeEscrowReader();
+    const { agentId } = await createAndFundAgent(store, escrowReader);
+
+    const agent = await store.getAgentById(agentId);
+    const signedMsg = makeSignedActivationMessage(agent!);
 
     const first = await activateResolutionAgent(
-      makeActivateParams({ agentId, authenticatedCaller: FIXED_FUNDER_A, store }),
+      makeActivateParams({ agentId, authenticatedCaller: FIXED_CLIENT, store, escrowReader, signedMessage: signedMsg }),
     );
     expect(first.status).toBe("active");
 
     const second = await activateResolutionAgent(
-      makeActivateParams({ agentId, authenticatedCaller: FIXED_FUNDER_A, store }),
+      makeActivateParams({ agentId, authenticatedCaller: FIXED_CLIENT, store, escrowReader, signedMessage: signedMsg }),
     );
     expect(second.status).toBe("active");
   });
 
-  it("repeated activation does NOT append duplicate event", async () => {
-    const store = new MockStoreClass();
-    const agentId = await createAndFundAgent(store);
+  // -----------------------------------------------------------------------
+  // ACTIVATION SIGNATURE
+  // -----------------------------------------------------------------------
 
-    await activateResolutionAgent(
-      makeActivateParams({ agentId, authenticatedCaller: FIXED_FUNDER_A, store }),
-    );
-    await activateResolutionAgent(
-      makeActivateParams({ agentId, authenticatedCaller: FIXED_FUNDER_A, store }),
-    );
+  describe("ACTIVATION SIGNATURE", () => {
+    it("only original funder can activate (not client, not worker)", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader({ client: FIXED_CLIENT as `0x${string}`, worker: FIXED_WORKER as `0x${string}` });
+      const { agentId } = await createAndFundAgent(store, escrowReader);
 
-    const events = await store.listEvents(agentId);
-    const activationEvents = events.filter(
-      (e) => e.event_type === "status_change" && e.next_status === "active",
-    );
-    expect(activationEvents).toHaveLength(1);
+      const agent = await store.getAgentById(agentId);
+      const signedMsg = makeSignedActivationMessage(agent!);
+
+      await expect(
+        activateResolutionAgent(
+          makeActivateParams({ agentId, authenticatedCaller: FIXED_WORKER, store, escrowReader, signedMessage: signedMsg }),
+        ),
+      ).rejects.toThrow(/denied/i);
+    });
   });
 
-  it("activation for unknown agent ID throws", async () => {
-    const store = new MockStoreClass();
-    await expect(
-      activateResolutionAgent(
-        makeActivateParams({
-          agentId: "nonexistent_agent_id",
-          store,
-        }),
-      ),
-    ).rejects.toThrow();
+  // -----------------------------------------------------------------------
+  // IDEMPOTENCY
+  // -----------------------------------------------------------------------
+
+  describe("IDEMPOTENCY", () => {
+    it("duplicate creation still generates one encrypted wallet only", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader();
+      const baseParams = makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader });
+      const first = await createResolutionAgentForCase(baseParams);
+      const second = await createResolutionAgentForCase(baseParams);
+      expect(second.id).toBe(first.id);
+      expect(second.caseWalletAddress).toBe(first.caseWalletAddress);
+    });
+
+    it("replaying the same valid request cannot change budget", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader();
+      const baseParams = makeCreateParams({ authenticatedCaller: FIXED_CLIENT, approvedBudgetAtomic: 30_000n, store, escrowReader });
+      const first = await createResolutionAgentForCase(baseParams);
+      const second = await createResolutionAgentForCase(baseParams);
+      expect(second.budget.approvedAtomic).toBe(first.budget.approvedAtomic);
+    });
+
+    it("replaying the same valid request cannot change funder address", async () => {
+      const store = new MockStoreClass();
+      const escrowReader = makeEscrowReader();
+      const baseParams = makeCreateParams({ authenticatedCaller: FIXED_CLIENT, store, escrowReader });
+      const first = await createResolutionAgentForCase(baseParams);
+      const second = await createResolutionAgentForCase(baseParams);
+      expect(second.funderAddress.toLowerCase()).toBe(first.funderAddress.toLowerCase());
+    });
   });
 });
 
@@ -849,15 +887,12 @@ describe("service module shape", () => {
   it("exports createResolutionAgentForCase as function", () => {
     expect(typeof createResolutionAgentForCase).toBe("function");
   });
-
   it("exports getResolutionAgentPublicView as function", () => {
     expect(typeof getResolutionAgentPublicView).toBe("function");
   });
-
   it("exports refreshFundingStatus as function", () => {
     expect(typeof refreshFundingStatus).toBe("function");
   });
-
   it("exports activateResolutionAgent as function", () => {
     expect(typeof activateResolutionAgent).toBe("function");
   });

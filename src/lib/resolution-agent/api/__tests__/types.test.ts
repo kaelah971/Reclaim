@@ -5,6 +5,10 @@
 // bodies.  Input validation is the first security boundary — these schemas
 // must reject malformed, out-of-range, or otherwise invalid data before it
 // reaches any business logic.
+//
+// HARDENED: escrowChainId and escrowContractAddress are now server-enforced
+// canonical values and are NOT accepted from the client. Only escrowPaymentId
+// and budgetAtomic are required.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
@@ -23,8 +27,6 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 30000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_test_001",
       budgetAtomic: "30000",
     });
@@ -33,8 +35,6 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 40000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x2222222222222222222222222222222222222222",
       escrowPaymentId: "pay_test_002",
       budgetAtomic: "40000",
     });
@@ -43,107 +43,48 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 50000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x3333333333333333333333333333333333333333",
       escrowPaymentId: "pay_test_003",
       budgetAtomic: "50000",
     });
     expect(result.success).toBe(true);
   });
 
-  // -- escrowChainId validation --------------------------------------
+  // -- escrowChainId NOT in schema ------------------------------------
 
-  it("escrowChainId must be exactly 'eip155:11142220'", () => {
-    // Only this single chain ID is accepted for the resolution agent.
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(true);
+  it("escrowContractAddress is NOT in the schema (server-enforced canonical)", () => {
+    // The schema shape should not include escrowContractAddress
+    const shape = createAgentRequestSchema.shape;
+    expect(shape).not.toHaveProperty("escrowContractAddress");
   });
 
-  it("rejects escrowChainId 'eip155:44787' (Celo Alfajores testnet)", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:44787",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects escrowChainId 'eip155:42220' (missing leading 1)", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:42220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects empty escrowChainId", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  // -- escrowContractAddress validation -------------------------------
-
-  it("rejects invalid hex address (too short)", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x123",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects non-hex characters in address", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects missing 0x prefix in address", () => {
-    const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(result.success).toBe(false);
+  it("escrowChainId is NOT in the schema (server-enforced canonical)", () => {
+    const shape = createAgentRequestSchema.shape;
+    expect(shape).not.toHaveProperty("escrowChainId");
   });
 
   // -- escrowPaymentId validation ------------------------------------
 
   it("rejects empty payment ID", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "",
       budgetAtomic: "30000",
     });
     expect(result.success).toBe(false);
   });
 
+  it("only escrowPaymentId and budgetAtomic are required from client", () => {
+    // Verify that the minimal valid request only needs these two fields
+    const result = createAgentRequestSchema.safeParse({
+      escrowPaymentId: "pay_minimal",
+      budgetAtomic: "30000",
+    });
+    expect(result.success).toBe(true);
+  });
+
   // -- budgetAtomic validation ---------------------------------------
 
   it("budget '30000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "30000",
     });
@@ -152,8 +93,6 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '40000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "40000",
     });
@@ -162,8 +101,6 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '50000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "50000",
     });
@@ -172,8 +109,6 @@ describe("createAgentRequestSchema", () => {
 
   it("budget 10000 rejected (below minimum)", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "10000",
     });
@@ -182,8 +117,6 @@ describe("createAgentRequestSchema", () => {
 
   it("budget 99999 rejected (not in supported set)", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "99999",
     });
@@ -192,8 +125,6 @@ describe("createAgentRequestSchema", () => {
 
   it("negative budget rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "-1",
     });
@@ -202,8 +133,6 @@ describe("createAgentRequestSchema", () => {
 
   it("non-numeric budget rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "free",
     });
@@ -212,8 +141,6 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '0' rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       budgetAtomic: "0",
     });
@@ -222,8 +149,6 @@ describe("createAgentRequestSchema", () => {
 
   it("undefined budget rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
       escrowPaymentId: "pay_ok",
       // budgetAtomic intentionally omitted
     });
@@ -232,28 +157,16 @@ describe("createAgentRequestSchema", () => {
 
   // -- Missing required fields ---------------------------------------
 
-  it("rejects request missing escrowChainId", () => {
-    const r = createAgentRequestSchema.safeParse({
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(r.success).toBe(false);
-  });
-
-  it("rejects request missing escrowContractAddress", () => {
-    const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowPaymentId: "pay_ok",
-      budgetAtomic: "30000",
-    });
-    expect(r.success).toBe(false);
-  });
-
   it("rejects request missing escrowPaymentId", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowChainId: "eip155:11142220",
-      escrowContractAddress: "0x1111111111111111111111111111111111111111",
+      budgetAtomic: "30000",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("escrowPaymentId must not be empty", () => {
+    const r = createAgentRequestSchema.safeParse({
+      escrowPaymentId: "",
       budgetAtomic: "30000",
     });
     expect(r.success).toBe(false);

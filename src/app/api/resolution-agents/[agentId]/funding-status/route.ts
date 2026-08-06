@@ -6,6 +6,9 @@
 // budget, the agent is advanced through the funding pipeline:
 //   awaiting_funding → funded → awaiting_activation
 //
+// Access is granted to the stored funder OR the on-chain client OR the
+// on-chain worker.
+//
 // Headers:
 //   x-wallet-address   — funder's EVM address
 //   x-wallet-message   — signed authentication message
@@ -14,7 +17,7 @@
 // Responses:
 //   200 — FundingStatusResponse { agent, walletBalanceAtomic, isSufficientlyFunded }
 //   401 — missing or invalid wallet authentication
-//   403 — caller is not the funder
+//   403 — caller is not authorized
 //   404 — agent not found
 //   500 — internal server error
 // ---------------------------------------------------------------------------
@@ -25,6 +28,9 @@ import { refreshFundingStatus, createStore } from "@/lib/resolution-agent/api/se
 import {
   CeloMainnetFundingReader,
 } from "@/lib/resolution-agent/api/funding";
+import {
+  CeloSepoliaEscrowCaseReader,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -72,9 +78,11 @@ export async function POST(
 
     // -----------------------------------------------------------------
     // Step 2: Refresh funding status
-    //         (the service enforces funder-only access and performs the
-    //         on-chain balance check with state transitions)
+    //         (the service enforces authorization — funder, client, or
+    //         worker — and performs the on-chain balance check with
+    //         state transitions)
     // -----------------------------------------------------------------
+    const escrowReader = new CeloSepoliaEscrowCaseReader();
     const store = createStore();
     const now = Date.now();
     const fundingReader = new CeloMainnetFundingReader();
@@ -85,6 +93,7 @@ export async function POST(
       now,
       store,
       fundingReader,
+      escrowReader,
     });
 
     // -----------------------------------------------------------------

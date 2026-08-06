@@ -3,6 +3,10 @@
 //
 // SERVER-ONLY — these schemas validate incoming HTTP request payloads and
 // headers before they reach the service layer. Never import from client code.
+//
+// Hardened: escrowChainId and escrowContractAddress are now server-enforced
+// canonical values. Only escrowPaymentId and budgetAtomic are required from
+// the client. This prevents clients from specifying arbitrary escrow contracts.
 // ---------------------------------------------------------------------------
 
 import { z } from "zod";
@@ -37,16 +41,20 @@ function isSupportedBudget(value: string): boolean {
 /**
  * Schema for POST /api/resolution-agent/create request body.
  *
- * The escrow chain is locked to Celo Sepolia (CAIP-2: eip155:11142220).
+ * HARDENED: The escrow chain ID and contract address are server-enforced
+ * canonical values and are NOT accepted from the client. Only the
+ * escrow payment ID and the approved budget are required from the caller.
+ *
  * Budget must be one of the three canonical values.
  */
 export const createAgentRequestSchema = z.object({
-  escrowChainId: z.literal("eip155:11142220"),
-  escrowContractAddress: z.string().regex(
-    /^0x[0-9a-fA-F]{40}$/,
-    "Must be a valid 0x-prefixed EVM address",
-  ),
-  escrowPaymentId: z.string().min(1, "Payment ID must not be empty"),
+  escrowPaymentId: z
+    .string()
+    .min(1, "Payment ID must not be empty")
+    .regex(
+      /^[0-9a-zA-Z_-]+$/,
+      "Payment ID must contain only alphanumeric characters, hyphens, and underscores",
+    ),
   budgetAtomic: z.string().refine(isSupportedBudget, {
     message: "Budget must be one of: 30000, 40000, 50000 atomic USDC",
   }),

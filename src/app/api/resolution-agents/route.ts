@@ -9,16 +9,19 @@
 //   x-wallet-signature — hex-encoded ECDSA signature
 //
 // Body (JSON):
-//   escrowChainId         — must be "eip155:11142220" (Celo Sepolia CAIP-2)
-//   escrowContractAddress — deployed ProtectedPaymentEscrow address
-//   escrowPaymentId       — on-chain payment identifier
-//   budgetAtomic          — approved budget in atomic USDC (string)
-//                           must be one of: "30000", "40000", "50000"
+//   escrowChainId   — must be "eip155:11142220" (Celo Sepolia CAIP-2)
+//   escrowPaymentId — on-chain payment identifier (alphanumeric + hyphens)
+//   budgetAtomic    — approved budget in atomic USDC (string)
+//                     must be one of: "30000", "40000", "50000"
+//
+//   NOTE: escrowContractAddress is NOT accepted from the client.  The server
+//   uses the canonical deployed escrow contract address.
 //
 // Responses:
 //   201 — agent created, returns ResolutionAgentPublicView
 //   400 — invalid request body
 //   401 — missing or invalid wallet authentication
+//   403 — caller is not a valid case party (client or worker)
 //   409 — agent already exists for this case with a different funder
 //   500 — internal server error
 // ---------------------------------------------------------------------------
@@ -27,6 +30,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAgentRequestSchema } from "@/lib/resolution-agent/api/types";
 import { verifyAuth } from "@/lib/resolution-agent/api/auth";
 import { createResolutionAgentForCase, createStore } from "@/lib/resolution-agent/api/service";
+import {
+  CeloSepoliaEscrowCaseReader,
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -80,8 +87,6 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     // -----------------------------------------------------------------
     // Step 3: Verify wallet signature cryptographically
-    //         (the signed message is self-proving — it contains all
-    //         the case parameters the funder is authorising)
     // -----------------------------------------------------------------
     const authResult = await verifyAuth({
       claimedAddress: walletAddress,
@@ -100,8 +105,11 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
 
     // -----------------------------------------------------------------
-    // Step 4 & 5: Instantiate store and call the core service
+    // Step 4: Instantiate escrow reader, store, and call the service
+    //         escrowContractAddress is server-owned (canonical) —
+    //         the client must NOT supply it.
     // -----------------------------------------------------------------
+    const escrowReader = new CeloSepoliaEscrowCaseReader();
     const store = createStore();
     const now = Date.now();
     const budgetAtomic = BigInt(requestData.budgetAtomic);
@@ -109,17 +117,18 @@ export async function POST(request: NextRequest): Promise<Response> {
     const publicView = await createResolutionAgentForCase({
       authenticatedCaller: walletAddress,
       caseIdentity: {
-        escrowChainId: requestData.escrowChainId,
-        escrowContractAddress: requestData.escrowContractAddress,
+        escrowChainId: "eip155:11142220",
+        escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
         escrowPaymentId: requestData.escrowPaymentId,
       },
       approvedBudgetAtomic: budgetAtomic,
       now,
       store,
+      escrowReader,
     });
 
     // -----------------------------------------------------------------
-    // Step 6: Return public view with 201 Created
+    // Step 5: Return public view with 201 Created
     // -----------------------------------------------------------------
     return NextResponse.json(publicView, { status: 201 });
   } catch (err) {

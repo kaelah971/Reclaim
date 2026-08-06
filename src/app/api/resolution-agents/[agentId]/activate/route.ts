@@ -2,23 +2,25 @@
 // POST /api/resolution-agents/[agentId]/activate
 //
 // Activate a Resolution Agent so it can begin executing tools autonomously.
-// The caller must be the original funder and must provide an activation-
-// specific wallet signature proving intent to activate this specific agent.
+// The caller MUST be the original funder.  The signed activation message is
+// verified against the agent's canonical permissions to prevent signature
+// reuse (CRITICAL HARDENING).
 //
 // Headers:
 //   x-wallet-address   — funder's EVM address
 //   x-wallet-message   — the plaintext activation message that was signed
 //   x-wallet-signature — hex-encoded ECDSA signature
 //
-// The activation message (in x-wallet-message) must contain the agent ID
-// so the funder proves they know what they are activating.  Use
+// The activation message (in x-wallet-message) must include ALL agent
+// permissions (tools, budget, expiry, goal, refund address) so the server
+// can verify it byte-for-byte against the agent's stored state.  Use
 // buildActivationMessage() from @/lib/resolution-agent/api/auth to
 // produce the canonical message format.
 //
 // Responses:
 //   200 — activated, returns ResolutionAgentPublicView
 //   401 — missing or invalid wallet authentication
-//   403 — caller is not the funder
+//   403 — caller is not the funder OR message doesn't match canonical permissions
 //   404 — agent not found
 //   422 — agent cannot be activated (wrong status)
 //   500 — internal server error
@@ -27,6 +29,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAuth } from "@/lib/resolution-agent/api/auth";
 import { activateResolutionAgent, createStore } from "@/lib/resolution-agent/api/service";
+import {
+  CeloSepoliaEscrowCaseReader,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -90,9 +95,12 @@ export async function POST(
 
     // -----------------------------------------------------------------
     // Step 3: Activate the agent via the service layer
-    //         (the service enforces funder-only access, validates the
-    //         current status, and handles the state transition)
+    //         (the service enforces funder-only access, verifies the
+    //         signed activation message against the agent's canonical
+    //         permissions, validates the current status, and handles
+    //         the state transition)
     // -----------------------------------------------------------------
+    const escrowReader = new CeloSepoliaEscrowCaseReader();
     const store = createStore();
     const now = Date.now();
 
@@ -101,6 +109,8 @@ export async function POST(
       authenticatedCaller: walletAddress,
       now,
       store,
+      escrowReader,
+      signedMessage,
     });
 
     // -----------------------------------------------------------------

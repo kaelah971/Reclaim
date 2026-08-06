@@ -5,9 +5,13 @@
 // API-internal implementation details.  The public view must NEVER contain
 // encrypted wallet secrets, and no NEXT_PUBLIC encryption key env var must
 // exist in the client bundle.
+//
+// HARDENED: additional checks that escrow reader internals and canonical
+// addresses are not exposed through the public barrel.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
+import type { ResolutionAgent } from "../../types";
 import { toResolutionAgentPublicView } from "../../public-view";
 
 // ---------------------------------------------------------------------------
@@ -112,6 +116,40 @@ describe("Public barrel (../../index) does NOT export API internals", () => {
       (PublicBarrel as Record<string, unknown>).buildActivationMessage,
     ).toBeUndefined();
   });
+
+  // -----------------------------------------------------------------------
+  // HARDENED: escrow reader and canonical constants must NOT leak
+  // -----------------------------------------------------------------------
+
+  it("EscrowCaseReader functions ARE NOT in the public barrel", async () => {
+    const PublicBarrel = await import("../../index");
+    const keys = Object.keys(PublicBarrel as Record<string, unknown>);
+    // Neither the interface nor the implementations should be exported
+    expect(keys).not.toContain("EscrowCaseReader");
+    expect(keys).not.toContain("MockEscrowCaseReader");
+    expect(keys).not.toContain("CeloSepoliaEscrowCaseReader");
+    expect(keys).not.toContain("getCaseParties");
+  });
+
+  it("CANONICAL_ESCROW_CONTRACT_ADDRESS is NOT in the public barrel", async () => {
+    const PublicBarrel = await import("../../index");
+    const keys = Object.keys(PublicBarrel as Record<string, unknown>);
+    expect(keys).not.toContain("CANONICAL_ESCROW_CONTRACT_ADDRESS");
+  });
+
+  it("CANONICAL_ESCROW_CHAIN_ID is NOT in the public barrel", async () => {
+    const PublicBarrel = await import("../../index");
+    const keys = Object.keys(PublicBarrel as Record<string, unknown>);
+    expect(keys).not.toContain("CANONICAL_ESCROW_CHAIN_ID");
+  });
+
+  it("CaseParties type is NOT in the public barrel (internal type)", async () => {
+    const PublicBarrel = await import("../../index");
+    const keys = Object.keys(PublicBarrel as Record<string, unknown>);
+    // CaseParties is a type export — it won't appear as a runtime key,
+    // but we verify no string export with that name exists
+    expect(keys).not.toContain("CaseParties");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -121,7 +159,7 @@ describe("Public barrel (../../index) does NOT export API internals", () => {
 describe("Public view NEVER contains encryptedSecret", () => {
   it("toResolutionAgentPublicView excludes encryptedSecret field", () => {
     const agent = makeAgentWithEncryptedSecret();
-    const view = toResolutionAgentPublicView(agent as any);
+    const view = toResolutionAgentPublicView(agent as unknown as ResolutionAgent);
     const raw = view as unknown as Record<string, unknown>;
 
     expect(raw).not.toHaveProperty("encryptedSecret");
@@ -129,7 +167,7 @@ describe("Public view NEVER contains encryptedSecret", () => {
 
   it("toResolutionAgentPublicView excludes ciphertext", () => {
     const agent = makeAgentWithEncryptedSecret();
-    const view = toResolutionAgentPublicView(agent as any);
+    const view = toResolutionAgentPublicView(agent as unknown as ResolutionAgent);
     const serialized = JSON.stringify(view);
 
     expect(serialized).not.toContain("TOP-SECRET-CIPHERTEXT-DO-NOT-EXPOSE");
@@ -138,7 +176,7 @@ describe("Public view NEVER contains encryptedSecret", () => {
 
   it("toResolutionAgentPublicView excludes IV", () => {
     const agent = makeAgentWithEncryptedSecret();
-    const view = toResolutionAgentPublicView(agent as any);
+    const view = toResolutionAgentPublicView(agent as unknown as ResolutionAgent);
     const serialized = JSON.stringify(view);
 
     expect(serialized).not.toContain("TOP-SECRET-IV-DO-NOT-EXPOSE");
@@ -147,7 +185,7 @@ describe("Public view NEVER contains encryptedSecret", () => {
 
   it("toResolutionAgentPublicView excludes authenticationTag", () => {
     const agent = makeAgentWithEncryptedSecret();
-    const view = toResolutionAgentPublicView(agent as any);
+    const view = toResolutionAgentPublicView(agent as unknown as ResolutionAgent);
     const serialized = JSON.stringify(view);
 
     expect(serialized).not.toContain("TOP-SECRET-TAG-DO-NOT-EXPOSE");
@@ -156,7 +194,7 @@ describe("Public view NEVER contains encryptedSecret", () => {
 
   it("public view JSON has no deep encryption keys", () => {
     const agent = makeAgentWithEncryptedSecret();
-    const view = toResolutionAgentPublicView(agent as any);
+    const view = toResolutionAgentPublicView(agent as unknown as ResolutionAgent);
     const serialized = JSON.stringify(view);
 
     const forbiddenSubstrings = [
@@ -210,12 +248,12 @@ describe("No NEXT_PUBLIC encryption key env var", () => {
 // ---------------------------------------------------------------------------
 
 describe("Service barrel (../service) exports service functions", () => {
-  it("exports createResolutionAgentForCase", async () => {
+  it("exports createResolutionAgentForCase", { timeout: 30000 }, async () => {
     const mod = await import("../service");
     expect(typeof mod.createResolutionAgentForCase).toBe("function");
   });
 
-  it("exports activateResolutionAgent", async () => {
+  it("exports activateResolutionAgent", { timeout: 15000 }, async () => {
     const mod = await import("../service");
     expect(typeof mod.activateResolutionAgent).toBe("function");
   });

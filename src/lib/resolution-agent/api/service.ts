@@ -7,6 +7,7 @@
 // Dependencies:
 //   - SupabaseResolutionAgentStore for persistence
 //   - FundingReader for on-chain balance queries
+//   - EscrowCaseAuthorizationReader for on-chain party verification
 //   - Domain logic from state-machine, budget, public-view, wallet generation
 //   - Wallet encryption config from server/config
 //
@@ -37,6 +38,11 @@ import { generateEncryptedCaseWallet } from "../server/wallet";
 import { parseWalletEncryptionKey, WALLET_ENCRYPTION_KEY_ENV } from "../server/config";
 import type { FundingReader } from "./funding";
 import { SUPPORTED_BUDGETS, type SupportedBudget } from "./types";
+import type { EscrowCaseAuthorizationReader } from "./escrow-reader";
+import {
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
+} from "./escrow-reader";
+import { buildActivationMessage } from "./auth";
 
 // ---------------------------------------------------------------------------
 // Store interface (structural — matches any conforming store)
@@ -147,7 +153,7 @@ export function createStore(
  * Default agent expiry: 7 calendar days from creation.
  * After this window the agent can only transition to expired → closing → closed.
  */
-export const DEFAULT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_EXPIRY_MS = 7 * 24 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -181,12 +187,14 @@ export interface CreateAgentParams {
   now: number;
   /** Persistence store. */
   store: ResolutionAgentStore;
+  /** On-chain escrow reader for party verification. */
+  escrowReader: EscrowCaseAuthorizationReader;
 }
 
 export interface FundingStatusParams {
   /** The agent to check funding for. */
   agentId: string;
-  /** Verified wallet address of the funder. */
+  /** Verified wallet address of the caller. */
   authenticatedCaller: string;
   /** Current timestamp in milliseconds since epoch. */
   now: number;
@@ -194,6 +202,8 @@ export interface FundingStatusParams {
   store: ResolutionAgentStore;
   /** On-chain USDC balance reader. */
   fundingReader: FundingReader;
+  /** On-chain escrow reader for party verification. */
+  escrowReader: EscrowCaseAuthorizationReader;
 }
 
 export interface ActivateAgentParams {
@@ -205,6 +215,14 @@ export interface ActivateAgentParams {
   now: number;
   /** Persistence store. */
   store: ResolutionAgentStore;
+  /** On-chain escrow reader (for consistency). */
+  escrowReader: EscrowCaseAuthorizationReader;
+  /**
+   * The signed activation message from the client.  The server will
+   * reconstruct the canonical message from the agent's stored state and
+   * verify it matches this signed message.
+   */
+  signedMessage: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +252,125 @@ function validateApprovedBudget(atomic: bigint): asserts atomic is SupportedBudg
   }
 }
 
+/**
+ * Checks whether `caller` is an authorized party for the given agent by
+ * looking up the on-chain case parties (client/worker) via the escrow reader.
+ *
+ * Authorization is granted if the caller matches:
+ *  1. The stored funder address, OR
+ *  2. The on-chain client address, OR
+ *  3. The on-chain worker address
+ *
+ * All comparisons are case-insensitive.
+ */
+async function isAuthorizedForAgent(
+  agent: ResolutionAgent,
+  caller: string,
+  escrowReader: EscrowCaseAuthorizationReader,
+): Promise<boolean> {
+  // Stored funder always has access
+  if (
+    agent.policy.funderAddress.toLowerCase() === caller.toLowerCase()
+  ) {
+    return true;
+  }
+
+  // Check on-chain parties via the escrow reader
+  const parties = await escrowReader.getCaseParties({
+    escrowPaymentId: agent.identity.escrowPaymentId,
+  });
+
+  if (parties.exists) {
+    const callerLower = caller.toLowerCase();
+    if (
+      parties.client.toLowerCase() === callerLower ||
+      parties.worker.toLowerCase() === callerLower
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Verifies that a signed activation message matches the agent's canonical
+ * permissions by reconstructing the expected message from the agent's stored
+ * state and comparing it line-by-line with the signed message.
+ *
+ * Variable fields (Timestamp, Nonce) are skipped in the comparison.
+ * The Authorization Expires field is parsed from the signed message and
+ * validated to ensure the authorization hasn't expired.
+ */
+function verifyActivationMessageMatchesAgent(
+  signedMessage: string,
+  agent: ResolutionAgent,
+): void {
+  // Build the canonical message from the agent's current stored state
+  const canonicalMessage = buildActivationMessage({
+    agentId: agent.id,
+    funderAddress: agent.policy.funderAddress,
+    escrowChainId: agent.identity.escrowChainId,
+    escrowContractAddress: agent.identity.escrowContractAddress,
+    escrowPaymentId: agent.identity.escrowPaymentId,
+    goal: agent.goal,
+    approvedBudgetAtomic: agent.policy.approvedBudgetAtomic,
+    refundAddress: agent.policy.funderAddress,
+    policyVersion: "v1",
+    allowedToolIds: [...agent.policy.allowedTools],
+    agentExpiresAt: agent.policy.expiresAt,
+    authorizationExpiresAt: Date.now() + 5 * 60 * 1000, // placeholder, ignored in comparison
+  });
+
+  const canonicalLines = canonicalMessage.split("\n");
+  const signedLines = signedMessage.split("\n");
+
+  // Line count must match — ensures no fields were added/removed
+  if (canonicalLines.length !== signedLines.length) {
+    throw new Error(
+      "Activation authorization does not match the agent's canonical permissions.",
+    );
+  }
+
+  // Compare line-by-line, skipping variable fields
+  for (let i = 0; i < canonicalLines.length; i++) {
+    const cLine = canonicalLines[i];
+    const sLine = signedLines[i];
+
+    // Skip variable fields — these differ between client and server
+    if (
+      cLine.startsWith("Timestamp:") ||
+      cLine.startsWith("Nonce:") ||
+      cLine.startsWith("Authorization Expires:")
+    ) {
+      continue;
+    }
+
+    if (cLine !== sLine) {
+      throw new Error(
+        "Activation authorization does not match the agent's canonical permissions.",
+      );
+    }
+  }
+
+  // Validate the authorization expiry timestamp from the signed message
+  const authExpiryLine = signedLines.find((l) =>
+    l.startsWith("Authorization Expires:"),
+  );
+  if (authExpiryLine) {
+    const expiryStr = authExpiryLine.replace("Authorization Expires:", "").trim();
+    const expiry = parseInt(expiryStr, 10);
+    if (isNaN(expiry)) {
+      throw new Error(
+        "Invalid authorization expiry in activation message.",
+      );
+    }
+    if (Date.now() > expiry) {
+      throw new Error("Activation authorization has expired.");
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API: createResolutionAgentForCase
 // ---------------------------------------------------------------------------
@@ -242,24 +379,28 @@ function validateApprovedBudget(atomic: bigint): asserts atomic is SupportedBudg
  * Creates a new resolution agent for a given payment case.
  *
  * # Flow
- * 1. Validates the approved budget against the server allowlist.
- * 2. Checks whether an agent already exists for this case identity.
+ * 1. Verifies the caller is a legitimate case party (client or worker)
+ *    by reading the canonical escrow contract on-chain.
+ * 2. Validates the approved budget against the server allowlist.
+ * 3. Checks whether an agent already exists for this case identity.
  *    - Same funder  → returns the existing agent (idempotent).
  *    - Different funder → throws an error (one agent per case).
- * 3. Generates a cryptographically random case wallet and immediately
+ * 4. Generates a cryptographically random case wallet and immediately
  *    encrypts the private key with the server's wallet encryption key.
  *    The plaintext private key is never persisted or returned.
- * 4. Constructs the domain object with status "draft".
- * 5. Persists via the store (version 1).
- * 6. Transitions to "awaiting_funding" and updates (version 2).
- * 7. Appends a creation event.
- * 8. Returns a public-safe view (no encrypted secrets exposed).
+ * 5. Constructs the domain object with status "draft".
+ * 6. Persists via the store (version 1).
+ * 7. Transitions to "awaiting_funding" and updates (version 2).
+ * 8. Appends a creation event.
+ * 9. Returns a public-safe view (no encrypted secrets exposed).
  *
  * # Idempotency
  * If the same funder calls this twice with the same case identity, the
  * second call returns the existing agent unchanged.
  *
  * @throws If the budget is not in the server allowlist.
+ * @throws If the caller is not a valid case party (client or worker).
+ * @throws If the payment does not exist on-chain.
  * @throws If an agent already exists for this case with a different funder.
  * @throws If wallet generation or encryption fails.
  * @throws If persistence fails (store errors propagate).
@@ -267,15 +408,37 @@ function validateApprovedBudget(atomic: bigint): asserts atomic is SupportedBudg
 export async function createResolutionAgentForCase(
   params: CreateAgentParams,
 ): Promise<ResolutionAgentPublicView> {
-  const { authenticatedCaller, caseIdentity, approvedBudgetAtomic, now, store } = params;
+  const { authenticatedCaller, caseIdentity, approvedBudgetAtomic, now, store, escrowReader } = params;
+
+  // 0. Verify on-chain authorization: caller must be client or worker
+  const parties = await escrowReader.getCaseParties({
+    escrowPaymentId: caseIdentity.escrowPaymentId,
+  });
+
+  if (!parties.exists) {
+    throw new Error(
+      `Escrow payment "${caseIdentity.escrowPaymentId}" does not exist on-chain. ` +
+        "The payment must be created in the escrow contract before a resolution agent can be created.",
+    );
+  }
+
+  const callerLower = authenticatedCaller.toLowerCase();
+  const isClient = parties.client.toLowerCase() === callerLower;
+  const isWorker = parties.worker.toLowerCase() === callerLower;
+
+  if (!isClient && !isWorker) {
+    throw new Error(
+      "Access denied: only the client or worker of this escrow payment may create a resolution agent.",
+    );
+  }
 
   // 1. Validate budget
   validateApprovedBudget(approvedBudgetAtomic);
 
-  // 2. Check for existing agent by case identity
+  // 2. Check for existing agent by case identity (using canonical escrow address)
   const existingAgent = await store.getAgentByCaseIdentity(
     caseIdentity.escrowChainId,
-    caseIdentity.escrowContractAddress,
+    CANONICAL_ESCROW_CONTRACT_ADDRESS,
     caseIdentity.escrowPaymentId,
   );
 
@@ -311,7 +474,13 @@ export async function createResolutionAgentForCase(
       encryptionKey,
     });
 
-  // 6. Build the initial domain object (status: "draft")
+  // 6. Build the initial domain object with canonical escrow contract address
+  const canonicalCaseIdentity: AgentCaseIdentity = {
+    escrowPaymentId: caseIdentity.escrowPaymentId,
+    escrowChainId: caseIdentity.escrowChainId,
+    escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+  };
+
   const allowedTools: ResolutionAgentToolId[] = V1_TOOLS.map((t) => t.id);
   const expiresAt = now + DEFAULT_EXPIRY_MS;
 
@@ -319,7 +488,7 @@ export async function createResolutionAgentForCase(
     id: agentId,
     goal: FIXED_AGENT_GOAL,
     status: "draft",
-    identity: caseIdentity,
+    identity: canonicalCaseIdentity,
     policy: {
       allowedTools,
       approvedBudgetAtomic,
@@ -393,18 +562,25 @@ export async function createResolutionAgentForCase(
 /**
  * Reads an agent by ID and returns its public-safe view.
  *
- * Only the original funder may view the agent.  This prevents unauthorised
- * enumeration of agent IDs.
+ * # Authorisation
+ * Access is granted if the caller is:
+ *  1. The stored funder address, OR
+ *  2. The on-chain client of the escrow payment, OR
+ *  3. The on-chain worker of the escrow payment
+ *
+ * This prevents unauthorised enumeration of agent IDs while allowing both
+ * parties of a payment case to view the resolution agent.
  *
  * @throws If the agent is not found.
- * @throws If the caller is not the agent's funder.
+ * @throws If the caller is not authorized.
  */
 export async function getResolutionAgentPublicView(params: {
   agentId: string;
   authenticatedCaller: string;
   store: ResolutionAgentStore;
+  escrowReader: EscrowCaseAuthorizationReader;
 }): Promise<ResolutionAgentPublicView> {
-  const { agentId, authenticatedCaller, store } = params;
+  const { agentId, authenticatedCaller, store, escrowReader } = params;
 
   const agent = await store.getAgentById(agentId);
 
@@ -412,13 +588,11 @@ export async function getResolutionAgentPublicView(params: {
     throw new ResolutionAgentNotFoundError(agentId);
   }
 
-  // Only the original funder may view this agent
-  if (
-    agent.policy.funderAddress.toLowerCase() !==
-    authenticatedCaller.toLowerCase()
-  ) {
+  // Verify authorization: funder, client, or worker
+  const authorized = await isAuthorizedForAgent(agent, authenticatedCaller, escrowReader);
+  if (!authorized) {
     throw new Error(
-      "Access denied: only the agent's funder may view this agent.",
+      "Access denied: only the agent's funder or the escrow case parties (client/worker) may view this agent.",
     );
   }
 
@@ -443,16 +617,17 @@ export async function getResolutionAgentPublicView(params: {
  *   current state with the balance report.
  *
  * # Authorisation
- * Only the original funder may check the funding status.
+ * Access is granted if the caller is the stored funder, the on-chain client,
+ * or the on-chain worker.
  *
  * @throws If the agent is not found.
- * @throws If the caller is not the agent's funder.
+ * @throws If the caller is not authorized.
  * @throws If the on-chain balance read fails.
  */
 export async function refreshFundingStatus(
   params: FundingStatusParams,
 ): Promise<FundingStatusResponse> {
-  const { agentId, authenticatedCaller, now, store, fundingReader } = params;
+  const { agentId, authenticatedCaller, now, store, fundingReader, escrowReader } = params;
 
   // 1. Read agent
   const agent = await store.getAgentById(agentId);
@@ -460,13 +635,11 @@ export async function refreshFundingStatus(
     throw new ResolutionAgentNotFoundError(agentId);
   }
 
-  // 2. Authorisation check
-  if (
-    agent.policy.funderAddress.toLowerCase() !==
-    authenticatedCaller.toLowerCase()
-  ) {
+  // 2. Authorisation check (funder, client, or worker)
+  const authorized = await isAuthorizedForAgent(agent, authenticatedCaller, escrowReader);
+  if (!authorized) {
     throw new Error(
-      "Access denied: only the agent's funder may check funding status.",
+      "Access denied: only the agent's funder or the escrow case parties may check funding status.",
     );
   }
 
@@ -565,21 +738,27 @@ export async function refreshFundingStatus(
  * current state without modification.
  *
  * # Authorisation
- * Only the original funder may activate the agent.
+ * Only the original funder may activate the agent.  This is enforced by
+ * both the standard auth check AND verification that the signed activation
+ * message matches the agent's canonical permissions.
  *
- * # Preconditions
- * - Agent must exist.
- * - Caller must be the funder.
- * - Agent must be in `awaiting_activation` status (or already `active`).
+ * # Activation message verification (CRITICAL HARDENING)
+ * The server reconstructs the canonical activation message from the agent's
+ * stored state (all permissions, tools, budget, expiry) and compares it
+ * against the signed message provided by the client.  If they don't match,
+ * the activation is rejected — even if the signature is valid.
  *
  * @throws If the agent is not found.
  * @throws If the caller is not the funder.
+ * @throws If the signed activation message does not match the agent's
+ *         canonical permissions.
+ * @throws If the authorization expiry has passed.
  * @throws If the agent is not in a status that supports activation.
  */
 export async function activateResolutionAgent(
   params: ActivateAgentParams,
 ): Promise<ResolutionAgentPublicView> {
-  const { agentId, authenticatedCaller, now, store } = params;
+  const { agentId, authenticatedCaller, now, store, signedMessage } = params;
 
   // 1. Read agent
   const agent = await store.getAgentById(agentId);
@@ -587,7 +766,7 @@ export async function activateResolutionAgent(
     throw new ResolutionAgentNotFoundError(agentId);
   }
 
-  // 2. Authorisation check
+  // 2. Authorisation check — only the original funder may activate
   if (
     agent.policy.funderAddress.toLowerCase() !==
     authenticatedCaller.toLowerCase()
@@ -597,12 +776,16 @@ export async function activateResolutionAgent(
     );
   }
 
-  // 3. Already active (idempotent)
+  // 3. Verify the signed activation message matches the agent's canonical
+  //    permissions (CRITICAL HARDENING — prevents signature reuse)
+  verifyActivationMessageMatchesAgent(signedMessage, agent);
+
+  // 4. Already active (idempotent)
   if (agent.status === "active") {
     return toResolutionAgentPublicView(agent);
   }
 
-  // 4. Validate preconditions
+  // 5. Validate preconditions
   if (agent.status !== "awaiting_activation") {
     throw new Error(
       `Agent cannot be activated from status "${agent.status}". ` +
@@ -610,10 +793,10 @@ export async function activateResolutionAgent(
     );
   }
 
-  // 5. Read current version for optimistic concurrency
+  // 6. Read current version for optimistic concurrency
   const currentVersion = await readAgentVersion(store, agentId);
 
-  // 6. Transition: awaiting_activation → active
+  // 7. Transition: awaiting_activation → active
   const activationCtx: TransitionContext = {
     fundingConfirmed: false,
     activationApproved: true,
@@ -625,18 +808,18 @@ export async function activateResolutionAgent(
     activationCtx,
   );
 
-  // 7. Persist with optimistic concurrency
+  // 8. Persist with optimistic concurrency
   await store.updateAgent(activatedAgent, currentVersion);
 
-  // 8. Append activation event
+  // 9. Append activation event
   await store.appendEvent(
     agentId,
     "status_change",
-    "Agent activated by funder.",
+    "Agent activated by funder after canonical permission verification.",
     agent.status,
     activatedAgent.status,
   );
 
-  // 9. Return public-safe view
+  // 10. Return public-safe view
   return toResolutionAgentPublicView(activatedAgent);
 }

@@ -6,7 +6,8 @@
 //   "@/lib/resolution-agent/api"
 //
 // This module exposes the public API surface: request/response schemas,
-// authentication, funding, and the core business-logic service.
+// authentication, funding, escrow authorization, and the core business-logic
+// service.
 // ---------------------------------------------------------------------------
 
 // ---- Request/response schemas and types ----
@@ -30,6 +31,19 @@ export {
   buildActivationMessage,
   verifyAuth,
 } from "./auth";
+
+// ---- Escrow authorization reader (on-chain party verification) ----
+export {
+  CANONICAL_ESCROW_CHAIN_ID,
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
+  CeloSepoliaEscrowCaseReader,
+  MockEscrowCaseReader,
+} from "./escrow-reader";
+
+export type {
+  CaseParties,
+  EscrowCaseAuthorizationReader,
+} from "./escrow-reader";
 
 // ---- Funding (on-chain balance reader) ----
 export {

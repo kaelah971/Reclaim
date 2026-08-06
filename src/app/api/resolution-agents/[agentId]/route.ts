@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
 // GET /api/resolution-agents/[agentId]
 //
-// Retrieve a Resolution Agent's public view.  Only the original funder
-// (verified via wallet auth headers) may view this agent.
+// Retrieve a Resolution Agent's public view.  Access is granted to the
+// stored funder OR the on-chain client OR the on-chain worker (verified
+// against the canonical escrow contract).
 //
 // Headers:
 //   x-wallet-address   — caller's EVM address
@@ -12,7 +13,7 @@
 // Responses:
 //   200 — ResolutionAgentPublicView
 //   401 — missing or invalid wallet authentication
-//   403 — caller is not the funder of this agent
+//   403 — caller is not authorized (not funder, client, or worker)
 //   404 — agent not found
 //   500 — internal server error
 // ---------------------------------------------------------------------------
@@ -20,6 +21,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAuth } from "@/lib/resolution-agent/api/auth";
 import { getResolutionAgentPublicView, createStore } from "@/lib/resolution-agent/api/service";
+import {
+  CeloSepoliaEscrowCaseReader,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -66,15 +70,18 @@ export async function GET(
     }
 
     // -----------------------------------------------------------------
-    // Step 2: Load agent and verify caller is the funder
-    //         (authorisation is enforced inside the service function)
+    // Step 2: Load agent and verify authorization
+    //         (authorisation is enforced inside the service function —
+    //         it checks the stored funder AND the on-chain case parties)
     // -----------------------------------------------------------------
+    const escrowReader = new CeloSepoliaEscrowCaseReader();
     const store = createStore();
 
     const publicView = await getResolutionAgentPublicView({
       agentId,
       authenticatedCaller: walletAddress,
       store,
+      escrowReader,
     });
 
     // -----------------------------------------------------------------

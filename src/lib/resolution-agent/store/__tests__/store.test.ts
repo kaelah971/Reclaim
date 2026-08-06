@@ -38,92 +38,107 @@ describe("SupabaseResolutionAgentStore — structure", () => {
 
   it("createAgent exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.createAgent).toBe("function");
   });
 
   it("createAgent has length 1 (takes one argument: agent)", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(store.createAgent.length).toBe(1);
   });
 
   it("getAgentById exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.getAgentById).toBe("function");
   });
 
   it("getAgentById has length 1 (takes agentId)", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(store.getAgentById.length).toBe(1);
   });
 
   it("getAgentByCaseIdentity exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.getAgentByCaseIdentity).toBe("function");
   });
 
   it("getAgentByCaseIdentity has length 3 (chainId, contractAddress, paymentId)", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(store.getAgentByCaseIdentity.length).toBe(3);
   });
 
   it("updateAgent accepts expectedVersion parameter", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(store.updateAgent.length).toBe(2);
   });
 
   it("appendEvent exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.appendEvent).toBe("function");
   });
 
   it("listEvents exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.listEvents).toBe("function");
   });
 
   it("createToolExecution exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.createToolExecution).toBe("function");
   });
 
   it("getToolExecutionByRequestHash exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.getToolExecutionByRequestHash).toBe("function");
   });
 
   it("updateToolExecution exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.updateToolExecution).toBe("function");
   });
 
   it("createEvidenceRequest accepts responsibleParty parameter", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.createEvidenceRequest).toBe("function");
     expect(store.createEvidenceRequest.length).toBe(4);
   });
 
   it("listEvidenceRequests exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.listEvidenceRequests).toBe("function");
   });
 
   it("updateEvidenceRequest exists and is a function", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.updateEvidenceRequest).toBe("function");
   });
 });
@@ -135,7 +150,8 @@ describe("SupabaseResolutionAgentStore — structure", () => {
 describe("SupabaseResolutionAgentStore — optimistic concurrency contract", () => {
   it("updateAgent method accepts expectedVersion", async () => {
     const { SupabaseResolutionAgentStore } = await import("../supabase");
-    const store = new SupabaseResolutionAgentStore(mockClient as any);
+    const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
+new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.updateAgent).toBe("function");
     expect(store.updateAgent.length).toBe(2);
   });
