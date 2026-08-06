@@ -283,6 +283,7 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
   const settlementClient: ResolutionAgentX402SettlementClient = {
     settleEvidenceQualityCheck: mockSettle as unknown as ResolutionAgentX402SettlementClient["settleEvidenceQualityCheck"],
     settleCaseRefresh: vi.fn() as unknown as ResolutionAgentX402SettlementClient["settleCaseRefresh"],
+    settleDisputeBrief: vi.fn() as unknown as ResolutionAgentX402SettlementClient["settleDisputeBrief"],
   };
 
   const generator: EvidenceQualityCheckGenerator = {

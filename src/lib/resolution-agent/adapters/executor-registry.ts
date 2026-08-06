@@ -16,11 +16,13 @@ import type {
   LeaseContext,
 } from "../worker/types";
 import type { ToolExecutionRow } from "../store/types";
-import type { EvidenceQualityCheckDependencies, CaseRefreshDependencies } from "./types";
+import type { EvidenceQualityCheckDependencies, CaseRefreshDependencies, DisputeBriefDependencies } from "./types";
 import { executeEvidenceQualityCheck } from "./evidence-quality-check";
 import { recoverPaidEvidenceQualityCheck } from "./recovery";
 import { executeCaseRefresh } from "./case-refresh";
 import { recoverPaidCaseRefresh } from "./case-refresh-recovery";
+import { executeDisputeBrief } from "./dispute-brief";
+import { recoverPaidDisputeBrief } from "./dispute-brief-recovery";
 
 // ---------------------------------------------------------------------------
 // Factory: createProductionActionExecutor
@@ -28,11 +30,10 @@ import { recoverPaidCaseRefresh } from "./case-refresh-recovery";
 
 /**
  * Creates the production ResolutionAgentActionExecutor with
- * evidence-quality-check wired to the concrete adapter.
+ * evidence-quality-check, case-refresh, and reclaim-dispute-brief-v1
+ * wired to the concrete adapters.
  *
- * Unsupported tools (case-refresh, reclaim-dispute-brief-v1) return
- * "unsupported_action".  Non-tool actions return "skipped" or
- * "unsupported_action" as appropriate.
+ * Non-tool actions return "skipped" or "unsupported_action" as appropriate.
  */
 export function createProductionActionExecutor(
   dependencies: EvidenceQualityCheckDependencies,
@@ -75,10 +76,14 @@ export function createProductionActionExecutor(
         }
 
         case "reclaim-dispute-brief-v1": {
-          return {
-            kind: "unsupported_action",
-            actionKind: action.toolId,
-          };
+          return executeDisputeBrief({
+            agent,
+            plan,
+            action,
+            leaseContext,
+            now,
+            dependencies: dependencies as unknown as DisputeBriefDependencies,
+          });
         }
 
         default: {
@@ -134,10 +139,13 @@ export function createProductionRecoveryHandler(
         }
 
         case "reclaim-dispute-brief-v1": {
-          return {
-            kind: "unsupported_action",
-            actionKind: execution.tool_identifier,
-          };
+          return recoverPaidDisputeBrief({
+            agent,
+            execution,
+            leaseContext,
+            now,
+            dependencies: dependencies as unknown as DisputeBriefDependencies,
+          });
         }
 
         default: {

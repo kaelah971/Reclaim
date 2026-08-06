@@ -32,6 +32,7 @@ import { transitionAgentStatus } from "../state-machine";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
   CASE_REFRESH_PRICE_ATOMIC,
+  DISPUTE_BRIEF_PRICE_ATOMIC,
 } from "../tools";
 import {
   AGENT_FACILITATOR_NETWORK,
@@ -46,6 +47,7 @@ import type { EvidenceCheckIdentity } from "../../x402/requestHash";
 import {
   computeCaseRefreshHashFromInput,
 } from "../../x402/caseRefreshRequestHash";
+import { keccak256, stringToHex } from "viem";
 
 // ---------------------------------------------------------------------------
 // Canonical tool configuration constants
@@ -59,6 +61,7 @@ const CANONICAL_PAY_TO = AGENT_PAY_TO_ADDRESS;
 const CANONICAL_TOOL_IDS = [
   "evidence-quality-check",
   "case-refresh",
+  "reclaim-dispute-brief-v1",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -94,7 +97,14 @@ async function recoverMissingExecution(params: {
   if (!caseVersionHash || !evidenceVersionHash) return null;
 
   // Resolve canonical config based on tool
-  const price = toolId === "case-refresh" ? CASE_REFRESH_PRICE_ATOMIC : CANONICAL_PRICE;
+  let price: bigint;
+  if (toolId === "case-refresh") {
+    price = CASE_REFRESH_PRICE_ATOMIC;
+  } else if (toolId === "reclaim-dispute-brief-v1") {
+    price = DISPUTE_BRIEF_PRICE_ATOMIC;
+  } else {
+    price = CANONICAL_PRICE;
+  }
 
   // Reconstruct the deterministic request hash
   let requestHash: string;
@@ -122,6 +132,33 @@ async function recoverMissingExecution(params: {
       CANONICAL_PAY_TO,
       String(price),
     );
+  } else if (toolId === "reclaim-dispute-brief-v1") {
+    // For dispute brief recovery, we build a minimal hash using
+    // the case/evidence version hashes and service identifier.
+    const disputeInputHash = [
+      "reclaim-dispute-brief-v1",
+      agent.identity.escrowPaymentId,
+      caseVersionHash,
+      evidenceVersionHash,
+    ].join(":");
+    const parts: string[] = [];
+    if (agent.identity.escrowChainId && agent.identity.escrowContractAddress) {
+      parts.push(
+        `escrow:${agent.identity.escrowChainId}:${agent.identity.escrowContractAddress.toLowerCase()}`,
+      );
+    }
+    parts.push(
+      "reclaim-dispute-brief-v1",
+      agent.identity.escrowPaymentId,
+      disputeInputHash,
+      agent.caseWalletAddress.toLowerCase(),
+      CANONICAL_NETWORK,
+      String(DISPUTE_BRIEF_PRICE_ATOMIC),
+      CANONICAL_PAY_TO.toLowerCase(),
+      "exact",
+      CANONICAL_ASSET.toLowerCase(),
+    );
+    requestHash = keccak256(stringToHex(parts.join(":")));
   } else {
     const evidenceInputHash = `${EVIDENCE_CHECK_SERVICE_IDENTIFIER}:${agent.identity.escrowPaymentId}:${caseVersionHash}:${evidenceVersionHash}`;
     const identity: EvidenceCheckIdentity = {

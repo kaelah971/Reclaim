@@ -258,7 +258,7 @@ describe("createProductionActionExecutor", () => {
     expect(result.kind).not.toBe("unsupported_action");
   });
 
-  it("Dispute Brief returns unsupported_action", async () => {
+  it("Dispute Brief is wired to adapter", async () => {
     const executor = createProductionActionExecutor(deps.dependencies);
     const agent = makeAgent();
     const plan = agent.plan!;
@@ -269,8 +269,8 @@ describe("createProductionActionExecutor", () => {
       agent, plan, action, leaseContext: lease, now: Date.now(),
     });
 
-    expect(result.kind).toBe("unsupported_action");
-    expect((result as any).actionKind).toBe("reclaim-dispute-brief-v1");
+    // dispute-brief is now supported — with proper deps it should not return unsupported_action
+    expect(result.kind).not.toBe("unsupported_action");
   });
 
   it("non-tool actions return skipped", async () => {
@@ -374,7 +374,7 @@ describe("createProductionRecoveryHandler", () => {
     expect(result.kind).not.toBe("unsupported_action");
   });
 
-  it("Dispute Brief returns unsupported_action in recovery", async () => {
+  it("Dispute Brief is wired to recovery handler", async () => {
     const handler = createProductionRecoveryHandler(deps.dependencies);
     const agent = makeAgent();
     const execution = makeToolExecutionRow("reclaim-dispute-brief-v1", "paid_pending_result");
@@ -384,8 +384,8 @@ describe("createProductionRecoveryHandler", () => {
       agent, execution, leaseContext: lease, now: Date.now(),
     });
 
-    expect(result.kind).toBe("unsupported_action");
-    expect((result as any).actionKind).toBe("reclaim-dispute-brief-v1");
+    // dispute-brief is now supported — with proper deps it should not return unsupported_action
+    expect(result.kind).not.toBe("unsupported_action");
   });
 
   it("unknown tool returns unsupported_action in recovery", async () => {

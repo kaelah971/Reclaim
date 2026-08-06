@@ -290,7 +290,7 @@ describe("cold-restart: reservation without execution", () => {
 describe("cold-restart: missing durable action identity", () => {
   it("recovery returns null when currentRunningToolId is not a known tool", async () => {
     const store2 = createDurableStore();
-    const agent2 = makeAgent({ currentRunningToolId: "reclaim-dispute-brief-v1" as any });
+    const agent2 = makeAgent({ currentRunningToolId: "unknown-tool-xyz" as any });
     store2.agents.set(agent2.id, { ...agent2 });
 
     // For store.getAgentVersion, we need it to work

@@ -15,12 +15,20 @@ export {
 } from "./case-refresh";
 
 export {
+  executeDisputeBrief,
+} from "./dispute-brief";
+
+export {
   recoverPaidEvidenceQualityCheck,
 } from "./recovery";
 
 export {
   recoverPaidCaseRefresh,
 } from "./case-refresh-recovery";
+
+export {
+  recoverPaidDisputeBrief,
+} from "./dispute-brief-recovery";
 
 export {
   createProductionActionExecutor,
@@ -37,6 +45,11 @@ export {
 } from "./case-refresh-input";
 
 export {
+  buildDisputeBriefInput,
+  computeDisputeBriefInputHash,
+} from "./dispute-brief-input";
+
+export {
   normalizeEvidenceQualityResult,
 } from "./evidence-quality-result";
 
@@ -44,16 +57,23 @@ export {
   normalizeCaseRefreshResult,
 } from "./case-refresh-result";
 
+export {
+  normalizeDisputeBriefResult,
+} from "./dispute-brief-result";
+
 export type {
   ResolutionAgentX402SettlementClient,
   X402SettlementResult,
   EvidenceQualityCheckGenerator,
   CaseRefreshGenerator,
+  DisputeBriefGenerator,
+  DisputeBriefGenerationResult,
   ResolutionAgentWalletDecryptor,
   ResolutionAgentPaymentStore,
   EvidenceQualityCheckStore,
   EvidenceQualityCheckDependencies,
   CaseRefreshDependencies,
+  DisputeBriefDependencies,
 } from "./types";
 
 export {

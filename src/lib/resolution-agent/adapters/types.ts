@@ -16,6 +16,7 @@ import type { FacilitatorSettlementReceipt } from "../../x402/settlementProvider
 import type { ServiceInput } from "./evidence-quality-input";
 import type { CaseRefreshInput } from "../../x402/caseRefreshValidation";
 import type { CaseRefreshGenerationResult } from "../../x402/caseRefreshGenerate";
+import type { DisputeBriefAgentInput } from "./dispute-brief-input";
 
 // ---------------------------------------------------------------------------
 // X402 Settlement Client (injected)
@@ -50,6 +51,16 @@ export interface ResolutionAgentX402SettlementClient {
     asset: string;
     payTo: string;
   }): Promise<X402SettlementResult>;
+
+  settleDisputeBrief(params: {
+    payerAccount: Account;
+    requestHash: string;
+    serviceInput: DisputeBriefAgentInput;
+    expectedPriceAtomic: bigint;
+    network: string;
+    asset: string;
+    payTo: string;
+  }): Promise<X402SettlementResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +81,28 @@ export interface CaseRefreshGenerator {
   generate(params: {
     serviceInput: CaseRefreshInput;
   }): Promise<CaseRefreshGenerationResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Dispute Brief Generation Result
+// ---------------------------------------------------------------------------
+
+export interface DisputeBriefGenerationResult {
+  briefId: string;
+  generatedAt: string;
+  generationMode: string;
+  reviewerPacketReady: boolean;
+  summary: string;
+}
+
+// ---------------------------------------------------------------------------
+// Dispute Brief Generator (injected)
+// ---------------------------------------------------------------------------
+
+export interface DisputeBriefGenerator {
+  generate(params: {
+    serviceInput: DisputeBriefAgentInput;
+  }): Promise<DisputeBriefGenerationResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +219,18 @@ export interface CaseRefreshDependencies {
   store: EvidenceQualityCheckStore;
   settlementClient: ResolutionAgentX402SettlementClient;
   generator: CaseRefreshGenerator;
+  walletDecryptor: ResolutionAgentWalletDecryptor;
+  paymentStore: ResolutionAgentPaymentStore;
+}
+
+// ---------------------------------------------------------------------------
+// Dispute Brief Dependencies
+// ---------------------------------------------------------------------------
+
+export interface DisputeBriefDependencies {
+  store: EvidenceQualityCheckStore;
+  settlementClient: ResolutionAgentX402SettlementClient;
+  generator: DisputeBriefGenerator;
   walletDecryptor: ResolutionAgentWalletDecryptor;
   paymentStore: ResolutionAgentPaymentStore;
 }
