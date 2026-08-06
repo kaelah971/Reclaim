@@ -18,6 +18,9 @@ import type {
   ToolExecutionRow,
   EvidenceRequestRow,
 } from "./types";
+import type { WorkerCandidate } from "../worker/types";
+import { RUNNABLE_AGENT_STATUSES } from "../worker/types";
+import { DEFAULT_LEASE_DURATION_MS } from "../worker/types";
 import { agentToInsertRow, agentToUpdateRow, rowToAgent } from "./serialization";
 import {
   ResolutionAgentAlreadyExistsError,
@@ -120,6 +123,22 @@ export class SupabaseResolutionAgentStore {
     if (!data) return null;
 
     return rowToAgent(data as ResolutionAgentRow);
+  }
+
+  // -------------------------------------------------------------------------
+  // Version — read current concurrency-control version
+  // -------------------------------------------------------------------------
+
+  async getAgentVersion(agentId: string): Promise<number> {
+    const { data, error } = await this.client
+      .from(TABLE_AGENTS)
+      .select("version")
+      .eq("agent_id", agentId)
+      .maybeSingle();
+
+    if (error || !data) return 0;
+
+    return (data as { version: number }).version;
   }
 
   // -------------------------------------------------------------------------
@@ -454,5 +473,187 @@ export class SupabaseResolutionAgentStore {
       );
       throw error;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker — list runnable agents
+  // -------------------------------------------------------------------------
+
+  /**
+   * Lists agents eligible for worker processing, ordered by oldest update first.
+   */
+  async listRunnableAgents(limit = 5): Promise<WorkerCandidate[]> {
+    const statuses = [...RUNNABLE_AGENT_STATUSES];
+    const { data, error } = await this.client
+      .from(TABLE_AGENTS)
+      .select("agent_id, status, lease_owner, lease_expires_at, updated_at")
+      .in("status", statuses)
+      .order("updated_at", { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      console.error(
+        `[SupabaseResolutionAgentStore] listRunnableAgents failed: ${error.message}`,
+      );
+      return [];
+    }
+
+    const rows = data as Array<{
+      agent_id: string;
+      status: string;
+      lease_owner: string | null;
+      lease_expires_at: string | null;
+      updated_at: string;
+    }> | null;
+
+    if (!rows) return [];
+
+    return rows.map((row) => ({
+      agentId: row.agent_id,
+      status: row.status,
+      leaseOwner: row.lease_owner,
+      leaseExpiresAt: row.lease_expires_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker — atomic lease acquisition
+  // -------------------------------------------------------------------------
+
+  /**
+   * Attempt to acquire a lease on an agent using compare-and-swap.
+   *
+   * Uses: UPDATE ... SET lease_owner = token, lease_expires_at = expiry
+   *       WHERE agent_id = id AND lease_owner IS NOT DISTINCT FROM existingOwner
+   *
+   * Returns the LeaseContext on success, null on conflict.
+   */
+  async tryAcquireAgentLease(
+    agentId: string,
+    ownerToken: string,
+    now: number,
+  ): Promise<import("../worker/types").LeaseContext | null> {
+    const expiresAt = new Date(now + DEFAULT_LEASE_DURATION_MS).toISOString();
+
+    // First check eligibility (status + current lease state)
+    const { data: agent, error: fetchErr } = await this.client
+      .from(TABLE_AGENTS)
+      .select("agent_id, status, lease_owner, lease_expires_at")
+      .eq("agent_id", agentId)
+      .single();
+
+    if (fetchErr || !agent) return null;
+
+    const status = (agent as Record<string, unknown>).status as string;
+    if (!RUNNABLE_AGENT_STATUSES.includes(status as typeof RUNNABLE_AGENT_STATUSES[number])) {
+      return null;
+    }
+
+    const existingLease = (agent as Record<string, unknown>).lease_owner as string | null;
+    const existingExpiry = (agent as Record<string, unknown>).lease_expires_at as string | null;
+
+    // If an active lease exists, bail out
+    if (existingLease && existingExpiry) {
+      const expiryTime = new Date(existingExpiry).getTime();
+      if (!isNaN(expiryTime) && expiryTime > now) return null;
+    }
+
+    // Atomic update — conditional on current lease owner
+    const { data: updated, error } = await this.client
+      .from(TABLE_AGENTS)
+      .update({
+        lease_owner: ownerToken,
+        lease_expires_at: expiresAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("agent_id", agentId)
+      .is("lease_owner", existingLease ?? null)
+      .select("lease_owner, lease_expires_at")
+      .maybeSingle();
+
+    if (error || !updated) return null;
+
+    // Verify we actually got the lease
+    if (
+      (updated as Record<string, unknown>).lease_owner !== ownerToken
+    ) {
+      return null;
+    }
+
+    return {
+      agentId,
+      ownerToken,
+      acquiredAt: now,
+      expiresAt: now + DEFAULT_LEASE_DURATION_MS,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker — renew lease (only current owner)
+  // -------------------------------------------------------------------------
+
+  async renewAgentLease(
+    agentId: string,
+    ownerToken: string,
+    now: number,
+  ): Promise<boolean> {
+    const expiresAt = new Date(now + DEFAULT_LEASE_DURATION_MS).toISOString();
+    const { error } = await this.client
+      .from(TABLE_AGENTS)
+      .update({
+        lease_expires_at: expiresAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("agent_id", agentId)
+      .eq("lease_owner", ownerToken);
+
+    return !error;
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker — release lease (only current owner)
+  // -------------------------------------------------------------------------
+
+  async releaseAgentLease(
+    agentId: string,
+    ownerToken: string,
+  ): Promise<boolean> {
+    const { error } = await this.client
+      .from(TABLE_AGENTS)
+      .update({
+        lease_owner: null,
+        lease_expires_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("agent_id", agentId)
+      .eq("lease_owner", ownerToken);
+
+    if (error) {
+      console.error(
+        `[SupabaseResolutionAgentStore] releaseAgentLease failed: ${error.message}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker — get latest tool execution
+  // -------------------------------------------------------------------------
+
+  async getLatestToolExecution(
+    agentId: string,
+  ): Promise<ToolExecutionRow | null> {
+    const { data, error } = await this.client
+      .from(TABLE_TOOL_EXECUTIONS)
+      .select("*")
+      .eq("agent_id", agentId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) return null;
+    return (data as ToolExecutionRow) ?? null;
   }
 }
