@@ -475,6 +475,7 @@ describe("rowToAgent", () => {
       version: 1,
       lease_owner: null,
       lease_expires_at: null,
+      current_running_tool_id: null,
       // Additional fields the implementation may look at
       id: "db-uuid-001",
       evidence_version_hash: "0xabc123",
@@ -737,6 +738,7 @@ describe("rowToAgent — error handling", () => {
       version: 1,
       lease_owner: null,
       lease_expires_at: null,
+      current_running_tool_id: null,
       id: "db-uuid-err",
       evidence_version_hash: null,
       case_version_hash: null,

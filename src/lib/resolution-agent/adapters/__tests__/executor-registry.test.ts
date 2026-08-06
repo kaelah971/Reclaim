@@ -158,6 +158,8 @@ function makeMockDependencies(): {
     getAgentVersion: vi.fn().mockResolvedValue(1),
     updateAgent: vi.fn().mockImplementation((a: ResolutionAgent) => Promise.resolve(a)),
     appendEvent: vi.fn().mockResolvedValue(undefined),
+    getAgentById: vi.fn().mockResolvedValue(makeAgent({ status: "running_tool", currentRunningToolId: "evidence-quality-check", budget: { approvedAtomic: 100000n, spentAtomic: 0n, reservedAtomic: 10000n } })),
+    reserveToolExecutionAtomically: vi.fn().mockResolvedValue({ kind: "created", agentId: "", requestHash: "", state: "reserved" }),
   };
 
   const settlementClient = {
@@ -237,7 +239,7 @@ describe("createProductionActionExecutor", () => {
     });
 
     expect(result.kind).toBe("executed");
-    expect(deps.store.createToolExecution).toHaveBeenCalled();
+    expect(deps.store.reserveToolExecutionAtomically).toHaveBeenCalled();
   });
 
   it("case-refresh returns unsupported_action", async () => {

@@ -28,6 +28,7 @@ import type { ResolutionAgent } from "../types";
 import { classifyResolutionAgentRecovery } from "./recovery";
 import { dispatchControlAction, isPlanStale } from "./dispatcher";
 import { generateLeaseToken } from "./lease";
+import { transitionAgentStatus } from "../state-machine";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
 } from "../tools";
@@ -295,6 +296,27 @@ export async function runResolutionAgentWorkerIteration(params: {
       }
 
       // 7c. Recovery not possible — mark as failed_recoverable
+      //     The agent has a running tool with malformed or missing plan data.
+      //     Transition to failed_recoverable (once only), preserve the
+      //     reservation, and return a result indicating manual reconciliation.
+      if (agent.status !== "failed_recoverable") {
+        const version = await store.getAgentVersion(agent.id);
+        const failedAgent = transitionAgentStatus(agent, "failed_recoverable", { now });
+        try {
+          await store.updateAgent(failedAgent, version);
+        } catch {
+          // Best-effort — version may have changed concurrently
+        }
+        await store.appendEvent(
+          agent.id,
+          "tool_execution_recovery_failed",
+          "Cannot recover — malformed or missing plan data for running tool",
+          "running_tool",
+          "failed_recoverable",
+          { toolId: agent.currentRunningToolId ?? "unknown" },
+        );
+      }
+
       actionResult = {
         kind: "failed_recoverable",
         reason: recoveryDecision.reason,

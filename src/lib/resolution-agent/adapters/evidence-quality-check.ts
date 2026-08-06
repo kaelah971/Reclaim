@@ -28,7 +28,7 @@ import {
   computeEvidenceCheckHash,
   EVIDENCE_CHECK_SERVICE_IDENTIFIER,
 } from "../../x402/requestHash";
-import { reserveAmount, applySpend, releaseReservation } from "../budget";
+import { applySpend, releaseReservation } from "../budget";
 import { transitionAgentStatus } from "../state-machine";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
@@ -306,6 +306,12 @@ async function handleExistingExecution(params: {
 
 // ---------------------------------------------------------------------------
 // Create new execution (the full flow)
+//
+// Uses the atomic RPC function reserve_resolution_agent_tool_execution
+// to reserve budget, create an execution row, and transition to running_tool
+// in a single PostgreSQL transaction.  This eliminates the crash-vulnerable
+// window between budget reservation and execution creation that existed in
+// the previous multi-step client-side sequence.
 // ---------------------------------------------------------------------------
 
 async function createExecution(params: {
@@ -332,90 +338,97 @@ async function createExecution(params: {
   // ---- Step 6a: Version check (concurrency guard) -------------------------
   const currentVersion = await store.getAgentVersion(agent.id);
 
-  // ---- Step 6b: Compute in-memory budget reservation ----------------------
-  let updatedBudget;
+  // ---- Step 6b: Atomic RPC — reserve budget + create execution + transition
+  // The RPC handles everything atomically:
+  //   1. Locks the agent row with FOR UPDATE
+  //   2. Validates version, lifecycle, budget
+  //   3. Checks for idempotent existing execution
+  //   4. Creates execution in 'reserved' state
+  //   5. Updates agent: reserved_budget += price, current_running_tool_id, status = 'running_tool'
+  // All within a single database transaction.
+  let rpcResult;
   try {
-    updatedBudget = reserveAmount(agent.budget, CANONICAL_PRICE);
-  } catch {
-    return {
-      kind: "skipped",
-      reason: "Insufficient budget to reserve 10000 atomic",
-    };
+    rpcResult = await store.reserveToolExecutionAtomically({
+      agentId: agent.id,
+      expectedAgentVersion: currentVersion,
+      requestHash,
+      toolId: CANONICAL_TOOL_ID,
+      caseVersionHash: plan.caseVersionHash,
+      evidenceVersionHash: plan.evidenceVersionHash,
+      priceAtomic: CANONICAL_PRICE,
+      network: CANONICAL_NETWORK,
+      asset: CANONICAL_ASSET,
+      payTo: CANONICAL_PAY_TO,
+      serviceIdentifier: CANONICAL_TOOL_ID,
+      policyVersion: "v1",
+      now,
+    });
+  } catch (err: unknown) {
+    const msg = (err as Error)?.message ?? "";
+    if (msg.includes("Agent not found")) {
+      return { kind: "failed_safe", reason: "Agent not found during atomic reservation" };
+    }
+    if (msg.includes("Version conflict")) {
+      return { kind: "failed_recoverable", reason: "Version conflict during atomic reservation" };
+    }
+    if (msg.includes("status") || msg.includes("cannot start")) {
+      return { kind: "skipped", reason: "Agent is not in a state that allows tool execution" };
+    }
+    if (msg.includes("budget") || msg.includes("Insufficient")) {
+      return { kind: "skipped", reason: "Insufficient budget for tool execution" };
+    }
+    return { kind: "failed_recoverable", reason: `Atomic reservation failed: ${msg}` };
   }
 
-  // ---- Step 6c: Atomically persist reservation + transition ---------------
-  // CRITICAL: budget reservation MUST be persisted BEFORE the execution row
-  // is created.  If the process crashes after the budget is reserved but
-  // before the execution exists, recovery can recompute the deterministic
-  // request hash from the agent's currentRunningToolId and case identity.
-  //
-  // A single updateAgent call atomically:
-  //   1. reserves 10000 atomic USDC (reservedAtomic += 10000)
-  //   2. sets currentRunningToolId = "evidence-quality-check"
-  //   3. transitions active → running_tool
-  //   4. validates version (optimistic concurrency)
-  //
-  // These four writes commit together or not at all via the version gate.
-  const reservedAgent: ResolutionAgent = {
-    ...agent,
-    budget: updatedBudget,
-    currentRunningToolId: CANONICAL_TOOL_ID,
-  };
-  const runningAgent = transitionAgentStatus(reservedAgent, "running_tool", { now });
-
-  let currentAgentVersion = currentVersion;
-  let agentAfterTransition: ResolutionAgent;
-  try {
-    agentAfterTransition = await store.updateAgent(runningAgent, currentAgentVersion);
-    currentAgentVersion++;
-  } catch {
-    return {
-      kind: "failed_recoverable",
-      reason: "Failed to reserve budget — agent version conflict or status change",
-    };
+  // ---- Step 6c: Handle existing execution (idempotent return from RPC) ----
+  if (rpcResult.kind === "existing") {
+    // A concurrent call already created this execution — deduce result from state
+    switch (rpcResult.state) {
+      case "settled":
+        return { kind: "executed" };
+      case "paid_pending_result":
+        return { kind: "waiting", reason: "paid_pending_result — recovery needed" };
+      case "settling":
+      case "reserved":
+      case "pending":
+        return { kind: "waiting", reason: `Execution in state "${rpcResult.state}" — waiting for completion` };
+      case "failed_unpaid":
+        return { kind: "skipped", reason: "Execution previously confirmed unpaid — planner must decide retry" };
+      case "failed_recoverable":
+        return { kind: "waiting", reason: "Execution in failed_recoverable state — recovery may retry" };
+      case "cancelled":
+        return { kind: "skipped", reason: "Execution was cancelled — no recovery" };
+      default:
+        return { kind: "waiting", reason: `Unknown execution state: ${rpcResult.state}` };
+    }
   }
+
+  // ---- Step 6d: Reload agent from store to get the updated state ----------
+  const freshAgent = await store.getAgentById(agent.id);
+  if (!freshAgent) {
+    return { kind: "failed_safe", reason: "Agent not found after atomic reservation" };
+  }
+
+  // Validate the fresh agent has the expected state after the RPC
+  if (freshAgent.status !== "running_tool") {
+    return { kind: "failed_recoverable", reason: "Agent status not running_tool after reservation" };
+  }
+  if (freshAgent.currentRunningToolId !== CANONICAL_TOOL_ID) {
+    return { kind: "failed_recoverable", reason: "currentRunningToolId not set after reservation" };
+  }
+
+  let currentAgentVersion = currentVersion + 1; // RPC incremented version
 
   await store.appendEvent(
     agent.id,
     "tool_execution_started",
-    "Reserved budget and entered running_tool",
+    "Reserved budget and entered running_tool via atomic RPC",
     "active",
     "running_tool",
     { toolId: CANONICAL_TOOL_ID, requestHash },
   );
 
-  // ---- Step 6d: Create durable execution row ------------------------------
-  // The budget is already reserved.  If execution creation fails (unique
-  // constraint from a race), release the reservation and revert.
-  try {
-    await store.createToolExecution(
-      agent.id,
-      CANONICAL_TOOL_ID,
-      requestHash,
-      CANONICAL_PRICE,
-      CANONICAL_NETWORK,
-      CANONICAL_ASSET,
-      CANONICAL_PAY_TO,
-    );
-  } catch {
-    await releaseReservationAndRevert(
-      store, agent, agentAfterTransition, requestHash, now, currentAgentVersion,
-      "Tool execution creation failed (unique constraint race)",
-    );
-    return {
-      kind: "failed_recoverable",
-      reason: "Tool execution creation failed (unique constraint race)",
-    };
-  }
-
-  // Update execution to "reserved" — setup is complete
-  await store.updateToolExecution(agent.id, requestHash, {
-    state: "reserved",
-    case_version_hash: plan.caseVersionHash,
-    evidence_version_hash: plan.evidenceVersionHash,
-  });
-
-  // ---- Step 6f: Decrypt case wallet ---------------------------------------
+  // ---- Step 6e: Decrypt case wallet ---------------------------------------
   let account;
   try {
     account = await walletDecryptor.decrypt({
@@ -426,7 +439,7 @@ async function createExecution(params: {
   } catch {
     // Decryption failed — release reservation, mark failed_unpaid
     await releaseReservationAndMarkFailed(
-      store, agent, agentAfterTransition, requestHash, now, currentAgentVersion,
+      store, agent, freshAgent, requestHash, now, currentAgentVersion,
       "Wallet decryption failed",
     );
     return {
@@ -435,10 +448,10 @@ async function createExecution(params: {
     };
   }
 
-  // ---- Step 6g: Verify decrypted address matches persisted address --------
+  // ---- Step 6f: Verify decrypted address matches persisted address --------
   if (account.address.toLowerCase() !== agent.caseWalletAddress.toLowerCase()) {
     await releaseReservationAndMarkFailed(
-      store, agent, agentAfterTransition, requestHash, now, currentAgentVersion,
+      store, agent, freshAgent, requestHash, now, currentAgentVersion,
       "Wallet address mismatch",
     );
     return {
@@ -447,7 +460,7 @@ async function createExecution(params: {
     };
   }
 
-  // ---- Step 6h: Settle through x402 settlement client ---------------------
+  // ---- Step 6g: Settle through x402 settlement client ---------------------
   let settlementResult: X402SettlementResult;
   try {
     settlementResult = await settlementClient.settleEvidenceQualityCheck({
@@ -470,7 +483,7 @@ async function createExecution(params: {
     };
   }
 
-  // ---- Step 6i: Handle settlement result ----------------------------------
+  // ---- Step 6h: Handle settlement result ----------------------------------
   if (settlementResult.success) {
     // ---- Success: persist payment proof, move reserved → spent ------------
     const txHash = settlementResult.txHash;
@@ -489,8 +502,8 @@ async function createExecution(params: {
 
     // Move reserved → spent
     const spentAgent: ResolutionAgent = {
-      ...agentAfterTransition,
-      budget: applySpend(agentAfterTransition.budget, CANONICAL_PRICE),
+      ...freshAgent,
+      budget: applySpend(freshAgent.budget, CANONICAL_PRICE),
     };
 
     // Mark execution as paid_pending_result
@@ -586,7 +599,7 @@ async function createExecution(params: {
   await releaseReservationAndMarkFailed(
     store,
     agent,
-    agentAfterTransition,
+    freshAgent,
     requestHash,
     now,
     currentAgentVersion,
@@ -597,39 +610,6 @@ async function createExecution(params: {
     kind: "skipped",
     reason: settlementResult.error ?? "Settlement returned unpaid",
   };
-}
-
-// ---------------------------------------------------------------------------
-// Helper: release reservation and revert agent to active
-// Used when execution creation fails uniquely after budget was reserved.
-// ---------------------------------------------------------------------------
-
-async function releaseReservationAndRevert(
-  store: EvidenceQualityCheckDependencies["store"],
-  originalAgent: ResolutionAgent,
-  runningAgent: ResolutionAgent,
-  requestHash: string,
-  now: number,
-  currentVersion: number,
-  reason: string,
-): Promise<void> {
-  const releasedAgent: ResolutionAgent = {
-    ...runningAgent,
-    budget: releaseReservation(runningAgent.budget, CANONICAL_PRICE),
-    currentRunningToolId: null,
-  };
-  const activeAgent = transitionAgentStatus(releasedAgent, "active", { now });
-
-  await store.updateAgent(activeAgent, currentVersion).catch(() => { /* best effort */ });
-
-  await store.appendEvent(
-    originalAgent.id,
-    "tool_execution_failed",
-    reason,
-    "running_tool",
-    "active",
-    { toolId: CANONICAL_TOOL_ID, requestHash },
-  );
 }
 
 // ---------------------------------------------------------------------------

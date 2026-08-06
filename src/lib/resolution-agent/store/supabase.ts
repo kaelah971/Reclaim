@@ -699,6 +699,74 @@ export class SupabaseResolutionAgentStore {
   }
 
   // -------------------------------------------------------------------------
+  // Atomic tool-execution reservation (RPC)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Atomically reserve budget, create a tool execution row, and transition
+   * the agent to running_tool in a single PostgreSQL transaction.
+   *
+   * Called by adapters instead of the multi-step updateAgent +
+   * createToolExecution + updateToolExecution dance.  Crash-consistent
+   * by design: the budget reservation, execution creation, and status
+   * transition all commit together or not at all.
+   */
+  async reserveToolExecutionAtomically(params: {
+    agentId: string;
+    expectedAgentVersion: number;
+    requestHash: string;
+    toolId: string;
+    caseVersionHash: string;
+    evidenceVersionHash: string;
+    priceAtomic: bigint;
+    network: string;
+    asset: string;
+    payTo: string;
+    serviceIdentifier: string;
+    policyVersion: string;
+    now: number;
+  }): Promise<
+    | { kind: "created"; agentId: string; requestHash: string; state: string }
+    | { kind: "existing"; agentId: string; requestHash: string; state: string }
+  > {
+    const { data, error } = await this.client.rpc(
+      "reserve_resolution_agent_tool_execution",
+      {
+        p_agent_id: params.agentId,
+        p_expected_version: params.expectedAgentVersion,
+        p_request_hash: params.requestHash,
+        p_tool_id: params.toolId,
+        p_case_version_hash: params.caseVersionHash,
+        p_evidence_version_hash: params.evidenceVersionHash,
+        p_price_atomic: Number(params.priceAtomic),
+        p_network: params.network,
+        p_asset: params.asset,
+        p_pay_to: params.payTo,
+        p_service_identifier: params.serviceIdentifier,
+        p_policy_version: params.policyVersion,
+        p_now: new Date(params.now).toISOString(),
+      },
+    );
+
+    if (error) {
+      const msg = error.message || "";
+      if (msg.includes("not found")) throw new Error("Agent not found");
+      if (msg.includes("Version conflict")) throw new Error("Version conflict");
+      if (msg.includes("status") || msg.includes("cannot start")) throw new Error("Invalid lifecycle state");
+      if (msg.includes("budget") || msg.includes("Insufficient")) throw new Error("Insufficient budget");
+      throw error;
+    }
+
+    const result = data as { kind: string; agent_id: string; request_hash: string; state: string };
+    return {
+      kind: result.kind as "created" | "existing",
+      agentId: result.agent_id,
+      requestHash: result.request_hash,
+      state: result.state,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Worker — get latest tool execution
   // -------------------------------------------------------------------------
 

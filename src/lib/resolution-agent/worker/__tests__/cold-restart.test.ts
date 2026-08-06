@@ -293,6 +293,9 @@ describe("cold-restart: missing durable action identity", () => {
     const agent2 = makeAgent({ currentRunningToolId: "case-refresh" as any });
     store2.agents.set(agent2.id, { ...agent2 });
 
+    // For store.getAgentVersion, we need it to work
+    store2.getAgentVersion = vi.fn(async (id: string) => 5);
+
     const deps2: ResolutionAgentWorkerDependencies = {
       store: store2 as any,
       observer: vi.fn().mockResolvedValue({} as CaseObservationResult),
@@ -318,6 +321,9 @@ describe("cold-restart: missing durable action identity", () => {
     const agent3 = makeAgent({ plan: null });
     store3.agents.set(agent3.id, { ...agent3 });
 
+    // For store.getAgentVersion, we need it to work
+    store3.getAgentVersion = vi.fn(async (id: string) => 5);
+
     const deps3: ResolutionAgentWorkerDependencies = {
       store: store3 as any,
       observer: vi.fn().mockResolvedValue({} as CaseObservationResult),
@@ -335,6 +341,120 @@ describe("cold-restart: missing durable action identity", () => {
     });
 
     expect(store3.createToolExecution).not.toHaveBeenCalled();
+  });
+
+  it("malformed recovery transitions agent to failed_recoverable and appends event", async () => {
+    const storeMalformed = createDurableStore();
+    // Agent with currentRunningToolId but no plan hashes (null plan)
+    const agentMalformed = makeAgent({
+      plan: null,
+      currentRunningToolId: "evidence-quality-check",
+    });
+    storeMalformed.agents.set(agentMalformed.id, { ...agentMalformed });
+    storeMalformed.versions.set(agentMalformed.id, 5);
+
+    const depsMalformed: ResolutionAgentWorkerDependencies = {
+      store: storeMalformed as any,
+      observer: vi.fn().mockResolvedValue({} as CaseObservationResult),
+      planner: vi.fn().mockResolvedValue({
+        nextAction: { kind: "no_action", reason: "tool_already_running" },
+        plan: null as any, caseVersionHash: "cv", evidenceVersionHash: "ev",
+        agentId: agentMalformed.id, reasonCode: "tool_already_running", persisted: true,
+      } as ResolutionAgentPlanningResult),
+      actionExecutor: { executeOneAction: vi.fn() } as unknown as ResolutionAgentActionExecutor,
+      recoveryHandler: { recover: vi.fn() } as unknown as ResolutionAgentRecoveryHandler,
+    };
+
+    const result = await runResolutionAgentWorkerIteration({
+      workerId: "malformed_recovery", now: 2_000_000, dependencies: depsMalformed,
+    });
+
+    // Should return error with failed_recoverable
+    expect(result.outcome).toBe("error");
+    expect(result.actionDispatched).toBeDefined();
+    expect(result.actionDispatched!.kind).toBe("failed_recoverable");
+
+    // The agent should have been transitioned to failed_recoverable
+    const stored = storeMalformed.agents.get(agentMalformed.id);
+    expect(stored).toBeDefined();
+    expect(stored!.status).toBe("failed_recoverable");
+
+    // An event should have been appended (tool_execution_recovery_failed)
+    expect(storeMalformed.appendEvent).toHaveBeenCalled();
+    const eventCalls = (storeMalformed.appendEvent as any).mock.calls;
+    const recoveryFailedCall = eventCalls.find(
+      (call: any[]) => call[1] === "tool_execution_recovery_failed",
+    );
+    expect(recoveryFailedCall).toBeDefined();
+  });
+
+  it("malformed recovery is idempotent — only transitions once", async () => {
+    const storeIdem = createDurableStore();
+    const agentIdem = makeAgent({
+      plan: null,
+      currentRunningToolId: "evidence-quality-check",
+      status: "failed_recoverable", // Already in failed_recoverable
+    });
+    storeIdem.agents.set(agentIdem.id, { ...agentIdem });
+    storeIdem.versions.set(agentIdem.id, 5);
+
+    const depsIdem: ResolutionAgentWorkerDependencies = {
+      store: storeIdem as any,
+      observer: vi.fn().mockResolvedValue({} as CaseObservationResult),
+      planner: vi.fn().mockResolvedValue({
+        nextAction: { kind: "no_action", reason: "tool_already_running" },
+        plan: null as any, caseVersionHash: "cv", evidenceVersionHash: "ev",
+        agentId: agentIdem.id, reasonCode: "tool_already_running", persisted: true,
+      } as ResolutionAgentPlanningResult),
+      actionExecutor: { executeOneAction: vi.fn() } as unknown as ResolutionAgentActionExecutor,
+      recoveryHandler: { recover: vi.fn() } as unknown as ResolutionAgentRecoveryHandler,
+    };
+
+    await runResolutionAgentWorkerIteration({
+      workerId: "idem_recovery", now: 2_000_000, dependencies: depsIdem,
+    });
+
+    // updateAgent should NOT have been called since agent is already failed_recoverable
+    const updateCalls = (storeIdem.updateAgent as any).mock.calls;
+    expect(updateCalls.length).toBe(0);
+
+    // appendEvent should NOT have been called with recovery_failed
+    const eventCalls = (storeIdem.appendEvent as any).mock.calls;
+    const recoveryFailedCalls = eventCalls.filter(
+      (call: any[]) => call[1] === "tool_execution_recovery_failed",
+    );
+    expect(recoveryFailedCalls.length).toBe(0);
+  });
+
+  it("malformed recovery preserves budget reservation", async () => {
+    const storeBudget = createDurableStore();
+    const agentBudget = makeAgent({
+      plan: null,
+      currentRunningToolId: "evidence-quality-check",
+      budget: { approvedAtomic: 100_000n, spentAtomic: 0n, reservedAtomic: 10_000n },
+    });
+    storeBudget.agents.set(agentBudget.id, { ...agentBudget });
+    storeBudget.versions.set(agentBudget.id, 5);
+
+    const depsBudget: ResolutionAgentWorkerDependencies = {
+      store: storeBudget as any,
+      observer: vi.fn().mockResolvedValue({} as CaseObservationResult),
+      planner: vi.fn().mockResolvedValue({
+        nextAction: { kind: "no_action", reason: "tool_already_running" },
+        plan: null as any, caseVersionHash: "cv", evidenceVersionHash: "ev",
+        agentId: agentBudget.id, reasonCode: "tool_already_running", persisted: true,
+      } as ResolutionAgentPlanningResult),
+      actionExecutor: { executeOneAction: vi.fn() } as unknown as ResolutionAgentActionExecutor,
+      recoveryHandler: { recover: vi.fn() } as unknown as ResolutionAgentRecoveryHandler,
+    };
+
+    await runResolutionAgentWorkerIteration({
+      workerId: "budget_preserve", now: 2_000_000, dependencies: depsBudget,
+    });
+
+    // Reservation should be preserved (not released)
+    const stored = storeBudget.agents.get(agentBudget.id);
+    expect(stored!.budget.reservedAtomic).toBe(10_000n);
   });
 });
 

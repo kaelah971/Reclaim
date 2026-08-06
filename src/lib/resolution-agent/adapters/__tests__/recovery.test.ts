@@ -177,6 +177,8 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
     getAgentVersion: vi.fn<(...args: unknown[]) => Promise<number>>().mockResolvedValue(1) as unknown as MockStore["getAgentVersion"],
     updateAgent: mockUpdateAgent as unknown as MockStore["updateAgent"],
     appendEvent: mockAppendEvent as unknown as MockStore["appendEvent"],
+    getAgentById: vi.fn() as unknown as MockStore["getAgentById"],
+    reserveToolExecutionAtomically: vi.fn() as unknown as MockStore["reserveToolExecutionAtomically"],
   };
 
   const dependencies: EvidenceQualityCheckDependencies = {

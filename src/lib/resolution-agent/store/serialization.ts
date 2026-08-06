@@ -67,6 +67,7 @@ export function agentToInsertRow(agent: ResolutionAgent): Record<string, unknown
     version: 1,
     lease_owner: null,
     lease_expires_at: null,
+    current_running_tool_id: agent.currentRunningToolId ?? null,
   };
 }
 
@@ -98,6 +99,7 @@ export function agentToUpdateRow(agent: ResolutionAgent): Record<string, unknown
     activated_at: agent.activatedAt ? new Date(agent.activatedAt).toISOString() : null,
     paused_at: agent.pausedAt ? new Date(agent.pausedAt).toISOString() : null,
     closed_at: agent.closedAt ? new Date(agent.closedAt).toISOString() : null,
+    current_running_tool_id: agent.currentRunningToolId ?? null,
   };
 }
 
@@ -161,7 +163,7 @@ export function rowToAgent(row: ResolutionAgentRow): ResolutionAgent {
       caseWalletAddress: row.case_wallet_address,
       encryptedSecret,
       settledToolIds: [], // Populated from tool_executions table via store methods
-      currentRunningToolId: null, // Populated from tool_executions table via store methods
+      currentRunningToolId: (row.current_running_tool_id as ResolutionAgent["currentRunningToolId"]) ?? null,
       createdAt: new Date(row.created_at).getTime(),
       updatedAt: new Date(row.updated_at).getTime(),
       activatedAt: row.activated_at ? new Date(row.activated_at).getTime() : null,

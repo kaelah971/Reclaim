@@ -31,6 +31,7 @@ export interface ResolutionAgentRow {
   version: number;
   lease_owner: string | null;
   lease_expires_at: string | null;
+  current_running_tool_id: string | null;
 }
 
 export interface AgentEventRow {

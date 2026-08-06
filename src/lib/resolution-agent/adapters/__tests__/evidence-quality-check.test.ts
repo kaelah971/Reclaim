@@ -234,6 +234,8 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
     getAgentVersion: ReturnType<typeof vi.fn>;
     updateAgent: ReturnType<typeof vi.fn>;
     appendEvent: ReturnType<typeof vi.fn>;
+    getAgentById: ReturnType<typeof vi.fn>;
+    reserveToolExecutionAtomically: ReturnType<typeof vi.fn>;
     settle: ReturnType<typeof vi.fn>;
     generate: ReturnType<typeof vi.fn>;
     decrypt: ReturnType<typeof vi.fn>;
@@ -248,6 +250,16 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
     (...args: unknown[]) => Promise.resolve(args[0] as ResolutionAgent),
   );
   const mockAppendEvent = vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+  const mockGetAgentById = vi.fn<(...args: unknown[]) => Promise<ResolutionAgent | null>>().mockResolvedValue(
+    makeAgent({
+      status: "running_tool",
+      currentRunningToolId: "evidence-quality-check",
+      budget: { approvedAtomic: 100000n, spentAtomic: 0n, reservedAtomic: 10000n },
+    }),
+  );
+  const mockReserveAtomic = vi.fn<(...args: unknown[]) => Promise<{ kind: string; agentId: string; requestHash: string; state: string }>>().mockResolvedValue({
+    kind: "created", agentId: "agt_a1", requestHash: "", state: "reserved",
+  });
   const mockSettle = vi.fn<(...args: unknown[]) => Promise<X402SettlementResult>>().mockResolvedValue({
     success: true,
     txHash: "0xs-tx-hash",
@@ -264,6 +276,8 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
     getAgentVersion: mockGetVersion as unknown as MockStore["getAgentVersion"],
     updateAgent: mockUpdateAgent as unknown as MockStore["updateAgent"],
     appendEvent: mockAppendEvent as unknown as MockStore["appendEvent"],
+    getAgentById: mockGetAgentById as unknown as MockStore["getAgentById"],
+    reserveToolExecutionAtomically: mockReserveAtomic as unknown as MockStore["reserveToolExecutionAtomically"],
   };
 
   const settlementClient: ResolutionAgentX402SettlementClient = {
@@ -305,6 +319,8 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
       getAgentVersion: mockGetVersion,
       updateAgent: mockUpdateAgent,
       appendEvent: mockAppendEvent,
+      getAgentById: mockGetAgentById,
+      reserveToolExecutionAtomically: mockReserveAtomic,
       settle: mockSettle,
       generate: mockGenerate,
       decrypt: mockDecrypt,
@@ -502,15 +518,14 @@ describe("executeEvidenceQualityCheck — execution creation", () => {
       agent, plan, action, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
     });
 
-    expect(deps.store.createToolExecution).toHaveBeenCalledTimes(1);
-    expect(deps.store.createToolExecution).toHaveBeenCalledWith(
-      "agent_test_1",
-      "evidence-quality-check",
-      expect.any(String),
-      10000n,
-      "eip155:42220",
-      "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
-      "0x85522bdE267d05bf8CE8813F97c75417b7894A33",
+    // The atomic RPC is called instead of separate createToolExecution
+    expect(deps.rawMocks.reserveToolExecutionAtomically).toHaveBeenCalledTimes(1);
+    expect(deps.rawMocks.reserveToolExecutionAtomically).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "agent_test_1",
+        toolId: "evidence-quality-check",
+        priceAtomic: 10000n,
+      }),
     );
   });
 
@@ -548,6 +563,11 @@ describe("executeEvidenceQualityCheck — execution creation", () => {
     const action = makeToolAction();
     const lease = makeLeaseContext();
 
+    // Override the RPC mock to throw for insufficient budget
+    deps.rawMocks.reserveToolExecutionAtomically.mockRejectedValue(
+      new Error("Insufficient budget: approved 5000, spent 0, reserved 0, requested 10000"),
+    );
+
     const result = await executeEvidenceQualityCheck({
       agent, plan, action, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
     });
@@ -555,7 +575,7 @@ describe("executeEvidenceQualityCheck — execution creation", () => {
     expect(result.kind).toBe("skipped");
     expect((result as any).reason).toContain("Insufficient budget");
     // No execution created, no settlement called
-    expect(deps.store.createToolExecution).not.toHaveBeenCalled();
+    expect(deps.rawMocks.reserveToolExecutionAtomically).toHaveBeenCalled();
   });
 
   it("approved budget never changes after execution", async () => {
@@ -635,6 +655,11 @@ describe("executeEvidenceQualityCheck — wallet security", () => {
     const plan = makePlan();
     const action = makeToolAction();
     const lease = makeLeaseContext();
+
+    // Override the RPC mock to throw for insufficient budget
+    deps.rawMocks.reserveToolExecutionAtomically.mockRejectedValue(
+      new Error("Insufficient budget: approved 5000, spent 0, reserved 0, requested 10000"),
+    );
 
     await executeEvidenceQualityCheck({
       agent, plan, action, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,

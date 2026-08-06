@@ -80,6 +80,7 @@ export interface ResolutionAgentPaymentStore {
 // ---------------------------------------------------------------------------
 
 export interface EvidenceQualityCheckStore {
+  getAgentById(agentId: string): Promise<ResolutionAgent | null>;
   createToolExecution(
     agentId: string,
     toolIdentifier: string,
@@ -123,6 +124,24 @@ export interface EvidenceQualityCheckStore {
     nextStatus: string | null,
     metadata?: Record<string, unknown>,
   ): Promise<void>;
+  reserveToolExecutionAtomically(params: {
+    agentId: string;
+    expectedAgentVersion: number;
+    requestHash: string;
+    toolId: string;
+    caseVersionHash: string;
+    evidenceVersionHash: string;
+    priceAtomic: bigint;
+    network: string;
+    asset: string;
+    payTo: string;
+    serviceIdentifier: string;
+    policyVersion: string;
+    now: number;
+  }): Promise<
+    | { kind: "created"; agentId: string; requestHash: string; state: string }
+    | { kind: "existing"; agentId: string; requestHash: string; state: string }
+  >;
 }
 
 // ---------------------------------------------------------------------------
