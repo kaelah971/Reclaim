@@ -522,10 +522,19 @@ export class SupabaseResolutionAgentStore {
   // -------------------------------------------------------------------------
 
   /**
-   * Attempt to acquire a lease on an agent using compare-and-swap.
+   * Attempt to acquire a lease on an agent atomically.
    *
-   * Uses: UPDATE ... SET lease_owner = token, lease_expires_at = expiry
-   *       WHERE agent_id = id AND lease_owner IS NOT DISTINCT FROM existingOwner
+   * Conditions (all must be true at the moment of the database write):
+   *   - agent_id matches;
+   *   - status is in the canonical runnable set;
+   *   - lease_owner matches the observed value (IS NULL for unleased,
+   *     or equals the previous owner for an expired lease);
+   *   - when acquiring an expired lease, lease_expires_at must still
+   *     be <= now so that a concurrent renewal prevents acquisition.
+   *
+   * The read-then-check before the update is a fast-path guard, not
+   * the authoritative decision.  Only the conditional UPDATE predicate
+   * decides whether the lease is actually acquired.
    *
    * Returns the LeaseContext on success, null on conflict.
    */
@@ -535,8 +544,10 @@ export class SupabaseResolutionAgentStore {
     now: number,
   ): Promise<import("../worker/types").LeaseContext | null> {
     const expiresAt = new Date(now + DEFAULT_LEASE_DURATION_MS).toISOString();
+    const nowISO = new Date(now).toISOString();
 
-    // First check eligibility (status + current lease state)
+    // Fast-path read — used only to determine *which* conditional
+    // predicate chain to attach.  The atomic UPDATE is the authority.
     const { data: agent, error: fetchErr } = await this.client
       .from(TABLE_AGENTS)
       .select("agent_id, status, lease_owner, lease_expires_at")
@@ -545,22 +556,34 @@ export class SupabaseResolutionAgentStore {
 
     if (fetchErr || !agent) return null;
 
-    const status = (agent as Record<string, unknown>).status as string;
-    if (!RUNNABLE_AGENT_STATUSES.includes(status as typeof RUNNABLE_AGENT_STATUSES[number])) {
+    const currentStatus = (agent as Record<string, unknown>).status as string;
+    if (
+      !RUNNABLE_AGENT_STATUSES.includes(
+        currentStatus as typeof RUNNABLE_AGENT_STATUSES[number],
+      )
+    ) {
       return null;
     }
 
-    const existingLease = (agent as Record<string, unknown>).lease_owner as string | null;
+    const existingOwner = (agent as Record<string, unknown>).lease_owner as string | null;
     const existingExpiry = (agent as Record<string, unknown>).lease_expires_at as string | null;
 
-    // If an active lease exists, bail out
-    if (existingLease && existingExpiry) {
+    // Fast-path: active unexpired lease → bail out without UPDATE
+    if (existingOwner && existingExpiry) {
       const expiryTime = new Date(existingExpiry).getTime();
       if (!isNaN(expiryTime) && expiryTime > now) return null;
     }
 
-    // Atomic update — conditional on current lease owner
-    const { data: updated, error } = await this.client
+    // Build the conditional UPDATE.  The essential predicates are:
+    //  (1) agent_id
+    //  (2) status IN runnable set
+    //  (3) lease_owner matches the observed value (IS NULL for unleased)
+    //
+    // For an expired lease we ADDITIONALLY require that lease_expires_at
+    // has not been extended by a concurrent renewal.
+    const runnableStatuses = [...RUNNABLE_AGENT_STATUSES] as string[];
+
+    let updateQuery = this.client
       .from(TABLE_AGENTS)
       .update({
         lease_owner: ownerToken,
@@ -568,15 +591,37 @@ export class SupabaseResolutionAgentStore {
         updated_at: new Date().toISOString(),
       })
       .eq("agent_id", agentId)
-      .is("lease_owner", existingLease ?? null)
-      .select("lease_owner, lease_expires_at")
+      .in("status", runnableStatuses)
+      .is("lease_owner", existingOwner ?? null);
+
+    // If the previous lease existed (even if expired), the database
+    // predicate must also require that lease_expires_at has not
+    // changed.  A concurrent renewal changes lease_expires_at but
+    // NOT lease_owner — without this extra predicate a stale
+    // acquisition would steal the renewed lease.
+    if (existingOwner !== null) {
+      updateQuery = updateQuery.lte("lease_expires_at", nowISO);
+    }
+
+    const { data: updated, error } = await updateQuery
+      .select("lease_owner, lease_expires_at, status")
       .maybeSingle();
 
     if (error || !updated) return null;
 
-    // Verify we actually got the lease
+    // Post-update verification — the returned row MUST match the
+    // newly written owner token.  A mismatch indicates a concurrent
+    // write that the query builder silently accepted or a bug.
+    const result = updated as Record<string, unknown>;
+    if (result.lease_owner !== ownerToken) {
+      return null;
+    }
+
+    // Safety: verify status is still runnable (paranoid check)
     if (
-      (updated as Record<string, unknown>).lease_owner !== ownerToken
+      !RUNNABLE_AGENT_STATUSES.includes(
+        (result.status as string) as typeof RUNNABLE_AGENT_STATUSES[number],
+      )
     ) {
       return null;
     }
@@ -593,12 +638,19 @@ export class SupabaseResolutionAgentStore {
   // Worker — renew lease (only current owner)
   // -------------------------------------------------------------------------
 
+  /**
+   * Renew a lease.  Only the current owner may renew, and only when
+   * the agent is still in a runnable status.  The database predicate
+   * ensures a stale renter whose ownership was concurrently taken
+   * cannot extend a lease it no longer holds.
+   */
   async renewAgentLease(
     agentId: string,
     ownerToken: string,
     now: number,
   ): Promise<boolean> {
     const expiresAt = new Date(now + DEFAULT_LEASE_DURATION_MS).toISOString();
+    const runnableStatuses = [...RUNNABLE_AGENT_STATUSES] as string[];
     const { error } = await this.client
       .from(TABLE_AGENTS)
       .update({
@@ -606,7 +658,8 @@ export class SupabaseResolutionAgentStore {
         updated_at: new Date().toISOString(),
       })
       .eq("agent_id", agentId)
-      .eq("lease_owner", ownerToken);
+      .eq("lease_owner", ownerToken)
+      .in("status", runnableStatuses);
 
     return !error;
   }
