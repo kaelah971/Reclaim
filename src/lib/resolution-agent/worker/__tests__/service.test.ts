@@ -182,6 +182,9 @@ interface MockWorkerStore extends ResolutionAgentStore {
   tryAcquireAgentLease(agentId: string, ownerToken: string, now: number): Promise<LeaseContext | null>;
   renewAgentLease(agentId: string, ownerToken: string, now: number): Promise<boolean>;
   releaseAgentLease(agentId: string, ownerToken: string): Promise<boolean>;
+  createToolExecution(agentId: string, toolIdentifier: string, requestHash: string, priceAtomic: bigint, network: string, asset: string, payTo: string): Promise<void>;
+  getToolExecutionByRequestHash(agentId: string, requestHash: string): Promise<ToolExecutionRow | null>;
+  updateToolExecution(agentId: string, requestHash: string, updates: Partial<Pick<ToolExecutionRow, "state" | "case_version_hash" | "evidence_version_hash" | "settlement_tx_hash" | "payment_reference" | "result_reference" | "result_data" | "failure_reason">>): Promise<void>;
 }
 
 function createMockStore(agent: ResolutionAgent, candidates: WorkerCandidate[]): MockWorkerStore {
@@ -203,6 +206,9 @@ function createMockStore(agent: ResolutionAgent, candidates: WorkerCandidate[]):
     } as LeaseContext),
     renewAgentLease: vi.fn().mockResolvedValue(true),
     releaseAgentLease: vi.fn().mockResolvedValue(true),
+    createToolExecution: vi.fn().mockResolvedValue(undefined),
+    getToolExecutionByRequestHash: vi.fn().mockResolvedValue(null),
+    updateToolExecution: vi.fn().mockResolvedValue(undefined),
   };
 }
 

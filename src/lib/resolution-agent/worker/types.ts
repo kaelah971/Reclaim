@@ -136,6 +136,24 @@ export interface ResolutionAgentWorkerDependencies {
       now: number,
     ): Promise<boolean>;
     releaseAgentLease(agentId: string, ownerToken: string): Promise<boolean>;
+    createToolExecution(
+      agentId: string,
+      toolIdentifier: string,
+      requestHash: string,
+      priceAtomic: bigint,
+      network: string,
+      asset: string,
+      payTo: string,
+    ): Promise<void>;
+    getToolExecutionByRequestHash(
+      agentId: string,
+      requestHash: string,
+    ): Promise<ToolExecutionRow | null>;
+    updateToolExecution(
+      agentId: string,
+      requestHash: string,
+      updates: Partial<Pick<ToolExecutionRow, "state" | "case_version_hash" | "evidence_version_hash" | "settlement_tx_hash" | "payment_reference" | "result_reference" | "result_data" | "failure_reason">>,
+    ): Promise<void>;
   };
   observer: typeof observeResolutionAgentCase;
   planner: typeof planResolutionAgentNextAction;
