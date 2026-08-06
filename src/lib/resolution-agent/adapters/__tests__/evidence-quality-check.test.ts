@@ -270,6 +270,7 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
   const mockPersistPayment = vi.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
 
   const store: MockStore = {
+    listToolExecutions: vi.fn().mockResolvedValue([]) as unknown as MockStore["listToolExecutions"],
     createToolExecution: mockCreateTE as unknown as MockStore["createToolExecution"],
     getToolExecutionByRequestHash: mockGetTE as unknown as MockStore["getToolExecutionByRequestHash"],
     updateToolExecution: mockUpdateTE as unknown as MockStore["updateToolExecution"],

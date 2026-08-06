@@ -136,6 +136,7 @@ export interface ResolutionAgentPaymentStore {
 
 export interface EvidenceQualityCheckStore {
   getAgentById(agentId: string): Promise<ResolutionAgent | null>;
+  listToolExecutions(agentId: string): Promise<ToolExecutionRow[]>;
   createToolExecution(
     agentId: string,
     toolIdentifier: string,

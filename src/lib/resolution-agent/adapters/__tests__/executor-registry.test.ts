@@ -153,6 +153,10 @@ function makeMockDependencies(): {
 } {
   const store: MockStore = {
     createToolExecution: vi.fn().mockResolvedValue(undefined),
+    listToolExecutions: vi.fn().mockResolvedValue([
+      { id: "e1", agent_id: "x", tool_identifier: "evidence-quality-check", state: "settled", updated_at: new Date().toISOString(), result_data: { evidenceVersionHash: "ev_hash_v1", readiness: "ready" }, request_hash: "h1", case_version_hash: null, evidence_version_hash: "ev_hash_v1", price_atomic: 10000, network: "n", asset_address: "a", pay_to_address: "p", payment_reference: null, settlement_tx_hash: null, result_reference: null, failure_reason: null, created_at: new Date().toISOString() },
+      { id: "e2", agent_id: "x", tool_identifier: "case-refresh", state: "settled", updated_at: new Date().toISOString(), result_data: { caseVersionHash: "case_hash_v1", readiness: "ready" }, request_hash: "h2", case_version_hash: "case_hash_v1", evidence_version_hash: null, price_atomic: 10000, network: "n", asset_address: "a", pay_to_address: "p", payment_reference: null, settlement_tx_hash: null, result_reference: null, failure_reason: null, created_at: new Date().toISOString() },
+    ]),
     getToolExecutionByRequestHash: vi.fn().mockResolvedValue(null),
     updateToolExecution: vi.fn().mockResolvedValue(undefined),
     getAgentVersion: vi.fn().mockResolvedValue(1),

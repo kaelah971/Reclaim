@@ -81,16 +81,37 @@ export async function executeDisputeBrief(params: {
     return hashError;
   }
 
-  // ---- Step 4: Reconstruct canonical request identity ---------------------
+  // ---- Step 4: Resolve latest tool outcomes from store -------------------
   const observation = agent.observation;
   if (!observation) {
     return { kind: "skipped", reason: "Agent has no observation — cannot build service input" };
   }
 
-  // Resolve latest tool outcomes for context
-  const latestQualityCheck = resolveLatestQualityCheck(agent);
-  const latestCaseRefresh = resolveLatestCaseRefresh(agent);
+  const latestToolExecutions = await store.listToolExecutions(agent.id);
 
+  const latestQualityCheck = resolveLatestSettledOutcome(
+    latestToolExecutions,
+    "evidence-quality-check",
+    observation.evidenceVersionHash,
+  );
+  const latestCaseRefresh = resolveLatestSettledOutcome(
+    latestToolExecutions,
+    "case-refresh",
+    observation.caseVersionHash,
+  );
+
+  // ---- Step 5: Validate prerequisites -------------------------------------
+  const prerequisiteError = validateDisputeBriefPrerequisites({
+    agent,
+    observation,
+    latestQualityCheck,
+    latestCaseRefresh,
+  });
+  if (prerequisiteError) {
+    return prerequisiteError;
+  }
+
+  // ---- Step 6: Reconstruct canonical request identity ---------------------
   const disputeBriefInput = buildServiceInput(
     agent.identity,
     observation,
@@ -105,7 +126,7 @@ export async function executeDisputeBrief(params: {
     disputeBriefInput,
   );
 
-  // ---- Step 5: Check for existing execution -------------------------------
+  // ---- Step 7: Check for existing execution -------------------------------
   const existing = await store.getToolExecutionByRequestHash(
     agent.id,
     requestHash,
@@ -115,7 +136,7 @@ export async function executeDisputeBrief(params: {
     return handleExistingExecution({ existing });
   }
 
-  // ---- Step 6: Create new execution ---------------------------------------
+  // ---- Step 8: Create new execution ---------------------------------------
   return createExecution({
     agent,
     plan,
@@ -128,24 +149,113 @@ export async function executeDisputeBrief(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve latest settled tool outcomes from agent state
+// Resolve latest settled tool outcome for a given tool and version hash
 // ---------------------------------------------------------------------------
 
-function resolveLatestQualityCheck(
-  _unused: ResolutionAgent,
-): import("../planner/types").NormalizedToolOutcome | null {
-  // In the current architecture, the agent's observation doesn't carry
-  // settled tool outcomes — they are stored in the tool executions table.
-  // The planner provides these as context. For the adapter, we pass null
-  // and let the generator derive context from the observation + store.
-  void _unused;
+import type { NormalizedToolOutcome, EvidenceQualityOutcome, CaseRefreshOutcome } from "../planner/types";
+
+function resolveLatestSettledOutcome(
+  executions: ToolExecutionRow[],
+  toolId: string,
+  currentHash: string,
+): NormalizedToolOutcome | null {
+  const settled = executions
+    .filter(
+      (e) =>
+        e.tool_identifier === toolId &&
+        e.state === "settled" &&
+        e.result_data,
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    );
+
+  for (const exec of settled) {
+    const data = exec.result_data as Record<string, unknown> | null;
+    if (!data) continue;
+
+    if (toolId === "evidence-quality-check") {
+      const verHash = (data as { evidenceVersionHash?: string }).evidenceVersionHash;
+      if (verHash === currentHash) {
+        return { kind: "evidence_quality", outcome: data as unknown as EvidenceQualityOutcome };
+      }
+    } else if (toolId === "case-refresh") {
+      const verHash = (data as { caseVersionHash?: string }).caseVersionHash;
+      if (verHash === currentHash) {
+        return { kind: "case_refresh", outcome: data as unknown as CaseRefreshOutcome };
+      }
+    }
+  }
+
   return null;
 }
 
-function resolveLatestCaseRefresh(
-  _unused: ResolutionAgent,
-): import("../planner/types").NormalizedToolOutcome | null {
-  void _unused;
+// ---------------------------------------------------------------------------
+// Validate Dispute Brief prerequisites
+//
+// Before reserving budget or decrypting the wallet, verify that:
+//   1. Evidence exists
+//   2. A current settled Evidence Quality Check with "ready" outcome exists
+//   3. A current settled Case Refresh with "ready" outcome exists
+//   4. No open evidence request is blocking review
+// ---------------------------------------------------------------------------
+
+function validateDisputeBriefPrerequisites(params: {
+  agent: ResolutionAgent;
+  observation: NonNullable<ResolutionAgent["observation"]>;
+  latestQualityCheck: NormalizedToolOutcome | null;
+  latestCaseRefresh: NormalizedToolOutcome | null;
+}): ActionExecutionResult | null {
+  const { observation, latestQualityCheck, latestCaseRefresh } = params;
+
+  if (observation.evidenceCount === 0) {
+    return {
+      kind: "skipped",
+      reason: "No evidence available — Dispute Brief requires evidence",
+    };
+  }
+
+  if (!latestQualityCheck || latestQualityCheck.kind !== "evidence_quality") {
+    return {
+      kind: "skipped",
+      reason: "No current settled Evidence Quality Check — required before Dispute Brief",
+    };
+  }
+
+  const qcOutcome = latestQualityCheck.outcome as EvidenceQualityOutcome;
+  if (qcOutcome.readiness !== "ready") {
+    return {
+      kind: "skipped",
+      reason: `Evidence Quality Check readiness is "${qcOutcome.readiness}" — must be "ready"`,
+    };
+  }
+
+  if (!latestCaseRefresh || latestCaseRefresh.kind !== "case_refresh") {
+    return {
+      kind: "skipped",
+      reason: "No current settled Case Refresh — required before Dispute Brief",
+    };
+  }
+
+  const crOutcome = latestCaseRefresh.outcome as CaseRefreshOutcome;
+  if (crOutcome.readiness !== "ready") {
+    return {
+      kind: "skipped",
+      reason: `Case Refresh readiness is "${crOutcome.readiness}" — must be "ready"`,
+    };
+  }
+
+  const openRequests = (observation.unresolvedGaps ?? []).filter(
+    (g) => g.status === "open",
+  );
+  if (openRequests.length > 0) {
+    return {
+      kind: "skipped",
+      reason: `${openRequests.length} open evidence request(s) block Dispute Brief preparation`,
+    };
+  }
+
   return null;
 }
 

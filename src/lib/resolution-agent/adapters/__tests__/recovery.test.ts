@@ -171,6 +171,7 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
   const mockSettle = vi.fn();
 
   const store: MockStore = {
+    listToolExecutions: vi.fn().mockResolvedValue([]) as unknown as MockStore["listToolExecutions"],
     createToolExecution: vi.fn() as unknown as MockStore["createToolExecution"],
     getToolExecutionByRequestHash: vi.fn() as unknown as MockStore["getToolExecutionByRequestHash"],
     updateToolExecution: mockUpdateTE as unknown as MockStore["updateToolExecution"],
