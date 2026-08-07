@@ -1016,6 +1016,7 @@ export async function resumeResolutionAgent(
  * Tests inject a mock to avoid live RPC calls.
  */
 export interface ReclaimTransferClient {
+  fetchNonce(from: string): Promise<number>;
   transferUsdc(params: {
     privateKey: string;
     from: string;
@@ -1169,26 +1170,32 @@ export async function closeResolutionAgent(
         throw new Error("Decrypted wallet address does not match persisted case wallet address.");
       }
 
+      // Fetch the nonce and durably persist it BEFORE broadcast so a
+      // crash between broadcast and DB update can be recovered.
+      const reclaimNonce = await transferClient.fetchNonce(account.address);
+
+      // Persist reclaim identity before broadcast (crash-safe)
+      await store.appendEvent(
+        agentId,
+        "agent_reclaim_prepared",
+        `Preparing to reclaim ${reclaimAmount} atomic USDC to ${destination} (nonce ${reclaimNonce})`,
+        "closing",
+        null,
+        { reclaimAmount: reclaimAmount.toString(), destination, nonce: reclaimNonce },
+      );
+
       const { txHash, nonce } = await transferClient.transferUsdc({
         privateKey,
         from: account.address,
         to: destination,
         amountAtomic: reclaimAmount,
+        storedNonce: reclaimNonce,
       });
 
       await store.appendEvent(
         agentId,
         "agent_reclaim",
-        `Reclaimed ${reclaimAmount} atomic USDC to ${destination}`,
-        "closing",
-        null,
-        { reclaimAmount: reclaimAmount.toString(), destination, txHash, nonce },
-      );
-
-      await store.appendEvent(
-        agentId,
-        "agent_reclaim",
-        `Reclaimed ${reclaimAmount} atomic USDC to ${destination}`,
+        `Reclaimed ${reclaimAmount} atomic USDC to ${destination} (tx ${txHash})`,
         "closing",
         null,
         { reclaimAmount: reclaimAmount.toString(), destination, txHash, nonce },

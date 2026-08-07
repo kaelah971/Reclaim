@@ -60,6 +60,7 @@ function makeMockStore(agent: ResolutionAgent, extra?: { listToolExecutions?: Re
 
 function mockTransferClient(txHash: string, nonce = 0): ReclaimTransferClient {
   return {
+    fetchNonce: vi.fn().mockResolvedValue(nonce),
     transferUsdc: vi.fn().mockResolvedValue({ txHash, nonce }),
   };
 }
@@ -257,6 +258,7 @@ describe("closeResolutionAgent zero balance", () => {
     const store = makeMockStore(agent);
     const fundingReader = new MockFundingReader(0n);
     const transferClient: ReclaimTransferClient = {
+      fetchNonce: vi.fn().mockResolvedValue(0),
       transferUsdc: vi.fn().mockRejectedValue(new Error("should not be called")),
     };
 

@@ -64,6 +64,16 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
     this.rpcUrl = rpcUrl ?? CELO_MAINNET_RPC;
   }
 
+  async fetchNonce(from: string): Promise<number> {
+    const publicClient = createPublicClient({
+      chain: celo,
+      transport: http(this.rpcUrl),
+    });
+    return publicClient.getTransactionCount({
+      address: from as `0x${string}`,
+    });
+  }
+
   /**
    * Transfer USDC from the case wallet to the funder.
    *
