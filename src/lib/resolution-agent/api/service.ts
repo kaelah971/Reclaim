@@ -1026,7 +1026,7 @@ export interface ReclaimTransferClient {
     to: string;
     amountAtomic: bigint;
     storedNonce?: number;
-  }): Promise<{ txHash: string; nonce: number }>;
+  }): Promise<{ txHash: string; nonce: number; transferAmount: bigint }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,13 +1217,29 @@ export async function closeResolutionAgent(
         { reclaimAmount: reclaimAmount.toString(), destination, nonce: reclaimNonce },
       );
 
-      const { txHash, nonce } = await transferClient.transferUsdc({
+      const { txHash, nonce, transferAmount: actualTransferAmount } = await transferClient.transferUsdc({
         privateKey,
         from: account.address,
         to: destination,
         amountAtomic: reclaimAmount,
         storedNonce: reclaimNonce ?? undefined,
       });
+
+      // If this is the first attempt, re-freeze the intent with the ACTUAL
+      // transfer amount (which may differ from reclaimAmount after fee
+      // adjustments inside the client).
+      if (!hasPreparedReclaim && actualTransferAmount !== reclaimAmount) {
+        reclaimAmount = actualTransferAmount;
+        const reFreezeAgent: ResolutionAgent = {
+          ...closingAgent,
+          reclaimAmountAtomic: reclaimAmount,
+          reclaimDestination: destination,
+          reclaimNonce,
+        };
+        const reFreezeVersion = await closingStore.getAgentVersion(agentId);
+        await store.updateAgent(reFreezeAgent, reFreezeVersion);
+        closingAgent = reFreezeAgent;
+      }
 
       await store.appendEvent(
         agentId,

@@ -101,7 +101,7 @@ describe("RA1Q prepared reclaim restart", () => {
     });
     const balanceReader = vi.fn().mockResolvedValue(900_000n); // balance changed
     const nonceFetcher = vi.fn().mockResolvedValue(99); // would give different nonce
-    const transfer = vi.fn().mockResolvedValue({ txHash: "0xtx", nonce: 5 });
+    const transfer = vi.fn().mockResolvedValue({ txHash: "0xtx", nonce: 5, transferAmount: 400_000n });
     const store = makeStore(agent);
 
     await closeResolutionAgent({

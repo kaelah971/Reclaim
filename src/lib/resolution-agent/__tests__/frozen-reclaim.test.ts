@@ -77,7 +77,7 @@ function makeCallLog(): CallLog {
     order: log,
     getUsdcBalanceAtomic: vi.fn().mockImplementation(() => { log.push("getUsdcBalanceAtomic"); return Promise.resolve(500_000n); }),
     fetchNonce: vi.fn().mockImplementation(() => { log.push("fetchNonce"); return Promise.resolve(5); }),
-    transferUsdc: vi.fn().mockImplementation(() => { log.push("transferUsdc"); return Promise.resolve({ txHash: "0xtx", nonce: 5 }); }),
+    transferUsdc: vi.fn().mockImplementation(() => { log.push("transferUsdc"); return Promise.resolve({ txHash: "0xtx", nonce: 5, transferAmount: 0n }); }),
     updateAgent: vi.fn().mockImplementation(() => { log.push("updateAgent"); return Promise.resolve(null); }),
     appendEvent: vi.fn().mockImplementation(() => { log.push("appendEvent"); return Promise.resolve(undefined); }),
   };

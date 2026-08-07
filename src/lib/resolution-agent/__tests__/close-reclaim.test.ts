@@ -62,7 +62,7 @@ function makeMockStore(agent: ResolutionAgent, extra?: { listToolExecutions?: Re
 function mockTransferClient(txHash: string, nonce = 0): ReclaimTransferClient {
   return {
     fetchNonce: vi.fn().mockResolvedValue(nonce),
-    transferUsdc: vi.fn().mockResolvedValue({ txHash, nonce }),
+    transferUsdc: vi.fn().mockResolvedValue({ txHash, nonce, transferAmount: 0n }),
   };
 }
 
