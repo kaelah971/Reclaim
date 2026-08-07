@@ -298,6 +298,8 @@ describe("dispatchControlAction", () => {
         created_at: new Date().toISOString(),
         fulfilled_at: null,
         cancelled_at: null,
+        fulfillment_evidence_reference: null,
+        evidence_preimage: null,
       };
       const testStore = makeMockStore(agent, {
         listEvidenceRequests: vi.fn().mockResolvedValue([openReq]),

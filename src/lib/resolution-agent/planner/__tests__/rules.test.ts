@@ -186,6 +186,8 @@ function makeEvidenceRequest(overrides: Partial<EvidenceRequestRow> = {}): Evide
     created_case_version_hash: "case_hash_v2",
     evidence_version_hash: null,
     fulfilled_case_version_hash: null,
+    fulfillment_evidence_reference: null,
+    evidence_preimage: null,
     created_at: "2024-01-01T00:00:00Z",
     fulfilled_at: null,
     cancelled_at: null,

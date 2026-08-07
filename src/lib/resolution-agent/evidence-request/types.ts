@@ -120,6 +120,8 @@ export interface FulfillmentStore {
         | "fulfilled_case_version_hash"
         | "fulfilled_at"
         | "cancelled_at"
+        | "fulfillment_evidence_reference"
+        | "evidence_preimage"
       >
     >,
   ): Promise<void>;

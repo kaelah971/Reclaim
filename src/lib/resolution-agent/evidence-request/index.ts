@@ -40,5 +40,16 @@ export {
 // Fulfillment
 export {
   fulfillEvidenceRequest,
+  buildEvidencePreimage,
+  preimageContainsRequestId,
 } from "./fulfillment";
 export type { FulfillEvidenceRequestParams } from "./fulfillment";
+
+// Reconciliation
+export {
+  reconcileEvidenceRequestOnChain,
+} from "./reconciliation";
+export type {
+  ReconciliationResult,
+  ReconcileEvidenceRequestParams,
+} from "./reconciliation";

@@ -777,6 +777,8 @@ describe("observeResolutionAgentCase", () => {
         created_at: "2024-05-27T00:00:00.000Z",
         fulfilled_at: null,
         cancelled_at: null,
+        fulfillment_evidence_reference: null,
+        evidence_preimage: null,
       },
       {
         id: "er_2",
@@ -791,6 +793,8 @@ describe("observeResolutionAgentCase", () => {
         created_at: "2024-05-27T00:00:00.000Z",
         fulfilled_at: "2024-05-28T00:00:00.000Z",
         cancelled_at: null,
+        fulfillment_evidence_reference: null,
+        evidence_preimage: null,
       },
     ]);
 

@@ -76,6 +76,8 @@ export interface EvidenceRequestRow {
   created_case_version_hash: string | null;
   evidence_version_hash: string | null;
   fulfilled_case_version_hash: string | null;
+  fulfillment_evidence_reference: string | null;
+  evidence_preimage: string | null;
   created_at: string;
   fulfilled_at: string | null;
   cancelled_at: string | null;
