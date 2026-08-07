@@ -1,7 +1,9 @@
 // ---------------------------------------------------------------------------
 // POST /api/resolution-agents
+// GET  /api/resolution-agents?paymentId=... — lookup by payment ID
 //
-// Create a new Resolution Agent for a specific escrow payment case.
+// Create a new Resolution Agent for a specific escrow payment case,
+// or look up an existing agent by payment ID.
 //
 // Headers:
 //   x-wallet-address   — funder's EVM address
@@ -28,14 +30,64 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createAgentRequestSchema } from "@/lib/resolution-agent/api/types";
-import { verifyAuth } from "@/lib/resolution-agent/api/auth";
+import { verifyAuth, buildActivationMessage } from "@/lib/resolution-agent/api/auth";
 import { createResolutionAgentForCase, createStore } from "@/lib/resolution-agent/api/service";
 import {
   CeloSepoliaEscrowCaseReader,
   CANONICAL_ESCROW_CONTRACT_ADDRESS,
+  CANONICAL_ESCROW_CHAIN_ID,
 } from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
+import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supabase";
+import { toResolutionAgentPublicView } from "@/lib/resolution-agent/public-view";
+
+// ---------------------------------------------------------------------------
+// GET /api/resolution-agents?paymentId=...
+// ---------------------------------------------------------------------------
+
+export async function GET(request: NextRequest): Promise<Response> {
+  const correlationId = crypto.randomUUID();
+
+  try {
+    const { searchParams } = new URL(request.url);
+    const paymentId = searchParams.get("paymentId");
+
+    if (!paymentId) {
+      return NextResponse.json(
+        { error: "Missing paymentId query parameter.", code: "MISSING_PARAM" },
+        { status: 400 },
+      );
+    }
+
+    // Look up the agent by case identity (canonical chain + contract)
+    const store = new SupabaseResolutionAgentStore();
+    const agent = await store.getAgentByCaseIdentity(
+      String(CANONICAL_ESCROW_CHAIN_ID),
+      CANONICAL_ESCROW_CONTRACT_ADDRESS,
+      paymentId,
+    );
+
+    if (!agent) {
+      return NextResponse.json(
+        { found: false, agentId: null },
+        { status: 200 },
+      );
+    }
+
+    return NextResponse.json({
+      found: true,
+      agentId: agent.id,
+      publicView: toResolutionAgentPublicView(agent),
+    });
+  } catch (err) {
+    return toErrorResponse(err, correlationId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/resolution-agents
+// ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<Response> {
   const correlationId = crypto.randomUUID();
