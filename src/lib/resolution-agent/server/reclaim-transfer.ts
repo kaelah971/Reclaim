@@ -53,6 +53,54 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
     });
   }
 
+  /**
+   * Calculate the final transferable amount after deducting estimated gas.
+   * Returns min(amountAtomic, balance - estimatedFee) so the caller can
+   * persist the exact amount before broadcast.
+   */
+  async prepareTransferAmount(params: {
+    from: string;
+    amountAtomic: bigint;
+  }): Promise<bigint> {
+    const fromAddr = params.from as `0x${string}`;
+
+    const publicClient = createPublicClient({
+      chain: celo,
+      transport: http(this.rpcUrl),
+    });
+
+    const balance = (await publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_TRANSFER_ABI,
+      functionName: "balanceOf",
+      args: [fromAddr],
+    })) as bigint;
+
+    if (balance === 0n) {
+      throw new Error("Wallet has zero USDC balance — nothing to transfer.");
+    }
+
+    const feeResult = await publicClient.estimateFeesPerGas();
+    let gasPrice: bigint;
+    if (feeResult && typeof feeResult === "object" && "maxFeePerGas" in feeResult) {
+      gasPrice = (feeResult as { maxFeePerGas: bigint }).maxFeePerGas ?? 20_000_000_000n;
+    } else if (feeResult && typeof feeResult === "object" && "gasPrice" in feeResult) {
+      gasPrice = (feeResult as { gasPrice: bigint }).gasPrice;
+    } else {
+      gasPrice = 20_000_000_000n;
+    }
+    const estimatedFee = gasPrice * ESTIMATED_GAS_LIMIT;
+
+    if (balance <= estimatedFee) {
+      throw new Error(
+        `Wallet balance (${balance}) is too low to cover the estimated fee (${estimatedFee}).`,
+      );
+    }
+
+    const maxTransferable = balance - estimatedFee;
+    return params.amountAtomic > maxTransferable ? maxTransferable : params.amountAtomic;
+  }
+
   async transferUsdc(params: {
     privateKey: string;
     from: string;
@@ -61,7 +109,6 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
     storedNonce?: number;
   }): Promise<{ txHash: string; nonce: number; transferAmount: bigint }> {
     const { privateKey, from, to, amountAtomic, storedNonce } = params;
-    const isRetry = storedNonce !== undefined;
 
     const account = privateKeyToAccount(privateKey as `0x${string}`);
     const fromAddr = from as `0x${string}`;
@@ -71,56 +118,16 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
       throw new Error("Private key does not match the from address.");
     }
 
+    // The transfer amount is the FROZEN value computed by the caller
+    // via prepareTransferAmount before persistence. Never recalculated.
+    const transferAmount = amountAtomic;
+
     const publicClient = createPublicClient({
       chain: celo,
       transport: http(this.rpcUrl),
     });
 
-    // The transfer amount is the FROZEN reclaimAmountAtomic from the
-    // caller (closeResolutionAgent).  It is never mutated by this client.
-    // On retry, the EXACT same amount, destination, and nonce are reused.
-    let transferAmount = amountAtomic;
-
-    if (!isRetry) {
-      // First attempt: validate wallet has enough USDC to cover transfer + gas.
-      // If amountAtomic doesn't leave enough room for gas, reduce to
-      // balance - estimatedFee so the transaction can proceed.
-      const balance = (await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: ERC20_TRANSFER_ABI,
-        functionName: "balanceOf",
-        args: [fromAddr],
-      })) as bigint;
-
-      if (balance === 0n) {
-        throw new Error("Wallet has zero USDC balance — nothing to transfer.");
-      }
-
-      const feeResult = await publicClient.estimateFeesPerGas();
-      let gasPrice: bigint;
-      if (feeResult && typeof feeResult === "object" && "maxFeePerGas" in feeResult) {
-        gasPrice = (feeResult as { maxFeePerGas: bigint }).maxFeePerGas ?? 20_000_000_000n;
-      } else if (feeResult && typeof feeResult === "object" && "gasPrice" in feeResult) {
-        gasPrice = (feeResult as { gasPrice: bigint }).gasPrice;
-      } else {
-        gasPrice = 20_000_000_000n;
-      }
-      const estimatedFee = gasPrice * ESTIMATED_GAS_LIMIT;
-
-      if (balance < estimatedFee) {
-        throw new Error(
-          `Wallet balance (${balance}) is too low to cover the estimated fee (${estimatedFee}).`,
-        );
-      }
-
-      // Cap the transfer amount so that balance covers both transfer and gas
-      const maxTransferable = balance - estimatedFee;
-      if (amountAtomic > maxTransferable) {
-        transferAmount = maxTransferable;
-      }
-    }
-
-    // Estimate gas price (needed for the transaction on both first and retry)
+    // Estimate gas price for transaction fields (never for amount)
     const feeResult = await publicClient.estimateFeesPerGas();
     let gasPrice: bigint;
     if (feeResult && typeof feeResult === "object" && "maxFeePerGas" in feeResult) {

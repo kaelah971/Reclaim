@@ -1020,6 +1020,10 @@ export async function resumeResolutionAgent(
  */
 export interface ReclaimTransferClient {
   fetchNonce(from: string): Promise<number>;
+  prepareTransferAmount(params: {
+    from: string;
+    amountAtomic: bigint;
+  }): Promise<bigint>;
   transferUsdc(params: {
     privateKey: string;
     from: string;
@@ -1191,12 +1195,18 @@ export async function closeResolutionAgent(
         throw new Error("Decrypted wallet address does not match persisted case wallet address.");
       }
 
-      // Freeze reclaim intent: if not already set, persist amount + destination + nonce
-      // BEFORE broadcast. On retry, these exact values are reused.
+      // Freeze reclaim intent: if not already set, compute final amount
+      // (balance minus estimated fee), persist it, THEN broadcast.
       if (!hasPreparedReclaim) {
         reclaimNonce = await transferClient.fetchNonce(account.address);
 
-        // Persist frozen intent on the agent row (survives process crash)
+        // Compute FINAL transfer amount (balance minus gas fee) BEFORE persist
+        reclaimAmount = await transferClient.prepareTransferAmount({
+          from: account.address,
+          amountAtomic: reclaimAmount,
+        });
+
+        // Persist frozen intent BEFORE broadcast (crash-safe)
         const intentAgent: ResolutionAgent = {
           ...closingAgent,
           reclaimAmountAtomic: reclaimAmount,
@@ -1224,22 +1234,6 @@ export async function closeResolutionAgent(
         amountAtomic: reclaimAmount,
         storedNonce: reclaimNonce ?? undefined,
       });
-
-      // If this is the first attempt, re-freeze the intent with the ACTUAL
-      // transfer amount (which may differ from reclaimAmount after fee
-      // adjustments inside the client).
-      if (!hasPreparedReclaim && actualTransferAmount !== reclaimAmount) {
-        reclaimAmount = actualTransferAmount;
-        const reFreezeAgent: ResolutionAgent = {
-          ...closingAgent,
-          reclaimAmountAtomic: reclaimAmount,
-          reclaimDestination: destination,
-          reclaimNonce,
-        };
-        const reFreezeVersion = await closingStore.getAgentVersion(agentId);
-        await store.updateAgent(reFreezeAgent, reFreezeVersion);
-        closingAgent = reFreezeAgent;
-      }
 
       await store.appendEvent(
         agentId,

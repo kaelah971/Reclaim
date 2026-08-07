@@ -66,6 +66,7 @@ interface CallLog {
   order: string[];
   getUsdcBalanceAtomic: ReturnType<typeof vi.fn>;
   fetchNonce: ReturnType<typeof vi.fn>;
+  prepareTransferAmount: ReturnType<typeof vi.fn>;
   transferUsdc: ReturnType<typeof vi.fn>;
   updateAgent: ReturnType<typeof vi.fn>;
   appendEvent: ReturnType<typeof vi.fn>;
@@ -77,6 +78,7 @@ function makeCallLog(): CallLog {
     order: log,
     getUsdcBalanceAtomic: vi.fn().mockImplementation(() => { log.push("getUsdcBalanceAtomic"); return Promise.resolve(500_000n); }),
     fetchNonce: vi.fn().mockImplementation(() => { log.push("fetchNonce"); return Promise.resolve(5); }),
+    prepareTransferAmount: vi.fn().mockImplementation(({ amountAtomic }: { amountAtomic: bigint }) => { log.push("prepareTransferAmount"); return Promise.resolve(amountAtomic); }),
     transferUsdc: vi.fn().mockImplementation(() => { log.push("transferUsdc"); return Promise.resolve({ txHash: "0xtx", nonce: 5, transferAmount: 0n }); }),
     updateAgent: vi.fn().mockImplementation(() => { log.push("updateAgent"); return Promise.resolve(null); }),
     appendEvent: vi.fn().mockImplementation(() => { log.push("appendEvent"); return Promise.resolve(undefined); }),
@@ -105,6 +107,7 @@ function makeFundingReader(balance: bigint, callLog?: CallLog) {
 function makeTransferClient(callLog: CallLog, opts?: { throwOnTransfer?: boolean }): ReclaimTransferClient {
   return {
     fetchNonce: callLog.fetchNonce,
+    prepareTransferAmount: callLog.prepareTransferAmount,
     transferUsdc: opts?.throwOnTransfer
       ? vi.fn().mockRejectedValue(new Error("simulated decrypt/transfer failure"))
       : callLog.transferUsdc,

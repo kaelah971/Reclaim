@@ -108,7 +108,7 @@ describe("RA1Q prepared reclaim restart", () => {
       agentId: agent.id, authenticatedCaller: FUNDER, now: NOW,
       store,
       fundingReader: { getUsdcBalanceAtomic: balanceReader } as any,
-      transferClient: { fetchNonce: nonceFetcher, transferUsdc: transfer } as any,
+      transferClient: { fetchNonce: nonceFetcher, prepareTransferAmount: vi.fn().mockResolvedValue(400_000n), transferUsdc: transfer } as any,
     });
 
     expect(balanceReader).not.toHaveBeenCalled();
