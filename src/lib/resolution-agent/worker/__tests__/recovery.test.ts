@@ -41,6 +41,9 @@ function makeTestAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAgen
     activatedAt: 1_000_000,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

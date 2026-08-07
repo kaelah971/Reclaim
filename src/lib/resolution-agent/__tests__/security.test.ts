@@ -107,6 +107,9 @@ describe("RA1P state machine safety", () => {
     settledToolIds: [], currentRunningToolId: null,
     createdAt: 1000000, updatedAt: 1000000,
     activatedAt: null, pausedAt: null, closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
   });
 
   it("paused agent cannot transition to running_tool", () => {
@@ -191,6 +194,9 @@ describe("RA1P worker / control safety", () => {
       settledToolIds: [], currentRunningToolId: null,
       createdAt: 1_000_000, updatedAt: 1_000_000,
       activatedAt: null, pausedAt: 2_000_000, closedAt: null,
+      reclaimAmountAtomic: null,
+      reclaimDestination: null,
+      reclaimNonce: null,
     };
     const decision = evaluateResolutionAgentResumption({ agent: pausedAgent, evidenceRequests: [], now: Date.now() });
     expect(decision.kind).toBe("stay_waiting");
@@ -209,6 +215,9 @@ describe("RA1P worker / control safety", () => {
       settledToolIds: [], currentRunningToolId: null,
       createdAt: 1_000_000, updatedAt: 1_000_000,
       activatedAt: null, pausedAt: null, closedAt: 2_000_000,
+      reclaimAmountAtomic: null,
+      reclaimDestination: null,
+      reclaimNonce: null,
     };
     const decision = evaluateResolutionAgentResumption({ agent: closedAgent, evidenceRequests: [], now: Date.now() });
     expect(decision.kind).toBe("stay_waiting");
@@ -293,6 +302,9 @@ describe("RA1P secret-leak regression", () => {
     settledToolIds: [], currentRunningToolId: null,
     createdAt: 1_000_000, updatedAt: 1_000_000,
     activatedAt: null, pausedAt: null, closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
   };
 
   const view = toResolutionAgentPublicView(agent);

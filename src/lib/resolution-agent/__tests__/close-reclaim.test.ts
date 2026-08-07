@@ -36,6 +36,7 @@ function makeTestAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAgen
     currentRunningToolId: null,
     createdAt: 1_000_000, updatedAt: 1_000_000,
     activatedAt: null, pausedAt: null, closedAt: null,
+    reclaimAmountAtomic: null, reclaimDestination: null, reclaimNonce: null,
     ...overrides,
   };
 }

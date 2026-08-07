@@ -178,6 +178,9 @@ function makeActiveAgent(agentId = "agent_test_1", overrides: Partial<Resolution
     activatedAt: 5000000,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

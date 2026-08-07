@@ -86,6 +86,9 @@ function makeAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAgent {
     activatedAt: Date.now() - 5000,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

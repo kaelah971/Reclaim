@@ -509,6 +509,9 @@ export async function createResolutionAgentForCase(
     activatedAt: null,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
   };
 
   // 7. Persist (version 1 in database)
@@ -1125,23 +1128,41 @@ export async function closeResolutionAgent(
     );
   }
 
-  // 8. Read actual on-chain USDC balance
-  let walletBalance: bigint;
-  try {
-    walletBalance = await fundingReader.getUsdcBalanceAtomic(agent.caseWalletAddress);
-  } catch {
-    throw new Error("Failed to read the case wallet's USDC balance from Celo Mainnet.");
+  // 8. Check for persisted reclaim intent from a previous attempt
+  //    (crash recovery: if reclaim was prepared but not completed,
+  //     reuse the exact same amount, destination, and nonce)
+  let reclaimAmount: bigint;
+  let destination: string;
+  let reclaimNonce: number | null = agent.reclaimNonce ?? null;
+
+  const hasPreparedReclaim = agent.reclaimAmountAtomic !== null &&
+    agent.reclaimDestination !== null;
+
+  if (hasPreparedReclaim) {
+    // Retry path: freeze the original intent — do NOT re-read balance
+    reclaimAmount = agent.reclaimAmountAtomic!;
+    destination = agent.reclaimDestination!;
+  } else {
+    // First attempt: read actual on-chain USDC balance
+    try {
+      reclaimAmount = await fundingReader.getUsdcBalanceAtomic(agent.caseWalletAddress);
+    } catch {
+      throw new Error("Failed to read the case wallet's USDC balance from Celo Mainnet.");
+    }
+    destination = agent.policy.funderAddress;
   }
 
-  // 9. Determine reclaim amount
-  const reclaimAmount = walletBalance;
-  const destination = agent.policy.funderAddress;
-
-  // 10. Transition to closing
+  // 9. Transition to closing (skip if already closing)
   const closingStore = store as ResolutionAgentStore & { getAgentVersion(id: string): Promise<number> };
   const currentVersion = await closingStore.getAgentVersion(agentId);
-  const closingAgent = transitionAgentStatus(agent, "closing", { now });
-  await store.updateAgent(closingAgent, currentVersion);
+
+  let closingAgent: ResolutionAgent;
+  if (agent.status === "closing") {
+    closingAgent = agent;
+  } else {
+    closingAgent = transitionAgentStatus(agent, "closing", { now });
+    await store.updateAgent(closingAgent, currentVersion);
+  }
 
   await store.appendEvent(
     agentId,
@@ -1152,29 +1173,41 @@ export async function closeResolutionAgent(
     { reclaimAmount: reclaimAmount.toString(), destination },
   );
 
-  // 11. Reclaim USDC if balance > 0
+  // 10. Reclaim USDC if balance > 0
   if (reclaimAmount > 0n) {
     try {
       const encryptionKey = parseWalletEncryptionKey(
         process.env[WALLET_ENCRYPTION_KEY_ENV],
       );
       const privateKey = decryptCaseWalletPrivateKey({
-        encryptedSecret: agent.encryptedSecret,
-        caseIdentity: agent.identity,
-        agentId: agent.id,
+        encryptedSecret: closingAgent.encryptedSecret,
+        caseIdentity: closingAgent.identity,
+        agentId: closingAgent.id,
         encryptionKey,
       });
 
       const account = privateKeyToAccount(privateKey as `0x${string}`);
-      if (account.address.toLowerCase() !== agent.caseWalletAddress.toLowerCase()) {
+      if (account.address.toLowerCase() !== closingAgent.caseWalletAddress.toLowerCase()) {
         throw new Error("Decrypted wallet address does not match persisted case wallet address.");
       }
 
-      // Fetch the nonce and durably persist it BEFORE broadcast so a
-      // crash between broadcast and DB update can be recovered.
-      const reclaimNonce = await transferClient.fetchNonce(account.address);
+      // Freeze reclaim intent: if not already set, persist amount + destination + nonce
+      // BEFORE broadcast. On retry, these exact values are reused.
+      if (!hasPreparedReclaim) {
+        reclaimNonce = await transferClient.fetchNonce(account.address);
 
-      // Persist reclaim identity before broadcast (crash-safe)
+        // Persist frozen intent on the agent row (survives process crash)
+        const intentAgent: ResolutionAgent = {
+          ...closingAgent,
+          reclaimAmountAtomic: reclaimAmount,
+          reclaimDestination: destination,
+          reclaimNonce,
+        };
+        const preBroadcastVersion = await closingStore.getAgentVersion(agentId);
+        await store.updateAgent(intentAgent, preBroadcastVersion);
+        closingAgent = intentAgent;
+      }
+
       await store.appendEvent(
         agentId,
         "agent_reclaim_prepared",
@@ -1189,7 +1222,7 @@ export async function closeResolutionAgent(
         from: account.address,
         to: destination,
         amountAtomic: reclaimAmount,
-        storedNonce: reclaimNonce,
+        storedNonce: reclaimNonce ?? undefined,
       });
 
       await store.appendEvent(

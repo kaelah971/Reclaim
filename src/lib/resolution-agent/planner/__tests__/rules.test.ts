@@ -60,6 +60,9 @@ function makeActiveAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAg
     activatedAt: 5000000,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

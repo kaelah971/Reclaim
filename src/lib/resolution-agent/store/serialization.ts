@@ -100,6 +100,10 @@ export function agentToUpdateRow(agent: ResolutionAgent): Record<string, unknown
     paused_at: agent.pausedAt ? new Date(agent.pausedAt).toISOString() : null,
     closed_at: agent.closedAt ? new Date(agent.closedAt).toISOString() : null,
     current_running_tool_id: agent.currentRunningToolId ?? null,
+    reclaim_state: null,
+    reclaim_amount_atomic: agent.reclaimAmountAtomic !== null ? Number(agent.reclaimAmountAtomic) : null,
+    reclaim_destination: agent.reclaimDestination ?? null,
+    reclaim_nonce: agent.reclaimNonce ?? null,
   };
 }
 
@@ -169,6 +173,9 @@ export function rowToAgent(row: ResolutionAgentRow): ResolutionAgent {
       activatedAt: row.activated_at ? new Date(row.activated_at).getTime() : null,
       pausedAt: row.paused_at ? new Date(row.paused_at).getTime() : null,
       closedAt: row.closed_at ? new Date(row.closed_at).getTime() : null,
+      reclaimAmountAtomic: row.reclaim_amount_atomic !== null && row.reclaim_amount_atomic !== undefined ? BigInt(row.reclaim_amount_atomic) : null,
+      reclaimDestination: row.reclaim_destination ?? null,
+      reclaimNonce: row.reclaim_nonce ?? null,
     };
   } catch (err) {
     if (err instanceof ResolutionAgentSerializationError) throw err;

@@ -87,6 +87,9 @@ function makeTestAgent(
     activatedAt: ACTIVATED_EPOCH,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

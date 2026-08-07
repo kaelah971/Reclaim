@@ -225,6 +225,9 @@ integrationDescribe("SupabaseResolutionAgentStore — integration", () => {
       activatedAt: null as number | null,
       pausedAt: null as number | null,
       closedAt: null as number | null,
+      reclaimAmountAtomic: null,
+      reclaimDestination: null,
+      reclaimNonce: null,
       ...overrides,
     } as ResolutionAgent;
   }

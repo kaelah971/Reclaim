@@ -67,6 +67,9 @@ function makeAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAgent {
     createdAt: 1_000_000,
     updatedAt: 1_000_000,
     activatedAt: null, pausedAt: null, closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }

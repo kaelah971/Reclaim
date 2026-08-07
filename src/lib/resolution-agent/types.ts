@@ -239,6 +239,9 @@ export interface ResolutionAgent {
   activatedAt: number | null;
   pausedAt: number | null;
   closedAt: number | null;
+  reclaimAmountAtomic: bigint | null;
+  reclaimDestination: string | null;
+  reclaimNonce: number | null;
 }
 
 // ---------------------------------------------------------------------------

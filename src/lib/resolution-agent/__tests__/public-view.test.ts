@@ -73,6 +73,9 @@ function makeTestAgent(
     activatedAt: 4000000,
     pausedAt: null,
     closedAt: null,
+    reclaimAmountAtomic: null,
+    reclaimDestination: null,
+    reclaimNonce: null,
     ...overrides,
   };
 }
