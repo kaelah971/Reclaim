@@ -839,19 +839,21 @@ export interface PauseAgentParams {
  * Pauses a resolution agent, preventing new autonomous work.
  *
  * # Eligibility
- * The agent must be in a pausable state (active, running_tool,
- * waiting_for_evidence, waiting_for_human_approval, ready_for_human_review,
- * budget_exhausted, or failed_recoverable).
+ * The agent must be in a pausable state (active, waiting_for_evidence,
+ * waiting_for_human_approval, ready_for_human_review, budget_exhausted,
+ * or failed_recoverable).  running_tool is NOT pausable — wait for the
+ * tool execution to complete.
  *
  * # Idempotency
  * Already-paused agents return safely without change or duplicate events.
  *
  * # Safety
+ * - running_tool is rejected — prevents race between pause and wallet
+ *   decryption / x402 signing / facilitator settlement
  * - No budget change
  * - No wallet decryption
  * - No x402 execution
  * - No evidence request cancellation
- * - Does NOT cancel in-flight tool executions (recovery handles them on resume)
  *
  * # Authorisation
  * Only the original funder may pause.
@@ -874,6 +876,17 @@ export async function pauseResolutionAgent(
   ) {
     throw new Error(
       "Access denied: only the agent's funder may pause this agent.",
+    );
+  }
+
+  // Cannot pause while running_tool — the worker may be mid-execution
+  // and pause would create a race between wallet decryption, x402 signing,
+  // and settlement.  Wait for the tool execution to reach a recoverable
+  // boundary (completed/failed/settled) before pausing.
+  if (agent.status === "running_tool") {
+    throw new Error(
+      "Agent is currently executing a paid tool. " +
+        "Wait for the tool execution to complete or reach a recoverable state before pausing.",
     );
   }
 

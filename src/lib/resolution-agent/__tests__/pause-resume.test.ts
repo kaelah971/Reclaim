@@ -120,11 +120,12 @@ describe("pauseResolutionAgent", () => {
     expect(result.status).toBe("paused");
   });
 
-  it("pauses a running_tool agent", async () => {
+  it("rejects pause while running_tool (in-flight tool safety)", async () => {
     const agent = makeTestAgent({ status: "running_tool", currentRunningToolId: "evidence-quality-check" });
     const store = makeMockStore(agent);
-    const result = await pauseResolutionAgent({ agentId: agent.id, authenticatedCaller: funderAddress, now, store });
-    expect(result.status).toBe("paused");
+    await expect(
+      pauseResolutionAgent({ agentId: agent.id, authenticatedCaller: funderAddress, now, store }),
+    ).rejects.toThrow(/currently executing a paid tool/i);
   });
 
   it("pauses a failed_recoverable agent", async () => {
@@ -286,22 +287,17 @@ describe("pause/resume preserves waiting context", () => {
     expect(result.status).toBe("active");
   });
 
-  it("pausing running_tool preserves the reserved budget", async () => {
+  it("rejects pause while running_tool to protect in-flight execution", async () => {
     const agent = makeTestAgent({
       status: "running_tool",
       currentRunningToolId: "evidence-quality-check",
       budget: { approvedAtomic: 1_000_000n, spentAtomic: 0n, reservedAtomic: 10_000n },
     });
-    const capturedBudgets: { reservedAtomic: bigint }[] = [];
-    const store = {
-      ...makeMockStore(agent),
-      updateAgent: vi.fn().mockImplementation((a: ResolutionAgent) => {
-        capturedBudgets.push({ reservedAtomic: a.budget.reservedAtomic });
-        return Promise.resolve(a);
-      }),
-    };
-    await pauseResolutionAgent({ agentId: agent.id, authenticatedCaller: funderAddress, now, store });
-    expect(capturedBudgets[0].reservedAtomic).toBe(10_000n);
+    const store = makeMockStore(agent);
+    await expect(
+      pauseResolutionAgent({ agentId: agent.id, authenticatedCaller: funderAddress, now, store }),
+    ).rejects.toThrow(/currently executing a paid tool/i);
+    expect(store.updateAgent).not.toHaveBeenCalled();
   });
 });
 
