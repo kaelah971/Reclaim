@@ -23,24 +23,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAuth } from "@/lib/resolution-agent/api/auth";
-import { closeResolutionAgent, createStore, type ReclaimTransferClient } from "@/lib/resolution-agent/api/service";
+import { closeResolutionAgent, createStore } from "@/lib/resolution-agent/api/service";
 import { CeloMainnetFundingReader } from "@/lib/resolution-agent/api/funding";
+import { CeloReclaimTransferClient } from "@/lib/resolution-agent/server/reclaim-transfer";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
-
-// ---------------------------------------------------------------------------
-// Mock transfer client (production implementation needs Celo gas handling)
-// ---------------------------------------------------------------------------
-
-class NoOpReclaimTransferClient implements ReclaimTransferClient {
-  async transferUsdc(): Promise<{ txHash: string }> {
-    throw new Error(
-      "USDC transfer is not implemented in this environment. " +
-      "The agent has been transitioned to closing state. " +
-      "A production reclaim transfer client must be configured.",
-    );
-  }
-}
+import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supabase";
 
 // ---------------------------------------------------------------------------
 // Route handler
@@ -95,7 +83,7 @@ export async function POST(
     const store = createStore();
     const now = Date.now();
     const fundingReader = new CeloMainnetFundingReader();
-    const transferClient = new NoOpReclaimTransferClient();
+    const transferClient = new CeloReclaimTransferClient();
 
     const publicView = await closeResolutionAgent({
       agentId,

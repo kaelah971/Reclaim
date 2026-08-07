@@ -24,3 +24,6 @@ ALTER TABLE resolution_agents
 
 ALTER TABLE resolution_agents
   ADD COLUMN IF NOT EXISTS reclaim_submitted_at TIMESTAMPTZ;
+
+ALTER TABLE resolution_agents
+  ADD COLUMN IF NOT EXISTS reclaim_nonce BIGINT;

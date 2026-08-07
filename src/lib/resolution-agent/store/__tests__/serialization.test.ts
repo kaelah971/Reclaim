@@ -481,6 +481,7 @@ describe("rowToAgent", () => {
       reclaim_destination: null,
       reclaim_tx_hash: null,
       reclaim_submitted_at: null,
+      reclaim_nonce: null,
       // Additional fields the implementation may look at
       id: "db-uuid-001",
       evidence_version_hash: "0xabc123",
@@ -749,6 +750,7 @@ describe("rowToAgent — error handling", () => {
       reclaim_destination: null,
       reclaim_tx_hash: null,
       reclaim_submitted_at: null,
+      reclaim_nonce: null,
       id: "db-uuid-err",
       evidence_version_hash: null,
       case_version_hash: null,

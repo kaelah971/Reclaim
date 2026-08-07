@@ -1021,7 +1021,8 @@ export interface ReclaimTransferClient {
     from: string;
     to: string;
     amountAtomic: bigint;
-  }): Promise<{ txHash: string }>;
+    storedNonce?: number;
+  }): Promise<{ txHash: string; nonce: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,7 +1154,6 @@ export async function closeResolutionAgent(
   // 11. Reclaim USDC if balance > 0
   if (reclaimAmount > 0n) {
     try {
-      // Decrypt case wallet and transfer
       const encryptionKey = parseWalletEncryptionKey(
         process.env[WALLET_ENCRYPTION_KEY_ENV],
       );
@@ -1169,8 +1169,7 @@ export async function closeResolutionAgent(
         throw new Error("Decrypted wallet address does not match persisted case wallet address.");
       }
 
-      // Transfer
-      const { txHash } = await transferClient.transferUsdc({
+      const { txHash, nonce } = await transferClient.transferUsdc({
         privateKey,
         from: account.address,
         to: destination,
@@ -1183,7 +1182,16 @@ export async function closeResolutionAgent(
         `Reclaimed ${reclaimAmount} atomic USDC to ${destination}`,
         "closing",
         null,
-        { reclaimAmount: reclaimAmount.toString(), destination, txHash },
+        { reclaimAmount: reclaimAmount.toString(), destination, txHash, nonce },
+      );
+
+      await store.appendEvent(
+        agentId,
+        "agent_reclaim",
+        `Reclaimed ${reclaimAmount} atomic USDC to ${destination}`,
+        "closing",
+        null,
+        { reclaimAmount: reclaimAmount.toString(), destination, txHash, nonce },
       );
     } catch (err) {
       // If the transfer fails, the agent stays in "closing" for retry

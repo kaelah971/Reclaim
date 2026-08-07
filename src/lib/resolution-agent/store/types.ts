@@ -37,6 +37,7 @@ export interface ResolutionAgentRow {
   reclaim_destination: string | null;
   reclaim_tx_hash: string | null;
   reclaim_submitted_at: string | null;
+  reclaim_nonce: number | null;
 }
 
 export interface AgentEventRow {
