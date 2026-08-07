@@ -10,7 +10,7 @@ import type {
 } from "../types";
 import type { ResolutionAgent } from "../../types";
 import type { ResolutionAgentStore } from "../../api/service";
-import type { ToolExecutionRow } from "../../store/types";
+import type { ToolExecutionRow, EvidenceRequestRow } from "../../store/types";
 import type { CaseObservationResult } from "../../observation/types";
 import type { ResolutionAgentPlanningResult, ResolutionAgentNextAction, PlannerReasonCode } from "../../planner/types";
 
@@ -170,10 +170,8 @@ function makePlanningResult(): ResolutionAgentPlanningResult {
 }
 
 // ---------------------------------------------------------------------------
-// Mock store factory
+// Mock store with extended worker methods
 // ---------------------------------------------------------------------------
-
-import type { EvidenceRequestRow } from "../../store/types";
 
 interface MockWorkerStore extends ResolutionAgentStore {
   listToolExecutions(agentId: string): Promise<ToolExecutionRow[]>;
@@ -185,6 +183,14 @@ interface MockWorkerStore extends ResolutionAgentStore {
   createToolExecution(agentId: string, toolIdentifier: string, requestHash: string, priceAtomic: bigint, network: string, asset: string, payTo: string): Promise<void>;
   getToolExecutionByRequestHash(agentId: string, requestHash: string): Promise<ToolExecutionRow | null>;
   updateToolExecution(agentId: string, requestHash: string, updates: Partial<Pick<ToolExecutionRow, "state" | "case_version_hash" | "evidence_version_hash" | "settlement_tx_hash" | "payment_reference" | "result_reference" | "result_data" | "failure_reason">>): Promise<void>;
+  createEvidenceRequest(
+    agentId: string,
+    responsibleParty: "client" | "worker",
+    evidenceItem: string,
+    reason: string,
+    caseVersionHash?: string,
+    evidenceVersionHash?: string,
+  ): Promise<EvidenceRequestRow>;
 }
 
 function createMockStore(agent: ResolutionAgent, candidates: WorkerCandidate[]): MockWorkerStore {
@@ -209,6 +215,23 @@ function createMockStore(agent: ResolutionAgent, candidates: WorkerCandidate[]):
     createToolExecution: vi.fn().mockResolvedValue(undefined),
     getToolExecutionByRequestHash: vi.fn().mockResolvedValue(null),
     updateToolExecution: vi.fn().mockResolvedValue(undefined),
+    createEvidenceRequest: vi.fn().mockImplementation(
+      (agentId: string, responsibleParty: "client" | "worker", evidenceItem: string, reason: string, caseVersionHash?: string, evidenceVersionHash?: string) =>
+        Promise.resolve({
+          id: "evreq_new",
+          agent_id: agentId,
+          responsible_party: responsibleParty,
+          evidence_item: evidenceItem,
+          reason,
+          status: "open",
+          created_case_version_hash: caseVersionHash ?? null,
+          evidence_version_hash: evidenceVersionHash ?? null,
+          fulfilled_case_version_hash: null,
+          created_at: new Date().toISOString(),
+          fulfilled_at: null,
+          cancelled_at: null,
+        } as EvidenceRequestRow),
+    ),
   };
 }
 

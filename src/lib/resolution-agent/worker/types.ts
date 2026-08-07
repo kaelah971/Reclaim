@@ -124,6 +124,14 @@ export interface ResolutionAgentWorkerDependencies {
   store: ResolutionAgentStore & {
     listToolExecutions(agentId: string): Promise<ToolExecutionRow[]>;
     listEvidenceRequests(agentId: string): Promise<EvidenceRequestRow[]>;
+    createEvidenceRequest(
+      agentId: string,
+      responsibleParty: "client" | "worker",
+      evidenceItem: string,
+      reason: string,
+      caseVersionHash?: string,
+      evidenceVersionHash?: string,
+    ): Promise<EvidenceRequestRow>;
     listRunnableAgents(limit: number): Promise<WorkerCandidate[]>;
     tryAcquireAgentLease(
       agentId: string,

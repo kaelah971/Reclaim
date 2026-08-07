@@ -2,8 +2,8 @@
 // Control-only Action Dispatcher — handles non-payment agent lifecycle
 // transitions that the worker can perform without external tool adapters.
 //
-// All "run_tool" and "create_evidence_request" actions return
-// "unsupported_action" — no real tool execution occurs in this phase.
+// "run_tool" actions return "unsupported_action" — no real tool execution
+// occurs in this phase (handled by the executor registry).
 // ---------------------------------------------------------------------------
 
 import type { ResolutionAgent, ResolutionAgentPlan } from "../types";
@@ -14,11 +14,31 @@ import type {
   ResolutionAgentActionExecutor,
 } from "./types";
 import type { ResolutionAgentStore } from "../api/service";
+import type { EvidenceRequestRow } from "../store/types";
 import { transitionAgentStatus, type TransitionContext } from "../state-machine";
+import { executeCreateEvidenceRequest, executeWaitForEvidence } from "../evidence-request/service";
+import type { EvidenceRequestStore } from "../evidence-request/types";
 
 // ---------------------------------------------------------------------------
 // Dispatch a control-only action
 // ---------------------------------------------------------------------------
+
+/**
+ * Extended store shape accepted by dispatchControlAction.
+ * Must support evidence-request operations in addition to the
+ * standard ResolutionAgentStore interface.
+ */
+export type DispatchStore = ResolutionAgentStore & {
+  listEvidenceRequests(agentId: string): Promise<EvidenceRequestRow[]>;
+  createEvidenceRequest(
+    agentId: string,
+    responsibleParty: "client" | "worker",
+    evidenceItem: string,
+    reason: string,
+    caseVersionHash?: string,
+    evidenceVersionHash?: string,
+  ): Promise<EvidenceRequestRow>;
+};
 
 export async function dispatchControlAction(params: {
   agent: ResolutionAgent;
@@ -26,10 +46,10 @@ export async function dispatchControlAction(params: {
   action: ResolutionAgentNextAction;
   leaseContext: LeaseContext;
   now: number;
-  store: ResolutionAgentStore;
+  store: DispatchStore;
   executor: ResolutionAgentActionExecutor;
 }): Promise<{ result: ActionExecutionResult; agent: ResolutionAgent }> {
-  const { agent, action, now, store } = params;
+  const { agent, plan, action, leaseContext, now, store } = params;
   const transitionCtx: TransitionContext = { now };
 
   switch (action.kind) {
@@ -112,22 +132,30 @@ export async function dispatchControlAction(params: {
     }
 
     // -----------------------------------------------------------------------
-    // Wait for evidence — no state change (Task 11 handles this)
+    // Wait for evidence — delegate to evidence-request service
     // -----------------------------------------------------------------------
     case "wait_for_evidence":
-      return {
-        result: { kind: "waiting", reason: "Waiting for evidence — no state change" },
+      return executeWaitForEvidence({
         agent,
-      };
+        plan,
+        action,
+        leaseContext,
+        now,
+        store: store as EvidenceRequestStore,
+      });
 
     // -----------------------------------------------------------------------
-    // Create evidence request — unsupported (Task 11 handles this)
+    // Create evidence request — delegate to evidence-request service
     // -----------------------------------------------------------------------
     case "create_evidence_request":
-      return {
-        result: { kind: "unsupported_action", actionKind: "create_evidence_request" },
+      return executeCreateEvidenceRequest({
         agent,
-      };
+        plan,
+        action,
+        leaseContext,
+        now,
+        store: store as EvidenceRequestStore,
+      });
 
     // -----------------------------------------------------------------------
     // Run tool — unsupported (no real adapters exist yet)

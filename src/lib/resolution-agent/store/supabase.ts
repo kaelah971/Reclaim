@@ -392,6 +392,8 @@ export class SupabaseResolutionAgentStore {
     responsibleParty: "client" | "worker",
     evidenceItem: string,
     reason: string,
+    caseVersionHash?: string,
+    evidenceVersionHash?: string,
   ): Promise<EvidenceRequestRow> {
     const row: Record<string, unknown> = {
       id: crypto.randomUUID(),
@@ -400,7 +402,8 @@ export class SupabaseResolutionAgentStore {
       evidence_item: evidenceItem,
       reason,
       status: "open",
-      created_case_version_hash: null,
+      created_case_version_hash: caseVersionHash ?? null,
+      evidence_version_hash: evidenceVersionHash ?? null,
       fulfilled_case_version_hash: null,
       created_at: new Date().toISOString(),
       fulfilled_at: null,

@@ -127,7 +127,7 @@ new SupabaseResolutionAgentStore(mockClient as any);
     const store = // eslint-disable-next-line @typescript-eslint/no-explicit-any
 new SupabaseResolutionAgentStore(mockClient as any);
     expect(typeof store.createEvidenceRequest).toBe("function");
-    expect(store.createEvidenceRequest.length).toBe(4);
+    expect(store.createEvidenceRequest.length).toBe(6);
   });
 
   it("listEvidenceRequests exists and is a function", async () => {

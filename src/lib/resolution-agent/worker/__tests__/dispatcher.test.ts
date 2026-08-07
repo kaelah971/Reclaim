@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { dispatchControlAction, isPlanStale } from "../dispatcher";
+import type { DispatchStore } from "../dispatcher";
 import type { ResolutionAgent, ResolutionAgentPlan } from "../../types";
 import type { ResolutionAgentNextAction, PlannerReasonCode } from "../../planner/types";
 import type { LeaseContext, ResolutionAgentActionExecutor, ActionExecutionResult } from "../types";
-import type { ResolutionAgentStore } from "../../api/service";
+import type { EvidenceRequestRow } from "../../store/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,7 +75,7 @@ function makeLeaseContext(): LeaseContext {
   };
 }
 
-function makeMockStore(agent: ResolutionAgent): ResolutionAgentStore {
+function makeMockStore(agent: ResolutionAgent, overrides: Partial<DispatchStore> = {}): DispatchStore {
   return {
     getAgentById: vi.fn().mockResolvedValue(agent),
     getAgentByCaseIdentity: vi.fn().mockResolvedValue(null),
@@ -82,6 +83,25 @@ function makeMockStore(agent: ResolutionAgent): ResolutionAgentStore {
     updateAgent: vi.fn().mockResolvedValue(agent),
     appendEvent: vi.fn().mockResolvedValue(undefined),
     getAgentVersion: vi.fn().mockResolvedValue(1),
+    listEvidenceRequests: vi.fn().mockResolvedValue([] as EvidenceRequestRow[]),
+    createEvidenceRequest: vi.fn().mockImplementation(
+      (agentId: string, responsibleParty: "client" | "worker", evidenceItem: string, reason: string, caseVersionHash?: string, evidenceVersionHash?: string) =>
+        Promise.resolve({
+          id: "evreq_new",
+          agent_id: agentId,
+          responsible_party: responsibleParty,
+          evidence_item: evidenceItem,
+          reason,
+          status: "open",
+          created_case_version_hash: caseVersionHash ?? null,
+          evidence_version_hash: evidenceVersionHash ?? null,
+          fulfilled_case_version_hash: null,
+          created_at: new Date().toISOString(),
+          fulfilled_at: null,
+          cancelled_at: null,
+        } as EvidenceRequestRow),
+    ),
+    ...overrides,
   };
 }
 
@@ -100,7 +120,7 @@ describe("dispatchControlAction", () => {
   let agent: ResolutionAgent;
   let plan: ResolutionAgentPlan;
   let leaseCtx: LeaseContext;
-  let store: ResolutionAgentStore;
+  let store: DispatchStore;
   let executor: ResolutionAgentActionExecutor;
 
   beforeEach(() => {
@@ -256,7 +276,7 @@ describe("dispatchControlAction", () => {
   });
 
   describe("wait_for_evidence", () => {
-    it("returns waiting (no state change)", async () => {
+    it("returns waiting and transitions to waiting_for_evidence", async () => {
       const action: ResolutionAgentNextAction = {
         kind: "wait_for_evidence",
         evidenceRequestIds: ["req_1"],
@@ -264,22 +284,40 @@ describe("dispatchControlAction", () => {
         evidenceVersionHash: "ev_v1",
         reason: "evidence_request_already_open" as PlannerReasonCode,
       };
+      // Store returns the referenced request as belonging to this agent
+      const openReq: EvidenceRequestRow = {
+        id: "req_1",
+        agent_id: "agt_test_1",
+        responsible_party: "client",
+        evidence_item: "missing receipt",
+        reason: "need it",
+        status: "open",
+        created_case_version_hash: "case_v1",
+        evidence_version_hash: "ev_v1",
+        fulfilled_case_version_hash: null,
+        created_at: new Date().toISOString(),
+        fulfilled_at: null,
+        cancelled_at: null,
+      };
+      const testStore = makeMockStore(agent, {
+        listEvidenceRequests: vi.fn().mockResolvedValue([openReq]),
+      });
       const { result, agent: updated } = await dispatchControlAction({
         agent,
         plan,
         action,
         leaseContext: leaseCtx,
         now,
-        store,
+        store: testStore,
         executor,
       });
       expect(result.kind).toBe("waiting");
-      expect(updated.status).toBe("active"); // no state change
+      expect(updated.status).toBe("waiting_for_evidence");
     });
   });
 
   describe("create_evidence_request", () => {
-    it("returns unsupported_action", async () => {
+    it("creates evidence request and transitions to waiting_for_evidence", async () => {
       const action: ResolutionAgentNextAction = {
         kind: "create_evidence_request",
         responsibleParty: "client",
@@ -296,8 +334,8 @@ describe("dispatchControlAction", () => {
         store,
         executor,
       });
-      expect(result.kind).toBe("unsupported_action");
-      expect(updated.status).toBe("active"); // no state change
+      expect(result.kind).toBe("executed");
+      expect(updated.status).toBe("waiting_for_evidence");
     });
   });
 

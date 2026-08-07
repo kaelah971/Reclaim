@@ -184,6 +184,7 @@ function makeEvidenceRequest(overrides: Partial<EvidenceRequestRow> = {}): Evide
     reason: "Need confirmation of delivery",
     status: "open",
     created_case_version_hash: "case_hash_v2",
+    evidence_version_hash: null,
     fulfilled_case_version_hash: null,
     created_at: "2024-01-01T00:00:00Z",
     fulfilled_at: null,
