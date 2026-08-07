@@ -32,6 +32,11 @@ export interface ResolutionAgentRow {
   lease_owner: string | null;
   lease_expires_at: string | null;
   current_running_tool_id: string | null;
+  reclaim_state: string | null;
+  reclaim_amount_atomic: number | null;
+  reclaim_destination: string | null;
+  reclaim_tx_hash: string | null;
+  reclaim_submitted_at: string | null;
 }
 
 export interface AgentEventRow {

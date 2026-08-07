@@ -248,3 +248,32 @@ export function buildResumeMessage(params: {
     `By signing this message, you confirm that you control this wallet and authorise resuming the resolution agent.`,
   ].join("\n");
 }
+
+/**
+ * Builds the canonical message a user (the funder) must sign to authorise
+ * closing a resolution agent and reclaiming unused USDC.
+ */
+export function buildCloseMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+  funderAddress: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} — Close Resolution Agent`,
+    `Action: close_resolution_agent`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Refund Destination: ${params.funderAddress}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `WARNING: Closing is permanent. Unused USDC will be returned to the funder wallet. The case wallet will be permanently disabled.`,
+  ].join("\n");
+}

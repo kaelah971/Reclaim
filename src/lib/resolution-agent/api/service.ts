@@ -35,6 +35,8 @@ import {
   type ResolutionAgentPublicView,
 } from "../public-view";
 import { generateEncryptedCaseWallet } from "../server/wallet";
+import { decryptCaseWalletPrivateKey } from "../server/encryption";
+import { privateKeyToAccount } from "viem/accounts";
 import { parseWalletEncryptionKey, WALLET_ENCRYPTION_KEY_ENV } from "../server/config";
 import type { FundingReader } from "./funding";
 import { SUPPORTED_BUDGETS, type SupportedBudget } from "./types";
@@ -1000,4 +1002,218 @@ export async function resumeResolutionAgent(
   );
 
   return toResolutionAgentPublicView(resumedAgent);
+}
+
+// ---------------------------------------------------------------------------
+// Reclaim Transfer Abstraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Abstraction for transferring USDC from the case wallet to the funder.
+ * The production implementation uses viem to construct and broadcast an
+ * ERC-20 transfer on Celo Mainnet.
+ *
+ * Tests inject a mock to avoid live RPC calls.
+ */
+export interface ReclaimTransferClient {
+  transferUsdc(params: {
+    privateKey: string;
+    from: string;
+    to: string;
+    amountAtomic: bigint;
+  }): Promise<{ txHash: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Public API: closeResolutionAgent
+// ---------------------------------------------------------------------------
+
+export interface CloseAgentParams {
+  agentId: string;
+  authenticatedCaller: string;
+  now: number;
+  store: ResolutionAgentStore;
+  fundingReader: FundingReader;
+  transferClient: ReclaimTransferClient;
+}
+
+/**
+ * Close a resolution agent and reclaim unused USDC from the case wallet.
+ *
+ * # Flow
+ * 1. Authenticate — only the original funder may close.
+ * 2. Validate close eligibility:
+ *    - NOT running_tool
+ *    - No in-flight tool executions (pending, settling, paid_pending_result)
+ *    - No unresolved reserved budget (reservedAtomic must be 0)
+ *    - Not already closed
+ *    - Not in draft / awaiting_funding
+ * 3. Read the actual on-chain USDC balance of the case wallet.
+ * 4. Compute reclaimable amount.
+ * 5. Transfer USDC from case wallet → funder address.
+ * 6. Mark the agent closed.
+ * 7. Append close/reclaim events.
+ *
+ * # Safety
+ * - Only the funder may close
+ * - Reclaim destination is always the stored funder address
+ * - Actual wallet balance determines transfer amount (not approved - spent)
+ * - Escrow contract is never touched
+ * - Zero-balance wallets close without a transaction
+ *
+ * # Idempotency
+ * - Already-closed agents return safely
+ * - Concurrent close attempts guarded by optimistic versioning
+ */
+export async function closeResolutionAgent(
+  params: CloseAgentParams,
+): Promise<ResolutionAgentPublicView> {
+  const { agentId, authenticatedCaller, now, store, fundingReader, transferClient } = params;
+
+  // 1. Load agent
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  // 2. Auth — only funder
+  if (
+    agent.policy.funderAddress.toLowerCase() !== authenticatedCaller.toLowerCase()
+  ) {
+    throw new Error(
+      "Access denied: only the agent's funder may close this agent.",
+    );
+  }
+
+  // 3. Already closed — idempotent
+  if (agent.status === "closed") {
+    return toResolutionAgentPublicView(agent);
+  }
+
+  // 4. Cannot close while running_tool
+  if (agent.status === "running_tool") {
+    throw new Error(
+      "Agent is currently executing a paid tool. Wait for the tool execution to complete before closing.",
+    );
+  }
+
+  // 5. Cannot close draft/awaiting_funding (no wallet yet)
+  if (agent.status === "draft" || agent.status === "awaiting_funding") {
+    throw new Error(
+      `Agent cannot be closed from status "${agent.status}".`,
+    );
+  }
+
+  // 6. Check for unresolved tool executions
+  const toolExecutions = await (store as ResolutionAgentStore & { listToolExecutions(agentId: string): Promise<{ state: string }[]> }).listToolExecutions(agentId);
+  const hasInFlight = toolExecutions.some(
+    (te: { state: string }) =>
+      te.state === "pending" || te.state === "settling" || te.state === "paid_pending_result",
+  );
+  if (hasInFlight) {
+    throw new Error(
+      "Cannot close while there are in-flight tool executions. Wait for them to settle or recover before closing.",
+    );
+  }
+
+  // 7. Check reserved budget is resolved
+  if (agent.budget.reservedAtomic > 0n) {
+    throw new Error(
+      `Cannot close while there is reserved budget (${agent.budget.reservedAtomic} atomic USDC). Tool reservations must be released or spent first.`,
+    );
+  }
+
+  // 8. Read actual on-chain USDC balance
+  let walletBalance: bigint;
+  try {
+    walletBalance = await fundingReader.getUsdcBalanceAtomic(agent.caseWalletAddress);
+  } catch {
+    throw new Error("Failed to read the case wallet's USDC balance from Celo Mainnet.");
+  }
+
+  // 9. Determine reclaim amount
+  const reclaimAmount = walletBalance;
+  const destination = agent.policy.funderAddress;
+
+  // 10. Transition to closing
+  const closingStore = store as ResolutionAgentStore & { getAgentVersion(id: string): Promise<number> };
+  const currentVersion = await closingStore.getAgentVersion(agentId);
+  const closingAgent = transitionAgentStatus(agent, "closing", { now });
+  await store.updateAgent(closingAgent, currentVersion);
+
+  await store.appendEvent(
+    agentId,
+    "agent_closing",
+    "Agent closing initiated by funder",
+    agent.status,
+    closingAgent.status,
+    { reclaimAmount: reclaimAmount.toString(), destination },
+  );
+
+  // 11. Reclaim USDC if balance > 0
+  if (reclaimAmount > 0n) {
+    try {
+      // Decrypt case wallet and transfer
+      const encryptionKey = parseWalletEncryptionKey(
+        process.env[WALLET_ENCRYPTION_KEY_ENV],
+      );
+      const privateKey = decryptCaseWalletPrivateKey({
+        encryptedSecret: agent.encryptedSecret,
+        caseIdentity: agent.identity,
+        agentId: agent.id,
+        encryptionKey,
+      });
+
+      const account = privateKeyToAccount(privateKey as `0x${string}`);
+      if (account.address.toLowerCase() !== agent.caseWalletAddress.toLowerCase()) {
+        throw new Error("Decrypted wallet address does not match persisted case wallet address.");
+      }
+
+      // Transfer
+      const { txHash } = await transferClient.transferUsdc({
+        privateKey,
+        from: account.address,
+        to: destination,
+        amountAtomic: reclaimAmount,
+      });
+
+      await store.appendEvent(
+        agentId,
+        "agent_reclaim",
+        `Reclaimed ${reclaimAmount} atomic USDC to ${destination}`,
+        "closing",
+        null,
+        { reclaimAmount: reclaimAmount.toString(), destination, txHash },
+      );
+    } catch (err) {
+      // If the transfer fails, the agent stays in "closing" for retry
+      await store.appendEvent(
+        agentId,
+        "agent_reclaim_failed",
+        `Reclaim failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+        "closing",
+        null,
+        {},
+      );
+      throw new Error(
+        `Reclaim transfer failed: ${err instanceof Error ? err.message : "Unknown error"}. The agent remains in closing state for retry.`,
+      );
+    }
+  }
+
+  // 12. Mark closed
+  const closingVersion = await closingStore.getAgentVersion(agentId);
+  const closedAgent = transitionAgentStatus(closingAgent, "closed", { now });
+  await store.updateAgent(closedAgent, closingVersion);
+
+  await store.appendEvent(
+    agentId,
+    "agent_closed",
+    "Agent permanently closed",
+    closingAgent.status,
+    closedAgent.status,
+    { reclaimAmount: reclaimAmount.toString(), destination },
+  );
+
+  return toResolutionAgentPublicView(closedAgent);
 }
