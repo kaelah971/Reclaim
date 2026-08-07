@@ -11,6 +11,7 @@ export type {
   EvidenceRequestCreationParams,
   CreateEvidenceRequestResult,
   EvidenceRequestStore,
+  FulfillmentStore,
 } from "./types";
 
 // Errors
@@ -35,3 +36,9 @@ export {
   executeCreateEvidenceRequest,
   executeWaitForEvidence,
 } from "./service";
+
+// Fulfillment
+export {
+  fulfillEvidenceRequest,
+} from "./fulfillment";
+export type { FulfillEvidenceRequestParams } from "./fulfillment";

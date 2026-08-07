@@ -289,7 +289,7 @@ describe("runResolutionAgentWorkerIteration", () => {
     expect(result.agentId).toBe("agt_test_1");
     expect(mockStore.listRunnableAgents).toHaveBeenCalledTimes(1);
     expect(mockStore.tryAcquireAgentLease).toHaveBeenCalledTimes(1);
-    expect(mockStore.getAgentById).toHaveBeenCalledTimes(1);
+    expect(mockStore.getAgentById).toHaveBeenCalledTimes(2); // once after lease, once after observation
     expect(mockObserver).toHaveBeenCalledTimes(1);
     expect(mockPlanner).toHaveBeenCalledTimes(1);
     expect(mockStore.releaseAgentLease).toHaveBeenCalledTimes(1);
@@ -484,7 +484,7 @@ describe("runResolutionAgentWorkerIteration", () => {
     // as a control action without calling the executor
     await runResolutionAgentWorkerIteration({ workerId, now, dependencies: deps });
     // Verify one agent was processed (not multiple)
-    expect(mockStore.getAgentById).toHaveBeenCalledTimes(1);
+    expect(mockStore.getAgentById).toHaveBeenCalledTimes(2); // once after lease, once after observation
     // Executor is NOT called for no_action control dispatch
     expect(mockExecutor.executeOneAction).toHaveBeenCalledTimes(0);
   });
@@ -508,8 +508,8 @@ describe("runResolutionAgentWorkerIteration", () => {
 
     // Only one agent should be processed per iteration
     // tryAcquireAgentLease is called at most 2 times (once for first, which succeeds)
-    // but getAgentById is called exactly once
-    expect(multiStore.getAgentById).toHaveBeenCalledTimes(1);
+    // but getAgentById is called exactly twice (once after lease, once after observation)
+    expect(multiStore.getAgentById).toHaveBeenCalledTimes(2);
   });
 
   // -----------------------------------------------------------------------

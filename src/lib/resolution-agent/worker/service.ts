@@ -29,6 +29,8 @@ import { classifyResolutionAgentRecovery } from "./recovery";
 import { dispatchControlAction, isPlanStale } from "./dispatcher";
 import { generateLeaseToken } from "./lease";
 import { transitionAgentStatus } from "../state-machine";
+import { evaluateResolutionAgentResumption } from "../resumer";
+import type { EvidenceRequestRow } from "../store/types";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
   CASE_REFRESH_PRICE_ATOMIC,
@@ -418,9 +420,122 @@ export async function runResolutionAgentWorkerIteration(params: {
       } as Parameters<typeof observer>[0]["evidenceReader"],
     });
 
+    // 8a. Reload agent after observation (observer persists updated observation)
+    const observedAgent = await store.getAgentById(agent.id);
+    if (!observedAgent) {
+      return {
+        workerIterationId: iterationId,
+        agentId: agent.id,
+        outcome: "error",
+        actionDispatched: null,
+        error: "Agent not found after observation",
+      };
+    }
+
+    // 8b. If waiting_for_evidence, evaluate automatic resumption
+    if (observedAgent.status === "waiting_for_evidence") {
+      let evidenceRequests: EvidenceRequestRow[] = [];
+      try {
+        evidenceRequests = await store.listEvidenceRequests(observedAgent.id);
+      } catch {
+        // Best-effort — if listEvidenceRequests fails, let planner handle it
+      }
+
+      const resumptionDecision = evaluateResolutionAgentResumption({
+        agent: observedAgent,
+        evidenceRequests,
+        now,
+      });
+
+      if (resumptionDecision.kind === "resume") {
+        const version = await store.getAgentVersion(observedAgent.id);
+        const resumedAgent = transitionAgentStatus(
+          observedAgent,
+          "active",
+          { now },
+        );
+        try {
+          await store.updateAgent(resumedAgent, version);
+        } catch {
+          // Version conflict — another worker may have already resumed
+          actionResult = { kind: "skipped", reason: "Concurrent resumption — agent already active" };
+          processedAgent = observedAgent;
+          return {
+            workerIterationId: iterationId,
+            agentId: observedAgent.id,
+            outcome: "processed",
+            actionDispatched: actionResult,
+          };
+        }
+        await store.appendEvent(
+          observedAgent.id,
+          "agent_resumed_after_evidence",
+          `Agent automatically resumed after evidence request resolution: ${resumptionDecision.reasonCode}`,
+          observedAgent.status,
+          resumedAgent.status,
+          {
+            reasonCode: resumptionDecision.reasonCode,
+            requestedCount: evidenceRequests.length,
+          },
+        );
+
+        processedAgent = resumedAgent;
+        actionResult = { kind: "executed" };
+        return {
+          workerIterationId: iterationId,
+          agentId: observedAgent.id,
+          outcome: "processed",
+          actionDispatched: actionResult,
+        };
+      }
+
+      if (resumptionDecision.kind === "failed_recoverable") {
+        if ((observedAgent as ResolutionAgent).status !== "failed_recoverable") {
+          const version = await store.getAgentVersion(observedAgent.id);
+          const failedAgent = transitionAgentStatus(
+            observedAgent,
+            "failed_recoverable",
+            { now },
+          );
+          try {
+            await store.updateAgent(failedAgent, version);
+          } catch {
+            // Best-effort
+          }
+          await store.appendEvent(
+            observedAgent.id,
+            "agent_resumption_failed",
+            `Malformed waiting state: ${resumptionDecision.reasonCode}`,
+            observedAgent.status,
+            failedAgent.status,
+            { reasonCode: resumptionDecision.reasonCode },
+          );
+          processedAgent = failedAgent;
+        } else {
+          processedAgent = observedAgent;
+        }
+
+        actionResult = {
+          kind: "failed_recoverable",
+          reason: `Malformed waiting state: ${resumptionDecision.reasonCode}`,
+        };
+        return {
+          workerIterationId: iterationId,
+          agentId: observedAgent.id,
+          outcome: "processed",
+          actionDispatched: actionResult,
+        };
+      }
+
+      // stay_waiting — fall through to planner, which will produce wait_for_evidence
+      processedAgent = observedAgent;
+    } else {
+      processedAgent = observedAgent;
+    }
+
     // 9. Plan next action
     const planningResult = await planner({
-      agentId: agent.id,
+      agentId: processedAgent.id,
       now,
       store: store as unknown as Parameters<typeof planner>[0]["store"],
     });
@@ -428,7 +543,7 @@ export async function runResolutionAgentWorkerIteration(params: {
     // 10. Verify plan is not stale
     if (
       isPlanStale({
-        agent,
+        agent: processedAgent,
         planVersion: 1,
         caseVersionHash: planningResult.caseVersionHash,
         evidenceVersionHash: planningResult.evidenceVersionHash,
@@ -437,7 +552,7 @@ export async function runResolutionAgentWorkerIteration(params: {
       actionResult = { kind: "stale_plan" };
       return {
         workerIterationId: iterationId,
-        agentId: agent.id,
+        agentId: processedAgent.id,
         outcome: "processed",
         actionDispatched: actionResult,
       };
@@ -445,7 +560,7 @@ export async function runResolutionAgentWorkerIteration(params: {
 
     // 11. Dispatch control action
     const { result, agent: updatedAgent } = await dispatchControlAction({
-      agent,
+      agent: processedAgent,
       plan: planningResult.plan,
       action: planningResult.nextAction,
       leaseContext,

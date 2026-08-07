@@ -99,3 +99,36 @@ export interface EvidenceRequestStore {
     metadata?: Record<string, unknown>,
   ): Promise<void>;
 }
+
+// ---------------------------------------------------------------------------
+// Fulfillment Store
+// ---------------------------------------------------------------------------
+
+/**
+ * Extended store shape required by the evidence-request fulfillment service.
+ * Structural typing — any store implementing these methods works.
+ */
+export interface FulfillmentStore {
+  listEvidenceRequests(agentId: string): Promise<EvidenceRequestRow[]>;
+  updateEvidenceRequest(
+    agentId: string,
+    requestId: string,
+    updates: Partial<
+      Pick<
+        EvidenceRequestRow,
+        | "status"
+        | "fulfilled_case_version_hash"
+        | "fulfilled_at"
+        | "cancelled_at"
+      >
+    >,
+  ): Promise<void>;
+  appendEvent(
+    agentId: string,
+    eventType: string,
+    reason: string,
+    previousStatus: string | null,
+    nextStatus: string | null,
+    metadata?: Record<string, unknown>,
+  ): Promise<void>;
+}
