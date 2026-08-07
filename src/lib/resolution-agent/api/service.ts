@@ -823,3 +823,168 @@ export async function activateResolutionAgent(
   // 10. Return public-safe view
   return toResolutionAgentPublicView(activatedAgent);
 }
+
+// ---------------------------------------------------------------------------
+// Public API: pauseResolutionAgent
+// ---------------------------------------------------------------------------
+
+export interface PauseAgentParams {
+  agentId: string;
+  authenticatedCaller: string;
+  now: number;
+  store: ResolutionAgentStore;
+}
+
+/**
+ * Pauses a resolution agent, preventing new autonomous work.
+ *
+ * # Eligibility
+ * The agent must be in a pausable state (active, running_tool,
+ * waiting_for_evidence, waiting_for_human_approval, ready_for_human_review,
+ * budget_exhausted, or failed_recoverable).
+ *
+ * # Idempotency
+ * Already-paused agents return safely without change or duplicate events.
+ *
+ * # Safety
+ * - No budget change
+ * - No wallet decryption
+ * - No x402 execution
+ * - No evidence request cancellation
+ * - Does NOT cancel in-flight tool executions (recovery handles them on resume)
+ *
+ * # Authorisation
+ * Only the original funder may pause.
+ *
+ * @throws If the agent is not found or cannot be transitioned.
+ */
+export async function pauseResolutionAgent(
+  params: PauseAgentParams,
+): Promise<ResolutionAgentPublicView> {
+  const { agentId, authenticatedCaller, now, store } = params;
+
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  if (
+    agent.policy.funderAddress.toLowerCase() !==
+    authenticatedCaller.toLowerCase()
+  ) {
+    throw new Error(
+      "Access denied: only the agent's funder may pause this agent.",
+    );
+  }
+
+  // Idempotent — already paused
+  if (agent.status === "paused") {
+    return toResolutionAgentPublicView(agent);
+  }
+
+  // Cannot pause from terminal states
+  if (agent.status === "closed" || agent.status === "closing" || agent.status === "expired") {
+    throw new Error(
+      `Agent cannot be paused from status "${agent.status}".`,
+    );
+  }
+
+  const currentVersion = await readAgentVersion(store, agentId);
+
+  const transitionCtx: TransitionContext = { now };
+  const pausedAgent = transitionAgentStatus(agent, "paused", transitionCtx);
+
+  await store.updateAgent(pausedAgent, currentVersion);
+
+  await store.appendEvent(
+    agentId,
+    "agent_paused",
+    "Agent paused by funder",
+    agent.status,
+    pausedAgent.status,
+    { pausedBy: authenticatedCaller },
+  );
+
+  return toResolutionAgentPublicView(pausedAgent);
+}
+
+// ---------------------------------------------------------------------------
+// Public API: resumeResolutionAgent
+// ---------------------------------------------------------------------------
+
+export interface ResumeAgentParams {
+  agentId: string;
+  authenticatedCaller: string;
+  now: number;
+  store: ResolutionAgentStore;
+}
+
+/**
+ * Resumes a paused resolution agent.
+ *
+ * # Eligibility
+ * The agent must currently be in "paused" status.
+ *
+ * # Target State
+ * Always resumes to "active".  The next worker iteration handles
+ * observation, recovery classification, and planning automatically.
+ * Waiting conditions (evidence requests, in-flight tools) are
+ * reconstructed by the planner, not bypassed.
+ *
+ * # Idempotency
+ * Non-paused agents return safely without change or duplicate events.
+ *
+ * # Safety
+ * - No budget change
+ * - No wallet decryption
+ * - No worker execution
+ * - No tool execution
+ * - No x402 settlement
+ *
+ * # Authorisation
+ * Only the original funder may resume.
+ *
+ * @throws If the agent is not found or cannot be transitioned.
+ */
+export async function resumeResolutionAgent(
+  params: ResumeAgentParams,
+): Promise<ResolutionAgentPublicView> {
+  const { agentId, authenticatedCaller, now, store } = params;
+
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  if (
+    agent.policy.funderAddress.toLowerCase() !==
+    authenticatedCaller.toLowerCase()
+  ) {
+    throw new Error(
+      "Access denied: only the agent's funder may resume this agent.",
+    );
+  }
+
+  // Idempotent — not paused
+  if (agent.status !== "paused") {
+    return toResolutionAgentPublicView(agent);
+  }
+
+  const currentVersion = await readAgentVersion(store, agentId);
+
+  const transitionCtx: TransitionContext = { now };
+  const resumedAgent = transitionAgentStatus(agent, "active", transitionCtx);
+
+  await store.updateAgent(resumedAgent, currentVersion);
+
+  await store.appendEvent(
+    agentId,
+    "agent_resumed",
+    "Agent resumed by funder",
+    agent.status,
+    resumedAgent.status,
+    { resumedBy: authenticatedCaller },
+  );
+
+  return toResolutionAgentPublicView(resumedAgent);
+}

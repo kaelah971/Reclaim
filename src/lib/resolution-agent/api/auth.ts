@@ -190,3 +190,61 @@ export async function verifyAuth(params: {
     params.signature,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Pause / Resume Message Builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the canonical message a user must sign to authorise pausing an
+ * active or waiting resolution agent.
+ */
+export function buildPauseMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} — Pause Resolution Agent`,
+    `Action: pause_resolution_agent`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `By signing this message, you confirm that you control this wallet and authorise pausing the resolution agent.`,
+  ].join("\n");
+}
+
+/**
+ * Builds the canonical message a user must sign to authorise resuming a
+ * paused resolution agent.
+ */
+export function buildResumeMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} — Resume Resolution Agent`,
+    `Action: resume_resolution_agent`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `By signing this message, you confirm that you control this wallet and authorise resuming the resolution agent.`,
+  ].join("\n");
+}
