@@ -206,7 +206,9 @@ export async function observeResolutionAgentCase(params: {
   const canonicalContract = CANONICAL_ESCROW_CONTRACT_ADDRESS.toLowerCase();
 
   // Verify chain ID matches canonical
-  if (String(storedChain) !== String(CANONICAL_ESCROW_CHAIN_ID)) {
+  // Stored chain may use CAIP-2 format (eip155:NNN); canonical is numeric.
+  const storedChainNumeric = storedChain.replace(/^eip155:/, "");
+  if (String(storedChainNumeric) !== String(CANONICAL_ESCROW_CHAIN_ID)) {
     throw new CaseIdentityMismatchError(
       agentId,
       `chain=${storedChain}`,

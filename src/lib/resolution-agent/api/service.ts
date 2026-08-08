@@ -27,6 +27,7 @@ import { SupabaseResolutionAgentStore } from "../store/supabase";
 import {
   ResolutionAgentNotFoundError,
 } from "../store/errors";
+import type { ToolExecutionRow, EvidenceRequestRow } from "../store/types";
 import { V1_TOOLS } from "../tools";
 import { createBudget } from "../budget";
 import { transitionAgentStatus, type TransitionContext } from "../state-machine";
@@ -133,6 +134,12 @@ class SupabaseStoreAdapter implements ResolutionAgentStore {
     }
 
     return (data as { version: number }).version;
+  }
+  listToolExecutions(agentId: string): Promise<ToolExecutionRow[]> {
+    return this.inner.listToolExecutions(agentId);
+  }
+  listEvidenceRequests(agentId: string): Promise<EvidenceRequestRow[]> {
+    return this.inner.listEvidenceRequests(agentId);
   }
 }
 
