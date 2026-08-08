@@ -58,8 +58,6 @@ CREATE TABLE IF NOT EXISTS resolution_agents (
   lease_owner TEXT,
   lease_expires_at TIMESTAMPTZ,
 
-  CONSTRAINT ra_one_agent_per_case
-    UNIQUE (escrow_chain_id, LOWER(escrow_contract_address), escrow_payment_id),
   CONSTRAINT ra_spent_not_exceed_approved
     CHECK (spent_budget_atomic <= approved_budget_atomic),
   CONSTRAINT ra_spent_plus_reserved_not_exceed_approved
@@ -72,10 +70,14 @@ CREATE TABLE IF NOT EXISTS resolution_agents (
 -- Indexes: resolution_agents
 -- ============================================================================
 
+-- Unique constraint on case identity (expression-based — must be a UNIQUE
+-- INDEX rather than an inline UNIQUE table constraint because PostgreSQL
+-- does not allow LOWER() inside a UNIQUE constraint).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ra_one_agent_per_case
+  ON resolution_agents (escrow_chain_id, LOWER(escrow_contract_address), escrow_payment_id);
+
 CREATE INDEX IF NOT EXISTS idx_ra_status
   ON resolution_agents (status);
-CREATE INDEX IF NOT EXISTS idx_ra_case
-  ON resolution_agents (escrow_chain_id, LOWER(escrow_contract_address), escrow_payment_id);
 CREATE INDEX IF NOT EXISTS idx_ra_funder
   ON resolution_agents (LOWER(funder_address));
 CREATE INDEX IF NOT EXISTS idx_ra_created
