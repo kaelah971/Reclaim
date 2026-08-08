@@ -245,6 +245,7 @@ class MockCaseEvidenceReader implements CaseEvidenceReader {
       externalReference: string | null;
       fileCount: number;
       latestUpdateTimestamp: number | null;
+      substantiveEvidence: boolean;
     }
   >();
 
@@ -263,9 +264,13 @@ class MockCaseEvidenceReader implements CaseEvidenceReader {
       externalReference: string | null;
       fileCount: number;
       latestUpdateTimestamp: number | null;
+      substantiveEvidence?: boolean;
     },
   ): void {
-    this.evidence.set(paymentId, meta);
+    this.evidence.set(paymentId, {
+      ...meta,
+      substantiveEvidence: meta.substantiveEvidence ?? meta.fileCount > 0,
+    });
   }
 
   async getEvidenceMetadata(escrowPaymentId: string) {
@@ -279,6 +284,7 @@ class MockCaseEvidenceReader implements CaseEvidenceReader {
         externalReference: null,
         fileCount: 0,
         latestUpdateTimestamp: null,
+        substantiveEvidence: false,
       }
     );
   }

@@ -91,6 +91,7 @@ function buildObservationResult(
       fileCount: obs.evidenceCount,
       latestUpdateTimestamp: obs.observedAt,
       availability: obs.evidenceCount > 0 ? "package_available" : "none",
+      substantiveEvidence: obs.evidenceCount > 0,
     },
     priorContext: {
       agentStatus: agent.status,

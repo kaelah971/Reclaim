@@ -127,6 +127,7 @@ function makeObservationResult(): CaseObservationResult {
         fileCount: 2,
         latestUpdateTimestamp: null,
         availability: "package_available",
+        substantiveEvidence: true,
       },
       priorContext: {
         agentStatus: "active",

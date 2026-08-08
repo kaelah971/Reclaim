@@ -112,6 +112,10 @@ export interface EvidenceObservation {
   fileCount: number;
   latestUpdateTimestamp: number | null;
   availability: EvidenceAvailability;
+  /** True when the verified manifest contains substantive agent-readable
+   *  evidence (non-empty description, pasted text, external reference, etc.)
+   *  that the Evidence Quality Check tool can actually consume. */
+  substantiveEvidence: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,5 +256,6 @@ export interface CaseEvidenceReader {
     externalReference: string | null;
     fileCount: number;
     latestUpdateTimestamp: number | null;
+    substantiveEvidence: boolean;
   }>;
 }

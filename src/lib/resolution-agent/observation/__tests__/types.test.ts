@@ -110,6 +110,7 @@ describe("EvidenceObservation type structural test", () => {
       fileCount: 3,
       latestUpdateTimestamp: 1716800000000,
       availability: "package_available",
+      substantiveEvidence: true,
     };
     expect(obs.availability).toBe("package_available");
     expect(obs.fileCount).toBe(3);
@@ -126,6 +127,7 @@ describe("EvidenceObservation type structural test", () => {
       fileCount: 0,
       latestUpdateTimestamp: null,
       availability: "none",
+      substantiveEvidence: false,
     };
     expect(obs.availability).toBe("none");
     expect(obs.evidenceReference).toBeNull();
@@ -178,6 +180,7 @@ describe("CaseObservationResult structural test", () => {
           fileCount: 0,
           latestUpdateTimestamp: null,
           availability: "none",
+      substantiveEvidence: false,
         },
         priorContext: {
           agentStatus: "active",

@@ -92,15 +92,14 @@ function buildEvidenceObservation(
     externalReference: string | null;
     fileCount: number;
     latestUpdateTimestamp: number | null;
+    substantiveEvidence: boolean;
   },
 ): EvidenceObservation {
   let availability: EvidenceAvailability = "none";
 
   if (metadata.evidenceReference !== null) {
-    if (metadata.fileCount > 0) {
+    if (metadata.substantiveEvidence) {
       availability = "package_available";
-    } else if (metadata.title !== null || metadata.description !== null) {
-      availability = "metadata_available";
     } else {
       availability = "on_chain_reference_only";
     }
@@ -116,6 +115,7 @@ function buildEvidenceObservation(
     fileCount: metadata.fileCount,
     latestUpdateTimestamp: metadata.latestUpdateTimestamp,
     availability,
+    substantiveEvidence: metadata.substantiveEvidence,
   };
 }
 
@@ -318,7 +318,7 @@ export async function observeResolutionAgentCase(params: {
     ...agent,
     observation: {
       escrowState: escrowObservation.state,
-      evidenceCount: evidenceObservation.fileCount,
+      evidenceCount: evidenceObservation.substantiveEvidence ? 1 : 0,
       evidenceVersionHash,
       caseVersionHash,
       unresolvedGaps: agent.observation?.unresolvedGaps ?? [],

@@ -63,6 +63,7 @@ function makeMinimalCaseObservation(
       fileCount: 0,
       latestUpdateTimestamp: null,
       availability: "none",
+      substantiveEvidence: false,
     },
     priorContext: {
       agentStatus: "active",
@@ -106,6 +107,7 @@ describe("computeEvidenceVersionHash", () => {
         fileCount: 0,
         latestUpdateTimestamp: null,
         availability: "none" as const,
+      substantiveEvidence: false,
       },
     });
     const obs2 = makeMinimalCaseObservation({
@@ -119,6 +121,7 @@ describe("computeEvidenceVersionHash", () => {
         fileCount: 0,
         latestUpdateTimestamp: null,
         availability: "none" as const,
+      substantiveEvidence: false,
       },
     });
     expect(computeEvidenceVersionHash(obs1)).not.toBe(
@@ -139,6 +142,7 @@ describe("computeEvidenceVersionHash", () => {
         fileCount: 0,
         latestUpdateTimestamp: null,
         availability: "none" as const,
+      substantiveEvidence: false,
       },
     });
     expect(computeEvidenceVersionHash(obs1)).not.toBe(
@@ -159,6 +163,7 @@ describe("computeEvidenceVersionHash", () => {
         fileCount: 5,
         latestUpdateTimestamp: null,
         availability: "none" as const,
+      substantiveEvidence: false,
       },
     });
     expect(computeEvidenceVersionHash(obs1)).not.toBe(
@@ -179,6 +184,7 @@ describe("computeEvidenceVersionHash", () => {
         fileCount: 0,
         latestUpdateTimestamp: null,
         availability: "package_available" as const,
+      substantiveEvidence: true,
       },
     });
     expect(computeEvidenceVersionHash(obs1)).not.toBe(
