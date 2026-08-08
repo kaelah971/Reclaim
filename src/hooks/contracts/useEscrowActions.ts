@@ -12,6 +12,18 @@ import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 import { translateContractError } from "@/lib/contracts/errorTranslation";
 
 // ---------------------------------------------------------------------------
+// Chain-safety error messages
+// ---------------------------------------------------------------------------
+
+/** Shown while wagmi is still reconciling the persisted (hydrated) connection. */
+export const ESCROW_RECONNECTING_ERROR =
+  "Wallet reconnecting. Try again in a moment.";
+
+/** Shown when the wallet's LIVE chain does not match the escrow deployment chain. */
+export const ESCROW_SWITCH_CHAIN_ERROR =
+  "Switch to Celo Sepolia to continue.";
+
+// ---------------------------------------------------------------------------
 // Shared return type for all action hooks
 // ---------------------------------------------------------------------------
 
@@ -34,9 +46,10 @@ export interface EscrowActionReturn<TAction extends (...args: never[]) => void> 
 // Internal shared machinery
 //
 // Every escrow write follows the same lifecycle:
-//   local gates (wallet / network) → simulation → wallet signature →
-//   submitted → confirmed, with duplicate-submission prevention and the
-//   Celo attribution data suffix appended when configured.
+//   local gates (wallet / reconnecting) → live connector chain check →
+//   simulation → wallet signature → submitted → confirmed, with
+//   duplicate-submission prevention and the Celo attribution data suffix
+//   appended when configured.
 // ---------------------------------------------------------------------------
 
 type SimpleEscrowFunction =
@@ -68,7 +81,7 @@ interface EscrowWriteCore {
 function useEscrowWriteCore(): EscrowWriteCore {
   const contract = getEscrowContractConfig();
   const publicClient = usePublicClient();
-  const { address: account, chainId } = useAccount();
+  const { address: account, connector, isReconnecting } = useAccount();
 
   const {
     writeContract,
@@ -94,8 +107,8 @@ function useEscrowWriteCore(): EscrowWriteCore {
       setLocalError("Connect your wallet to continue.");
       return undefined;
     }
-    if (chainId !== getEscrowChainId()) {
-      setLocalError("Switch to Celo Sepolia to continue.");
+    if (isReconnecting) {
+      setLocalError(ESCROW_RECONNECTING_ERROR);
       return undefined;
     }
     if (!publicClient) {
@@ -103,7 +116,32 @@ function useEscrowWriteCore(): EscrowWriteCore {
       return undefined;
     }
     return account;
-  }, [account, chainId, isConfirming, isPending, publicClient]);
+  }, [account, isConfirming, isPending, isReconnecting, publicClient]);
+
+  /**
+   * Resolve the LIVE chain from the connected connector (reads eth_chainId
+   * from the wallet provider). The hydrated/store chainId is never trusted
+   * on its own — it can be stale (e.g. persisted from a previous mainnet
+   * session). Escrow writes proceed only when the live chain matches the
+   * escrow deployment chain.
+   */
+  const assertLiveEscrowChain = useCallback(async (): Promise<boolean> => {
+    if (!connector) {
+      setLocalError("Network client unavailable. Please try again.");
+      return false;
+    }
+    try {
+      const liveChainId = await connector.getChainId();
+      if (liveChainId !== getEscrowChainId()) {
+        setLocalError(ESCROW_SWITCH_CHAIN_ERROR);
+        return false;
+      }
+      return true;
+    } catch {
+      setLocalError("Network client unavailable. Please try again.");
+      return false;
+    }
+  }, [connector]);
 
   const handleSimulationFailure = useCallback((simulationError: unknown) => {
     inFlightRef.current = false;
@@ -117,31 +155,48 @@ function useEscrowWriteCore(): EscrowWriteCore {
 
       inFlightRef.current = true;
 
-      publicClient
-        .simulateContract({
-          ...contract,
-          functionName,
-          args: [paymentId] as const,
-          account: gatedAccount,
-        })
-        .then(() => {
-          writeContract(
-            {
+      assertLiveEscrowChain()
+        .then((onLiveChain) => {
+          if (!onLiveChain) {
+            inFlightRef.current = false;
+            return;
+          }
+          return publicClient
+            .simulateContract({
               ...contract,
               functionName,
               args: [paymentId] as const,
-              dataSuffix: getAttributionDataSuffix(),
-            },
-            {
-              onSettled: () => {
-                inFlightRef.current = false;
-              },
-            },
-          );
+              account: gatedAccount,
+            })
+            .then(() => {
+              writeContract(
+                {
+                  ...contract,
+                  functionName,
+                  args: [paymentId] as const,
+                  dataSuffix: getAttributionDataSuffix(),
+                },
+                {
+                  onSettled: () => {
+                    inFlightRef.current = false;
+                  },
+                },
+              );
+            })
+            .catch(handleSimulationFailure);
         })
-        .catch(handleSimulationFailure);
+        .catch(() => {
+          inFlightRef.current = false;
+        });
     },
-    [contract, handleSimulationFailure, passesGates, publicClient, writeContract],
+    [
+      assertLiveEscrowChain,
+      contract,
+      handleSimulationFailure,
+      passesGates,
+      publicClient,
+      writeContract,
+    ],
   );
 
   const executeReference = useCallback(
@@ -155,31 +210,48 @@ function useEscrowWriteCore(): EscrowWriteCore {
 
       inFlightRef.current = true;
 
-      publicClient
-        .simulateContract({
-          ...contract,
-          functionName,
-          args: [paymentId, reference] as const,
-          account: gatedAccount,
-        })
-        .then(() => {
-          writeContract(
-            {
+      assertLiveEscrowChain()
+        .then((onLiveChain) => {
+          if (!onLiveChain) {
+            inFlightRef.current = false;
+            return;
+          }
+          return publicClient
+            .simulateContract({
               ...contract,
               functionName,
               args: [paymentId, reference] as const,
-              dataSuffix: getAttributionDataSuffix(),
-            },
-            {
-              onSettled: () => {
-                inFlightRef.current = false;
-              },
-            },
-          );
+              account: gatedAccount,
+            })
+            .then(() => {
+              writeContract(
+                {
+                  ...contract,
+                  functionName,
+                  args: [paymentId, reference] as const,
+                  dataSuffix: getAttributionDataSuffix(),
+                },
+                {
+                  onSettled: () => {
+                    inFlightRef.current = false;
+                  },
+                },
+              );
+            })
+            .catch(handleSimulationFailure);
         })
-        .catch(handleSimulationFailure);
+        .catch(() => {
+          inFlightRef.current = false;
+        });
     },
-    [contract, handleSimulationFailure, passesGates, publicClient, writeContract],
+    [
+      assertLiveEscrowChain,
+      contract,
+      handleSimulationFailure,
+      passesGates,
+      publicClient,
+      writeContract,
+    ],
   );
 
   const error = useMemo(
