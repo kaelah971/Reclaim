@@ -2,12 +2,12 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  useAccount,
   usePublicClient,
   useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
 import { parseEventLogs } from "viem";
+import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { getEscrowContractConfig, getEscrowChainId } from "@/lib/contracts/config";
 import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 import { translateContractError } from "@/lib/contracts/errorTranslation";
@@ -85,7 +85,8 @@ const LABEL_FIELDS = [
 export function useCreatePayment(): UseCreatePaymentReturn {
   const contract = getEscrowContractConfig();
   const publicClient = usePublicClient();
-  const { address: account, chainId } = useAccount();
+  const wallet = useWalletState();
+  const account = wallet.address as `0x${string}` | undefined;
 
   const {
     writeContract,
@@ -123,7 +124,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
         setLocalError("Connect your wallet to create a payment.");
         return;
       }
-      if (chainId !== getEscrowChainId()) {
+      if (wallet.chainId !== getEscrowChainId()) {
         setLocalError("Switch to Celo Sepolia to create a payment.");
         return;
       }
@@ -176,7 +177,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
     },
     [
       account,
-      chainId,
+      wallet.chainId,
       contract,
       isConfirming,
       isPending,

@@ -2,7 +2,6 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  useAccount,
   usePublicClient,
   useReadContract,
   useWriteContract,
@@ -58,7 +57,6 @@ export function useTokenApproval(): UseTokenApprovalReturn {
   const token = getPaymentTokenConfig();
   const escrowAddress = getEscrowContractAddress();
   const publicClient = usePublicClient();
-  const { chainId } = useAccount();
 
   // ---- Allowance read ----
   const {
@@ -122,7 +120,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
         setLocalError("Connect your wallet to approve USDC.");
         return;
       }
-      if (chainId !== getEscrowChainId()) {
+      if (wallet.chainId !== getEscrowChainId()) {
         setLocalError("Switch to Celo Sepolia to approve USDC.");
         return;
       }
@@ -162,7 +160,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
         });
     },
     [
-      chainId,
+      wallet.chainId,
       escrowAddress,
       isApproving,
       isConfirming,
