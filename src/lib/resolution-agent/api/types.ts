@@ -79,6 +79,24 @@ export const activateAgentRequestSchema = z.object({
 export type ActivateAgentRequestBody = z.infer<typeof activateAgentRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// Budget amendment request
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for POST /api/resolution-agents/[agentId]/amend-budget request body.
+ *
+ * Only canonical budgets are accepted.  The new budget must be strictly
+ * greater than the current budget (budget can only go up before activation).
+ */
+export const amendBudgetRequestSchema = z.object({
+  budgetAtomic: z.string().refine(isSupportedBudget, {
+    message: "Budget must be one of: 30000, 40000, 50000 atomic USDC",
+  }),
+});
+
+export type AmendBudgetRequestBody = z.infer<typeof amendBudgetRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // Wallet auth headers
 // ---------------------------------------------------------------------------
 

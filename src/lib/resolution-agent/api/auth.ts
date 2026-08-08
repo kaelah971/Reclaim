@@ -277,3 +277,42 @@ export function buildCloseMessage(params: {
     `WARNING: Closing is permanent. Unused USDC will be returned to the funder wallet. The case wallet will be permanently disabled.`,
   ].join("\n");
 }
+
+/**
+ * Builds the canonical message a user (the funder) must sign to authorise
+ * amending the approved budget of a resolution agent that has not yet been
+ * funded or activated.
+ *
+ * Only allowed in pre-activation states (awaiting_funding, awaiting_activation)
+ * and only funder-upwards (increasing budget).  The message binds the agent
+ * identity, the old and new budget, and the amend action so the signature
+ * cannot be replayed for a different budget change.
+ */
+export function buildAmendBudgetMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+  oldBudgetAtomic: bigint;
+  newBudgetAtomic: bigint;
+  funderAddress: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} — Amend Resolution Agent Budget`,
+    `Action: amend_budget_resolution_agent`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Old Approved Budget (atomic USDC): ${params.oldBudgetAtomic.toString()}`,
+    `New Approved Budget (atomic USDC): ${params.newBudgetAtomic.toString()}`,
+    `Funder Address: ${params.funderAddress}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `By signing this message, you confirm that you control the funder wallet and authorise amending this resolution agent's approved budget.`,
+  ].join("\n");
+}

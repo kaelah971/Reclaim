@@ -1008,6 +1008,127 @@ export async function resumeResolutionAgent(
 }
 
 // ---------------------------------------------------------------------------
+// Public API: amendBudgetResolutionAgent
+// ---------------------------------------------------------------------------
+
+export interface AmendBudgetParams {
+  /** The agent to amend. */
+  agentId: string;
+  /** Verified wallet address of the funder. */
+  authenticatedCaller: string;
+  /** New approved budget in atomic USDC (must be one of the canonical values). */
+  newBudgetAtomic: bigint;
+  /** Current timestamp in milliseconds since epoch. */
+  now: number;
+  /** Persistence store. */
+  store: ResolutionAgentStore;
+}
+
+/** Allowed states for budget amendment — only pre-activation states. */
+const AMENDABLE_BUDGET_STATES: ReadonlySet<string> = new Set([
+  "awaiting_funding",
+  "awaiting_activation",
+]);
+
+/**
+ * Amends the approved budget of a resolution agent that has NOT yet been
+ * activated.  Only the original funder may amend, and the new budget must
+ * be strictly greater than the current approved budget.
+ *
+ * # Eligibility
+ * The agent must be in `awaiting_funding` or `awaiting_activation`.  Once
+ * active (or any later state), budget cannot be changed — the agent may
+ * already have executed tools against the original budget.
+ *
+ * # Safety
+ * - No wallet decryption
+ * - No wallet regeneration
+ * - No x402 execution
+ * - No escrow interaction
+ * - Only increases budget (never decreases)
+ *
+ * # Authorisation
+ * Only the original funder may amend.
+ *
+ * @throws If the agent is not found.
+ * @throws If the caller is not the funder.
+ * @throws If the agent is not in an amendable state.
+ * @throws If the new budget is not canonical or not greater than current.
+ */
+export async function amendBudgetResolutionAgent(
+  params: AmendBudgetParams,
+): Promise<ResolutionAgentPublicView> {
+  const { agentId, authenticatedCaller, newBudgetAtomic, now, store } = params;
+
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  if (
+    agent.policy.funderAddress.toLowerCase() !==
+    authenticatedCaller.toLowerCase()
+  ) {
+    throw new Error(
+      "Access denied: only the agent's funder may amend the approved budget.",
+    );
+  }
+
+  if (!AMENDABLE_BUDGET_STATES.has(agent.status)) {
+    throw new Error(
+      `Budget cannot be amended from status "${agent.status}". ` +
+        "It must be in 'awaiting_funding' or 'awaiting_activation' state.",
+    );
+  }
+
+  if (!SUPPORTED_BUDGETS.includes(newBudgetAtomic as SupportedBudget)) {
+    throw new Error(
+      `Budget ${newBudgetAtomic.toString()} atomic USDC is not supported. ` +
+        `Must be one of: ${SUPPORTED_BUDGETS.map(String).join(", ")}.`,
+    );
+  }
+
+  if (newBudgetAtomic <= agent.policy.approvedBudgetAtomic) {
+    throw new Error(
+      `New budget (${newBudgetAtomic}) must be strictly greater than the ` +
+        `current approved budget (${agent.policy.approvedBudgetAtomic}). ` +
+        "Budget can only be increased before activation.",
+    );
+  }
+
+  const currentVersion = await readAgentVersion(store, agentId);
+
+  const oldBudgetAtomic = agent.policy.approvedBudgetAtomic;
+
+  const amendedAgent: ResolutionAgent = {
+    ...agent,
+    policy: {
+      ...agent.policy,
+      approvedBudgetAtomic: newBudgetAtomic,
+    },
+    budget: createBudget(newBudgetAtomic),
+    updatedAt: now,
+  };
+
+  await store.updateAgent(amendedAgent, currentVersion);
+
+  await store.appendEvent(
+    agentId,
+    "budget_amended",
+    `Approved budget amended from ${oldBudgetAtomic} to ${newBudgetAtomic} atomic USDC`,
+    agent.status,
+    agent.status,
+    {
+      oldBudgetAtomic: oldBudgetAtomic.toString(),
+      newBudgetAtomic: newBudgetAtomic.toString(),
+      amendedBy: authenticatedCaller,
+    },
+  );
+
+  return toResolutionAgentPublicView(amendedAgent);
+}
+
+// ---------------------------------------------------------------------------
 // Reclaim Transfer Abstraction
 // ---------------------------------------------------------------------------
 
