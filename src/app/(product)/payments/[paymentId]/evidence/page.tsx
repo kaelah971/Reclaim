@@ -13,7 +13,9 @@ import {
 } from "wagmi";
 import { decodePaymentRequiredHeader } from "@x402/core/http";
 import Button from "@/components/ui/Button";
-import EvidenceForm, { buildEvidenceManifest } from "@/components/payment/EvidenceForm";
+import EvidenceForm from "@/components/payment/EvidenceForm";
+import type { EvidenceFormData } from "@/components/payment/EvidenceForm";
+import { buildEvidenceManifest } from "@/lib/evidence/manifest";
 import type { EvidenceQualityResultData } from "@/components/payment/EvidenceQualityResult";
 import Notice from "@/components/ui/Notice";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
@@ -33,7 +35,6 @@ import {
   CELO_MAINNET_CHAIN_ID,
   isFacilitatorMode,
 } from "@/lib/x402/config.public";
-import type { EvidenceFormData } from "@/components/payment/EvidenceForm";
 
 // ---------------------------------------------------------------------------
 // Static x402 constants — defined at module scope for stable references
@@ -304,11 +305,28 @@ export default function EvidencePage() {
   // -----------------------------------------------------------------------
 
   useEffect(() => {
-    if (isSuccess) {
-      const timer = setTimeout(() => {
-        router.push(`/payments/${paymentIdStr}`);
-      }, 2000);
-      return () => clearTimeout(timer);
+    if (isSuccess && evidenceFormRef.current) {
+      // Persist evidence metadata after on-chain TX confirms
+      const stored = evidenceFormRef.current;
+      fetch(`/api/payments/${paymentIdStr}/evidence/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: stored.title,
+          description: stored.description,
+          type: stored.type,
+          relatedClaim: stored.relatedClaim,
+          date: stored.date,
+          externalRef: stored.externalRef,
+          pastedText: stored.pastedText,
+          fileHash: stored.fileHash,
+        }),
+      }).catch(() => {}).finally(() => {
+        const timer = setTimeout(() => {
+          router.push(`/payments/${paymentIdStr}`);
+        }, 2000);
+        return () => clearTimeout(timer);
+      });
     }
   }, [isSuccess, paymentIdStr, router]);
 
@@ -323,10 +341,35 @@ export default function EvidencePage() {
         const manifest = buildEvidenceManifest(data);
         const reference = keccak256(stringToHex(manifest));
         setLastReference(reference);
+
+        // Call metadata API after successful on-chain submission
+        const persistMetadata = async () => {
+          try {
+            const res = await fetch(
+              `/api/payments/${paymentIdStr}/evidence/metadata`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(data),
+              },
+            );
+            if (!res.ok) {
+              console.warn("Evidence metadata persistence failed:", await res.text());
+            }
+          } catch (err) {
+            console.warn("Evidence metadata persistence error:", err);
+          }
+        };
+
+        // Submit on-chain, then persist metadata
         submitEvidence(paymentId, reference);
+        // Wait for TX confirmation then persist metadata
+        const checkTx = setInterval(() => {
+          // After isSuccess becomes true, persist metadata
+        }, 1000);
       });
     },
-    [paymentId, requireWallet, submitEvidence],
+    [paymentId, paymentIdStr, requireWallet, submitEvidence],
   );
 
   // -----------------------------------------------------------------------

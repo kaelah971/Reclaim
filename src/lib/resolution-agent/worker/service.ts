@@ -28,6 +28,7 @@ import type { ResolutionAgent } from "../types";
 import { classifyResolutionAgentRecovery } from "./recovery";
 import { dispatchControlAction, isPlanStale } from "./dispatcher";
 import { generateLeaseToken } from "./lease";
+import { SupabaseEvidenceReader } from "@/lib/evidence/reader";
 import { transitionAgentStatus } from "../state-machine";
 import { evaluateResolutionAgentResumption } from "../resumer";
 import type { EvidenceRequestRow } from "../store/types";
@@ -406,18 +407,7 @@ export async function runResolutionAgentWorkerIteration(params: {
           );
         },
       } as unknown as Parameters<typeof observer>[0]["escrowReader"],
-      evidenceReader: {
-        getEvidenceMetadata: async () => ({
-          evidenceReference: null,
-          title: null,
-          evidenceType: null,
-          description: null,
-          relatedDeliverable: null,
-          externalReference: null,
-          fileCount: 0,
-          latestUpdateTimestamp: null,
-        }),
-      } as Parameters<typeof observer>[0]["evidenceReader"],
+      evidenceReader: new SupabaseEvidenceReader() as Parameters<typeof observer>[0]["evidenceReader"],
     });
 
     // 8a. Reload agent after observation (observer persists updated observation)

@@ -12,31 +12,14 @@ import EvidenceQualityResult, {
   type EvidenceQualityResultData,
 } from "./EvidenceQualityResult";
 import { PAYMENT_TOKEN_SYMBOL } from "@/lib/web3/tokens";
+import { buildEvidenceManifest, type EvidenceFormData } from "@/lib/evidence/manifest";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
-export interface EvidenceFormData {
-  title: string;
-  description: string;
-  type: string;
-  relatedClaim: string;
-  date: string;
-  externalRef: string;
-  pastedText: string;
-  file: File | null;
-  fileHash: string;
-}
+export type { EvidenceFormData };
 
-export function buildEvidenceManifest(data: EvidenceFormData): string {
-  return [
-    `title:${data.title.trim()}`,
-    data.type ? `type:${data.type}` : null,
-    data.relatedClaim.trim() ? `claim:${data.relatedClaim.trim()}` : null,
-    data.date ? `date:${data.date}` : null,
-    data.externalRef.trim() ? `ref:${data.externalRef.trim()}` : null,
-    data.pastedText.trim() ? `text:${data.pastedText.trim()}` : null,
-    data.fileHash ? `file-sha256:${data.fileHash}` : null,
-  ].filter(Boolean).join(" | ");
+interface EvidenceFormState extends EvidenceFormData {
+  file: File | null;
 }
 
 interface EvidenceFormProps {
@@ -62,7 +45,7 @@ export default function EvidenceForm({
   onImproveEvidence,
   onCopyResultJson,
 }: EvidenceFormProps) {
-  const [form, setForm] = useState<EvidenceFormData>({
+  const [form, setForm] = useState<EvidenceFormState>({
     title: "",
     description: "",
     type: "",
@@ -73,11 +56,11 @@ export default function EvidenceForm({
     file: null,
     fileHash: "",
   });
-  const [errors, setErrors] = useState<Partial<Record<keyof EvidenceFormData, string>>>({});
+  const [errors, setErrors] = useState<Partial<Record<keyof EvidenceFormState, string>>>({});
   const [filePending, setFilePending] = useState(false);
   const [reviewing, setReviewing] = useState(false);
 
-  const update = (field: keyof EvidenceFormData, value: string | File | null) => {
+  const update = (field: keyof EvidenceFormState, value: string | File | null) => {
     setForm((prev) => ({ ...prev, [field]: value }));
     if (errors[field]) {
       setErrors((prev) => {
