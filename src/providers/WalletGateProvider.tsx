@@ -169,6 +169,14 @@ export default function WalletGateProvider({
       ? "supported"
       : "unsupported";
 
+  // Auto-dismiss the switch gate when the wallet's chain becomes supported
+  // (e.g. after wagmi SSR cookie hydration resolves to real connection).
+  // Pending action is cleared — user must explicitly retry the action.
+  const effectiveMode: WalletDialogMode | null =
+    mode === "switch" && wallet.isConnected && wallet.chainSupported
+      ? null
+      : mode;
+
   const contextValue = useMemo<WalletGateContextValue>(
     () => ({
       requireWallet,
@@ -192,8 +200,8 @@ export default function WalletGateProvider({
     <WalletGateContext.Provider value={contextValue}>
       {children}
       <WalletDialog
-        open={mode !== null}
-        mode={mode ?? "connect"}
+        open={effectiveMode !== null}
+        mode={effectiveMode ?? "connect"}
         options={walletOptions}
         currentChainId={wallet.chainId}
         isConnecting={isConnectPending}
