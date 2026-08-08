@@ -735,6 +735,13 @@ export default function PaymentRoomPage() {
           onDismiss={() => requestRelease.reset()}
           label="Release request"
         />
+        <div className="pt-2 border-t border-border">
+          <Link href={`/payments/${paymentIdStr}/evidence`}>
+            <Button variant="secondary" size="sm">
+              Update evidence
+            </Button>
+          </Link>
+        </div>
         <Link href={`/payments/${paymentIdStr}/dispute`}>
           <Button variant="ghost" size="sm">
             Open dispute

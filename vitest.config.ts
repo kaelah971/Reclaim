@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    include: ["src/**/__tests__/**/*.test.ts"],
+    include: ["src/**/__tests__/**/*.test.ts", "src/**/__tests__/**/*.test.tsx"],
     // Provide x402 server configuration for tests so config.ts module-level
     // constants evaluate correctly (the payTo address, USDC address, and
     // dispute brief price must be non-empty for verification tests).
