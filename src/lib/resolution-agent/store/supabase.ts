@@ -33,9 +33,9 @@ import {
 // ---------------------------------------------------------------------------
 
 const TABLE_AGENTS = "resolution_agents";
-const TABLE_EVENTS = "agent_events";
-const TABLE_TOOL_EXECUTIONS = "tool_executions";
-const TABLE_EVIDENCE_REQUESTS = "evidence_requests";
+const TABLE_EVENTS = "resolution_agent_events";
+const TABLE_TOOL_EXECUTIONS = "resolution_agent_tool_executions";
+const TABLE_EVIDENCE_REQUESTS = "resolution_agent_evidence_requests";
 
 // ---------------------------------------------------------------------------
 // Implementation
