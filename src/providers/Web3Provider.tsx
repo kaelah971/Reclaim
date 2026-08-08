@@ -1,12 +1,18 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider } from "wagmi";
+import { WagmiProvider, type State } from "wagmi";
 import { wagmiConfig } from "@/lib/web3/config";
 import WalletGateProvider from "./WalletGateProvider";
 import { useState, type ReactNode } from "react";
 
-export default function Web3Provider({ children }: { children: ReactNode }) {
+export default function Web3Provider({
+  children,
+  initialState,
+}: {
+  children: ReactNode;
+  initialState?: State;
+}) {
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -17,7 +23,7 @@ export default function Web3Provider({ children }: { children: ReactNode }) {
   );
 
   return (
-    <WagmiProvider config={wagmiConfig}>
+    <WagmiProvider config={wagmiConfig} initialState={initialState}>
       <QueryClientProvider client={queryClient}>
         <WalletGateProvider>{children}</WalletGateProvider>
       </QueryClientProvider>

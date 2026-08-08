@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Newsreader, Georama, IBM_Plex_Mono } from "next/font/google";
+import { cookies } from "next/headers";
+import { cookieToInitialState } from "wagmi";
+import { wagmiConfig } from "@/lib/web3/config";
 import Web3Provider from "@/providers/Web3Provider";
 import "./globals.css";
 
@@ -33,18 +36,21 @@ export const metadata: Metadata = {
     "Reclaim protects cUSD payments between clients and independent workers with clear terms, delivery evidence, fair review, and on-chain settlement.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieHeader = (await cookies()).toString();
+  const initialState = cookieToInitialState(wagmiConfig, cookieHeader);
+
   return (
     <html
       lang="en"
       className={`${newsreader.variable} ${georama.variable} ${ibmPlexMono.variable} antialiased`}
     >
       <body className="min-h-screen bg-page text-ink font-[family-name:var(--font-georama)]">
-        <Web3Provider>{children}</Web3Provider>
+        <Web3Provider initialState={initialState}>{children}</Web3Provider>
       </body>
     </html>
   );
