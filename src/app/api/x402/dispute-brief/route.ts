@@ -61,6 +61,8 @@ import type {
 } from "@x402/core/types";
 import { computeCanonicalRequestHash, canonicalRequestIdentitySchema, SERVICE_IDENTIFIER, computeRequestHash } from "@/lib/x402/requestHash";
 import {
+  decodeWalletAuthMessage,
+  extractWalletAuth,
   verifyWalletSignature,
 } from "@/lib/x402/walletAuth";
 import { generateAICaseBrief, type AIGenerationResult } from "@/lib/x402/ai/generate";
@@ -218,9 +220,9 @@ async function handleRecovery(
   }
 
   // --- Step R3: Wallet authentication ---
-  const walletAddress = typeof body.walletAddress === "string" ? body.walletAddress : "";
-  const signedMessage = typeof body.signedMessage === "string" ? body.signedMessage : "";
-  const walletSignature = typeof body.walletSignature === "string" ? body.walletSignature : "";
+  const { walletAddress, signedMessage, walletSignature } = extractWalletAuth(
+    body as Record<string, unknown>,
+  );
 
   if (!walletAddress || !signedMessage || !walletSignature) {
     return jsonSafe({
@@ -1259,8 +1261,16 @@ async function authenticateWalletFromHeaders(
   requiredPayer: string,
 ): Promise<boolean> {
   const walletAddress = request.headers.get("x-wallet-address") || "";
-  const signedMessage = request.headers.get("x-wallet-message") || "";
   const walletSignature = request.headers.get("x-wallet-signature") || "";
+  let signedMessage: string;
+  try {
+    signedMessage = decodeWalletAuthMessage(
+      request.headers.get("x-wallet-message") || "",
+    );
+  } catch {
+    // Malformed encoded message — fail closed.
+    return false;
+  }
 
   if (!walletAddress || !signedMessage || !walletSignature) return false;
   if (walletAddress.toLowerCase() !== requiredPayer.toLowerCase()) return false;

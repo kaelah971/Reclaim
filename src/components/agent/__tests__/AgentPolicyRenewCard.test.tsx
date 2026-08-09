@@ -50,6 +50,7 @@ vi.mock("@/components/ui/Notice", () => ({
 }));
 
 import AgentPolicyRenewCard from "../AgentPolicyRenewCard";
+import { decodeWalletAuthMessage } from "@/lib/x402/walletAuth";
 
 const FUNDER = "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486";
 const OTHER = "0x1111111111111111111111111111111111111111";
@@ -181,9 +182,12 @@ describe("AgentPolicyRenewCard", () => {
     const headers = init.headers as Record<string, string>;
     expect(headers["x-wallet-address"]).toBe(FUNDER);
     expect(headers["x-wallet-signature"]).toBe("0xsignature1234");
-    expect(headers["x-wallet-message"]).toContain("renew_resolution_agent_policy");
-    expect(headers["x-wallet-message"]).toContain(AGENT_ID);
-    expect(headers["x-wallet-message"]).toContain(String(EXPIRED)); // old expiry bound
+    // The canonical multiline message is transported ENCODED (header-safe).
+    expect(headers["x-wallet-message"]).toMatch(/^b64url:[A-Za-z0-9_-]+$/);
+    const decodedMessage = decodeWalletAuthMessage(headers["x-wallet-message"]);
+    expect(decodedMessage).toContain("renew_resolution_agent_policy");
+    expect(decodedMessage).toContain(AGENT_ID);
+    expect(decodedMessage).toContain(String(EXPIRED)); // old expiry bound
 
     const body = JSON.parse(init.body as string);
     const newExpiresAt = Number(body.expiresAt);

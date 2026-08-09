@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { useSignMessage } from "wagmi";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { buildRenewPolicyMessage } from "@/lib/resolution-agent/api/auth";
+import { encodeWalletAuthMessage } from "@/lib/x402/walletAuth";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 
@@ -88,7 +89,9 @@ export default function AgentPolicyRenewCard({
           headers: {
             "Content-Type": "application/json",
             "x-wallet-address": wallet.address,
-            "x-wallet-message": canonicalMessage,
+            // The canonical message is multiline and cannot be transported
+            // raw in an HTTP header — send the shared header-safe encoding.
+            "x-wallet-message": encodeWalletAuthMessage(canonicalMessage),
             "x-wallet-signature": signature,
           },
           body: JSON.stringify({ expiresAt: String(newExpiresAt) }),

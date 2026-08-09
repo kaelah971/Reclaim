@@ -223,17 +223,17 @@ describe("renewal message transport + verification (RA1R.7F)", () => {
     });
   }
 
-  it("canonical message is fully ASCII-safe for the x-wallet-message header", () => {
+  it("canonical message is ASCII-only but MULTILINE — raw header transport is illegal", () => {
     const message = buildMessage();
     expect(message.startsWith("Reclaim - Renew Resolution Agent Policy")).toBe(true);
-    // No non-ISO-8859-1 code points: a browser fetch can serialize this
-    // value into RequestInit.headers without throwing.
-    for (const char of message) {
-      expect(char.charCodeAt(0)).toBeLessThanOrEqual(0xff);
-    }
-    expect(message).not.toMatch(/[\u2014\u2013\u201C\u201D]/); // no em/en dash or smart quotes
+    // ASCII-only (no smart punctuation)…
+    expect(message).not.toMatch(/[\u2014\u2013\u201C\u201D]/);
     expect(message).toContain("renew_resolution_agent_policy");
     expect(message).toContain("agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235");
+    // …but it contains line breaks, so it must NEVER be transported raw in
+    // an HTTP header (browser fetch rejects CR/LF with "Invalid value").
+    expect(message).toMatch(/\n/);
+    expect(() => new Headers({ "x-wallet-message": message })).toThrow(TypeError);
   });
 
   it("server verifies the exact signed message (valid signature succeeds)", async () => {
