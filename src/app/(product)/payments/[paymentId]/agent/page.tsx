@@ -1,10 +1,11 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import AgentHeader from "@/components/agent/AgentHeader";
 import AgentBudgetCard from "@/components/agent/AgentBudgetCard";
+import AgentPolicyRenewCard from "@/components/agent/AgentPolicyRenewCard";
 import AgentEvidenceRequests from "@/components/agent/AgentEvidenceRequests";
 import AgentTimeline from "@/components/agent/AgentTimeline";
 import AgentReadyState from "@/components/agent/AgentReadyState";
@@ -90,58 +91,59 @@ export default function AgentControlRoomPage() {
   const [toolExecutions, setToolExecutions] = useState<ToolExecution[]>([]);
   const [evidenceRequests, setEvidenceRequests] = useState<EvidenceRequest[]>([]);
 
-  useEffect(() => {
-    async function load() {
-      if (!paymentId) return;
-      setLoading(true);
+  const load = useCallback(async () => {
+    if (!paymentId) return;
+
+    try {
+      // Step 1: Look up agent by payment ID
+      const lookupRes = await fetch(
+        `/api/resolution-agents?paymentId=${encodeURIComponent(paymentId)}`,
+      );
+
+      if (!lookupRes.ok) {
+        throw new Error(`Lookup failed: ${lookupRes.status}`);
+      }
+
+      const lookupData = await lookupRes.json();
+
+      if (!lookupData.found || !lookupData.agentId || !lookupData.publicView) {
+        setLoading(false);
+        return;
+      }
+
+      const agentId: string = lookupData.agentId;
+      const pv: AgentPublicView = lookupData.publicView;
+      setPublicView(pv);
       setError(null);
 
+      // Step 2: Fetch detailed timeline/evidence events (public-safe summary)
+      // We fetch events separately via the details endpoint
+      // The details API requires wallet auth in production, but we try anyway
       try {
-        // Step 1: Look up agent by payment ID
-        const lookupRes = await fetch(
-          `/api/resolution-agents?paymentId=${encodeURIComponent(paymentId)}`,
+        const detailsRes = await fetch(
+          `/api/resolution-agents/${encodeURIComponent(agentId)}/details`,
         );
-
-        if (!lookupRes.ok) {
-          throw new Error(`Lookup failed: ${lookupRes.status}`);
+        if (detailsRes.ok) {
+          const details = await detailsRes.json();
+          setEvents(details.events ?? []);
+          setToolExecutions(details.toolExecutions ?? []);
+          setEvidenceRequests(details.evidenceRequests ?? []);
         }
-
-        const lookupData = await lookupRes.json();
-
-        if (!lookupData.found || !lookupData.agentId || !lookupData.publicView) {
-          setLoading(false);
-          return;
-        }
-
-        const agentId: string = lookupData.agentId;
-        const pv: AgentPublicView = lookupData.publicView;
-        setPublicView(pv);
-
-        // Step 2: Fetch detailed timeline/evidence events (public-safe summary)
-        // We fetch events separately via the details endpoint
-        // The details API requires wallet auth in production, but we try anyway
-        try {
-          const detailsRes = await fetch(
-            `/api/resolution-agents/${encodeURIComponent(agentId)}/details`,
-          );
-          if (detailsRes.ok) {
-            const details = await detailsRes.json();
-            setEvents(details.events ?? []);
-            setToolExecutions(details.toolExecutions ?? []);
-            setEvidenceRequests(details.evidenceRequests ?? []);
-          }
-        } catch {
-          // Best-effort — details may not be available without auth
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "An error occurred");
-      } finally {
-        setLoading(false);
+      } catch {
+        // Best-effort — details may not be available without auth
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "An error occurred");
+    } finally {
+      setLoading(false);
     }
-
-    load();
   }, [paymentId]);
+
+  useEffect(() => {
+    void (async () => {
+      await load();
+    })();
+  }, [load]);
 
   // Loading state
   if (loading) {
@@ -219,6 +221,14 @@ export default function AgentControlRoomPage() {
               reservedAtomic={publicView.budget.reservedAtomic}
               remainingAtomic={publicView.budget.remainingAtomic}
               caseWalletAddress={publicView.caseWalletAddress}
+            />
+
+            <AgentPolicyRenewCard
+              agentId={publicView.id}
+              escrowPaymentId={publicView.identity.escrowPaymentId}
+              expiresAt={publicView.expiresAt}
+              funderAddress={publicView.funderAddress}
+              onRenewed={() => load()}
             />
           </div>
         </div>
