@@ -49,4 +49,16 @@ describe("Payment Room — DeliverySubmitted worker evidence navigation", () => 
     // …and link to /payments/[paymentId]/agent using the dynamic paymentId.
     expect(source).toContain(`/payments/\${paymentIdStr}/agent`);
   });
+
+  it("renders 'Review case' navigation gated on an existing review packet", () => {
+    const source = readPageSource();
+
+    // The link is rendered only when the review packet exists…
+    expect(source).toContain("hasReviewPacket");
+    expect(source).toContain("Review case");
+    // …and links to the review surface with the dynamic paymentId.
+    expect(source).toContain(`/payments/\${paymentIdStr}/review`);
+    // The availability check is a read-only GET (best-effort).
+    expect(source).toContain(`/api/payments/\${paymentIdStr}/review-packet`);
+  });
 });

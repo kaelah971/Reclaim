@@ -181,12 +181,18 @@ export default function AgentControlRoomPage() {
   return (
     <div className="mx-auto max-w-[1200px] px-4 py-8 md:px-6 md:py-10">
       {/* Breadcrumb */}
-      <nav className="mb-6">
+      <nav className="mb-6 flex items-center gap-3">
         <Link
           href={`/payments/${paymentId}`}
           className="text-[13px] text-muted hover:text-ink transition-colors"
         >
           &larr; Back to Payment Room
+        </Link>
+        <Link
+          href={`/payments/${paymentId}/review`}
+          className="text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+        >
+          Review case
         </Link>
       </nav>
 

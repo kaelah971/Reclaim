@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import StatusBadge, { type BadgeVariant } from "@/components/ui/StatusBadge";
@@ -263,6 +263,27 @@ export default function PaymentRoomPage() {
     refetchPayment,
     refetchAllowance,
   ]);
+
+  // ---- Human-review packet availability (best-effort) ----
+  const [hasReviewPacket, setHasReviewPacket] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    async function checkPacket() {
+      if (!paymentIdStr) return;
+      try {
+        const res = await fetch(`/api/payments/${paymentIdStr}/review-packet`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { found?: boolean };
+        if (!cancelled && data.found) setHasReviewPacket(true);
+      } catch {
+        // Best-effort — the link is hidden when the packet cannot be loaded.
+      }
+    }
+    void checkPacket();
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentIdStr]);
 
   // ---- Derived values ----
   const role = useMemo(
@@ -932,6 +953,13 @@ export default function PaymentRoomPage() {
             <StatusBadge variant="pending" label="Viewer" />
           )}
           {primaryActionContent}
+          {hasReviewPacket && (
+            <Link href={`/payments/${paymentIdStr}/review`}>
+              <Button variant="ghost" size="sm">
+                Review case
+              </Button>
+            </Link>
+          )}
           <Link href={`/payments/${paymentIdStr}/agent`}>
             <Button variant="ghost" size="sm">
               Open Resolution Agent
