@@ -1,9 +1,8 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { keccak256, stringToHex } from "viem";
 import {
   useSignTypedData,
   useReadContract,
@@ -15,13 +14,12 @@ import { decodePaymentRequiredHeader } from "@x402/core/http";
 import Button from "@/components/ui/Button";
 import EvidenceForm from "@/components/payment/EvidenceForm";
 import type { EvidenceFormData } from "@/components/payment/EvidenceForm";
-import { buildEvidenceManifest } from "@/lib/evidence/manifest";
 import type { EvidenceQualityResultData } from "@/components/payment/EvidenceQualityResult";
 import Notice from "@/components/ui/Notice";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
-import { useSubmitEvidenceHash } from "@/hooks/contracts/useEscrowActions";
+import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";
 import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
 import { normalizeForJson } from "@/lib/x402/jsonSafe";
 import {
@@ -110,8 +108,18 @@ export default function EvidencePage() {
   const wallet = useWalletState();
 
   const { data: payment, isLoading, isError, notFound } = usePayment(paymentId);
-  const { action: submitEvidence, isPending, isSuccess, error, txHash, reset } =
-    useSubmitEvidenceHash();
+  const {
+    submit: submitEvidence,
+    isPending,
+    isTxConfirmed,
+    error,
+    txHash,
+    lastReference,
+    metadataState,
+    metadataError,
+    retryMetadata,
+    reset,
+  } = useSubmitEvidenceFlow(paymentId, paymentIdStr);
 
   // -----------------------------------------------------------------------
   // Evidence quality check state
@@ -121,8 +129,6 @@ export default function EvidencePage() {
   >("idle");
   const [checkResult, setCheckResult] = useState<EvidenceQualityResultData | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
-  const evidenceFormRef = useRef<EvidenceFormData | null>(null);
-  const [lastReference, setLastReference] = useState<`0x${string}` | null>(null);
 
   // -----------------------------------------------------------------------
   // x402 payment helpers
@@ -304,31 +310,15 @@ export default function EvidencePage() {
   // Evidence submit flow
   // -----------------------------------------------------------------------
 
+  // Redirect to the Payment Room only AFTER the tx confirmed AND the
+  // evidence metadata was persisted.
   useEffect(() => {
-    if (isSuccess && evidenceFormRef.current) {
-      // Persist evidence metadata after on-chain TX confirms
-      const stored = evidenceFormRef.current;
-      fetch(`/api/payments/${paymentIdStr}/evidence/metadata`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: stored.title,
-          description: stored.description,
-          type: stored.type,
-          relatedClaim: stored.relatedClaim,
-          date: stored.date,
-          externalRef: stored.externalRef,
-          pastedText: stored.pastedText,
-          fileHash: stored.fileHash,
-        }),
-      }).catch(() => {}).finally(() => {
-        const timer = setTimeout(() => {
-          router.push(`/payments/${paymentIdStr}`);
-        }, 2000);
-        return () => clearTimeout(timer);
-      });
-    }
-  }, [isSuccess, paymentIdStr, router]);
+    if (metadataState !== "persisted") return;
+    const timer = setTimeout(() => {
+      router.push(`/payments/${paymentIdStr}`);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [metadataState, paymentIdStr, router]);
 
   // -----------------------------------------------------------------------
   // Evidence submit callback
@@ -336,40 +326,9 @@ export default function EvidencePage() {
 
   const handleAddEvidence = useCallback(
     (data: EvidenceFormData) => {
-      if (!paymentId) return;
-      requireWallet(() => {
-        const manifest = buildEvidenceManifest(data);
-        const reference = keccak256(stringToHex(manifest));
-        setLastReference(reference);
-
-        // Call metadata API after successful on-chain submission
-        const persistMetadata = async () => {
-          try {
-            const res = await fetch(
-              `/api/payments/${paymentIdStr}/evidence/metadata`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(data),
-              },
-            );
-            if (!res.ok) {
-              console.warn("Evidence metadata persistence failed:", await res.text());
-            }
-          } catch (err) {
-            console.warn("Evidence metadata persistence error:", err);
-          }
-        };
-
-        // Submit on-chain, then persist metadata
-        submitEvidence(paymentId, reference);
-        // Wait for TX confirmation then persist metadata
-        const checkTx = setInterval(() => {
-          // After isSuccess becomes true, persist metadata
-        }, 1000);
-      });
+      submitEvidence(data);
     },
-    [paymentId, paymentIdStr, requireWallet, submitEvidence],
+    [submitEvidence],
   );
 
   // -----------------------------------------------------------------------
@@ -405,8 +364,6 @@ export default function EvidencePage() {
 
   const handleCheckStrength = useCallback(
     async (formData: EvidenceFormData) => {
-      // Persist form data for retries
-      evidenceFormRef.current = formData;
       setCheckError(null);
 
       requireWallet(async () => {
@@ -769,7 +726,34 @@ export default function EvidencePage() {
           </div>
         )}
 
-        {isSuccess && txHash && (
+        {isTxConfirmed && txHash && metadataState === "idle" && (
+          <div className="mb-6">
+            <Notice variant="info">
+              <p className="text-[14px] leading-relaxed">
+                <span className="inline-flex items-center gap-2">
+                  <svg
+                    className="animate-spin h-4 w-4"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    aria-hidden="true"
+                  >
+                    <circle
+                      cx="8"
+                      cy="8"
+                      r="6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeDasharray="30 10"
+                    />
+                  </svg>
+                  Recording evidence details…
+                </span>
+              </p>
+            </Notice>
+          </div>
+        )}
+
+        {metadataState === "persisted" && txHash && (
           <div className="mb-6">
             <Notice variant="success">
               <p className="text-[14px] leading-relaxed">
@@ -788,6 +772,21 @@ export default function EvidencePage() {
               >
                 View on Celo Explorer
               </a>
+            </Notice>
+          </div>
+        )}
+
+        {metadataError && metadataState === "error" && (
+          <div className="mb-6">
+            <Notice variant="warning">
+              <p className="text-[14px] leading-relaxed">{metadataError}</p>
+              <button
+                type="button"
+                className="mt-2 text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+                onClick={retryMetadata}
+              >
+                Retry
+              </button>
             </Notice>
           </div>
         )}
