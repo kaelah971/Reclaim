@@ -316,10 +316,10 @@ describe("recoverPaidEvidenceQualityCheck", () => {
       agent, execution: settledExecution, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
     });
 
-    // Should return skipped because state is not paid_pending_result
-    expect(result.kind).toBe("skipped");
-    // Generator was NOT called because result_data was already present
-    // (recovery with existing result_data just marks settled, no generation)
+    // Settled executions are reconciled deterministically (RA1R.8A):
+    // the agent is restored and no generation or payment occurs.
+    expect(result.kind).toBe("recovered");
+    expect("recoveryOutcome" in result ? result.recoveryOutcome : "").toContain("reconciled");
   });
 
   it("recovery never increases spent twice (idempotent budget)", async () => {
@@ -354,9 +354,9 @@ describe("recoverPaidEvidenceQualityCheck", () => {
     expect(deps.settlementClient.settleEvidenceQualityCheck).not.toHaveBeenCalled();
   });
 
-  it("recovery skips if execution is not in paid_pending_result", async () => {
+  it("recovery skips if execution is not in paid_pending_result and not settled", async () => {
     const agent = makeAgent();
-    const execution = makeToolExecutionRow({ state: "settled" });
+    const execution = makeToolExecutionRow({ state: "failed_recoverable" });
     const lease = makeLeaseContext();
 
     const result = await recoverPaidEvidenceQualityCheck({
@@ -365,6 +365,58 @@ describe("recoverPaidEvidenceQualityCheck", () => {
 
     expect(result.kind).toBe("skipped");
     expect(deps.generator.generate).not.toHaveBeenCalled();
+  });
+
+  it("settled execution reconciliation clears currentRunningToolId and stays active (RA1R.8A)", async () => {
+    const agent = makeAgent({
+      status: "active",
+      currentRunningToolId: "evidence-quality-check",
+      budget: makeBudget({ approvedAtomic: 100000n, spentAtomic: 10000n, reservedAtomic: 0n }),
+    });
+    const execution = makeToolExecutionRow({
+      state: "settled",
+      result_data: { readiness: "needs_improvement" },
+      settlement_tx_hash: "0xtx123",
+      payment_reference: "0xtx123",
+    });
+    const lease = makeLeaseContext();
+
+    const result = await recoverPaidEvidenceQualityCheck({
+      agent, execution, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
+    });
+
+    expect(result.kind).toBe("recovered");
+    const updateCalls = deps.rawMocks.updateAgent.mock?.calls ?? [];
+    const reconciled = updateCalls
+      .map((c: unknown[]) => c[0] as ResolutionAgent)
+      .find((a) => a.currentRunningToolId === null);
+    expect(reconciled).toBeDefined();
+    expect(reconciled!.status).toBe("active");
+    expect(reconciled!.budget.spentAtomic).toBe(10000n); // never double-spent
+    expect(deps.settlementClient.settleEvidenceQualityCheck).not.toHaveBeenCalled();
+    expect(deps.generator.generate).not.toHaveBeenCalled();
+  });
+
+  it("settled reconciliation is idempotent when the agent is already reconciled", async () => {
+    const agent = makeAgent({
+      status: "active",
+      currentRunningToolId: null,
+      budget: makeBudget({ approvedAtomic: 100000n, spentAtomic: 10000n, reservedAtomic: 0n }),
+    });
+    const execution = makeToolExecutionRow({
+      state: "settled",
+      result_data: { test: true },
+      settlement_tx_hash: "0xtx123",
+    });
+    const lease = makeLeaseContext();
+
+    const result = await recoverPaidEvidenceQualityCheck({
+      agent, execution, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
+    });
+
+    expect(result.kind).toBe("recovered");
+    expect("recoveryOutcome" in result ? result.recoveryOutcome : "").toContain("already reconciled");
+    expect((deps.rawMocks.updateAgent.mock?.calls ?? []).length).toBe(0);
   });
 
   it("recovery fails if no payment proof", async () => {

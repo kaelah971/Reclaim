@@ -40,6 +40,70 @@ export async function recoverPaidEvidenceQualityCheck(params: {
   const { agent, execution, now, dependencies } = params;
   const { store, generator } = dependencies;
 
+  // ---- Step 0: SETTLED execution — deterministic reconciliation ----------
+  // The execution already settled (payment proof + result persisted). The
+  // only remaining work is to reconcile the AGENT state: clear
+  // currentRunningToolId, keep status active, and ensure spent reflects the
+  // settlement. Never touch budget when already spent; never pay again.
+  if (execution.state === "settled") {
+    const alreadySpent = agent.budget.spentAtomic >= CANONICAL_PRICE;
+    const alreadyReconciled =
+      alreadySpent &&
+      agent.status === "active" &&
+      agent.currentRunningToolId === null;
+    if (alreadyReconciled) {
+      return {
+        kind: "recovered",
+        recoveryOutcome: "Settled execution already reconciled",
+      };
+    }
+
+    let reconciledAgent: ResolutionAgent = agent;
+    if (!alreadySpent) {
+      reconciledAgent = {
+        ...agent,
+        budget: {
+          ...agent.budget,
+          spentAtomic: agent.budget.spentAtomic + CANONICAL_PRICE,
+        },
+      };
+    }
+    reconciledAgent = {
+      ...reconciledAgent,
+      currentRunningToolId: null,
+    };
+    const activeAgent =
+      reconciledAgent.status === "active"
+        ? reconciledAgent
+        : transitionAgentStatus(reconciledAgent, "active", { now });
+
+    try {
+      const currentVersion = await store.getAgentVersion(agent.id);
+      await store.updateAgent(activeAgent, currentVersion);
+    } catch {
+      // Best-effort — reconcile will be retried by a later iteration.
+    }
+
+    await store.appendEvent(
+      agent.id,
+      "tool_execution_reconciled",
+      "Settled tool execution reconciled — current running tool cleared",
+      agent.status,
+      "active",
+      {
+        toolId: execution.tool_identifier,
+        requestHash: execution.request_hash,
+        settlementTxHash: execution.settlement_tx_hash,
+        reconciledAt: now,
+      },
+    );
+
+    return {
+      kind: "recovered",
+      recoveryOutcome: "Settled execution reconciled; agent restored",
+    };
+  }
+
   // ---- Step 1: Verify execution is in a recoverable state -----------------
   if (execution.state !== "paid_pending_result") {
     return {
