@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
-// Resolution Agent API — authentication and authorization service
+// Resolution Agent API - authentication and authorization service
 //
-// SERVER-ONLY — builds canonical signable messages and verifies wallet
+// SERVER-ONLY - builds canonical signable messages and verifies wallet
 // signatures against the claimed address.  Reuses the existing
 // verifyWalletSignature function from the x402 module for cryptographic
 // verification via viem.
@@ -40,7 +40,7 @@ const AUTH_EXPIRY_WINDOW_MS = 5 * 60 * 1000;
  *
  * Full message format:
  * ```
- * Reclaim — Create Resolution Agent
+ * Reclaim - Create Resolution Agent
  * Action: create_resolution_agent
  * Version: v1
  * Escrow Chain ID: eip155:11142220
@@ -74,7 +74,7 @@ export function buildCreateAgentMessage(params: {
   const canonicalContract = CANONICAL_ESCROW_CONTRACT_ADDRESS;
 
   return [
-    `${APP_NAME} — Create Resolution Agent`,
+    `${APP_NAME} - Create Resolution Agent`,
     `Action: create_resolution_agent`,
     `Version: v1`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -94,13 +94,13 @@ export function buildCreateAgentMessage(params: {
  * Builds the canonical message a user (the funder) must sign with their
  * wallet to authorise activating an existing resolution agent.
  *
- * **CRITICAL HARDENING** — the message includes ALL permissions being
+ * **CRITICAL HARDENING** - the message includes ALL permissions being
  * activated, read from the actual agent state.  This prevents signature
  * reuse across different agents, cases, budgets, or tool configurations.
  *
  * Full message format:
  * ```
- * Reclaim — Activate Resolution Agent
+ * Reclaim - Activate Resolution Agent
  * Action: activate_resolution_agent
  * Version: v1
  * Agent ID: {agentId}
@@ -145,7 +145,7 @@ export function buildActivationMessage(params: {
   const escrowContractAddress = CANONICAL_ESCROW_CONTRACT_ADDRESS;
 
   return [
-    `${APP_NAME} — Activate Resolution Agent`,
+    `${APP_NAME} - Activate Resolution Agent`,
     `Action: activate_resolution_agent`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -172,9 +172,9 @@ export function buildActivationMessage(params: {
  * This is a thin wrapper around the existing `verifyWalletSignature` from
  * the x402 module.  It normalises inputs and returns a structured result.
  *
- * @param claimedAddress — The 0x-prefixed EVM address the signer claims to be.
- * @param message        — The canonical message string that was signed.
- * @param signature      — The 0x-prefixed ECDSA signature hex.
+ * @param claimedAddress - The 0x-prefixed EVM address the signer claims to be.
+ * @param message        - The canonical message string that was signed.
+ * @param signature      - The 0x-prefixed ECDSA signature hex.
  *
  * @returns `{ verified: true }` on success, or `{ verified: false, error }`
  *          with a human-readable error message on failure.
@@ -209,7 +209,7 @@ export function buildPauseMessage(params: {
   const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
 
   return [
-    `${APP_NAME} — Pause Resolution Agent`,
+    `${APP_NAME} - Pause Resolution Agent`,
     `Action: pause_resolution_agent`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -236,7 +236,7 @@ export function buildResumeMessage(params: {
   const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
 
   return [
-    `${APP_NAME} — Resume Resolution Agent`,
+    `${APP_NAME} - Resume Resolution Agent`,
     `Action: resume_resolution_agent`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -264,7 +264,7 @@ export function buildCloseMessage(params: {
   const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
 
   return [
-    `${APP_NAME} — Close Resolution Agent`,
+    `${APP_NAME} - Close Resolution Agent`,
     `Action: close_resolution_agent`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -301,7 +301,7 @@ export function buildAmendBudgetMessage(params: {
   const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
 
   return [
-    `${APP_NAME} — Amend Resolution Agent Budget`,
+    `${APP_NAME} - Amend Resolution Agent Budget`,
     `Action: amend_budget_resolution_agent`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,
@@ -323,7 +323,7 @@ export function buildAmendBudgetMessage(params: {
 // Explicit, funder-signed renewal of an EXISTING agent's policy expiry.
 // Binds the agent identity, the old and new expiry, and the renew action so
 // the signature cannot be replayed for a different extension. This is the
-// ONLY supported way to extend an expired/expiring policy — policies are
+// ONLY supported way to extend an expired/expiring policy - policies are
 // never auto-renewed.
 // ---------------------------------------------------------------------------
 export function buildRenewPolicyMessage(params: {
@@ -339,7 +339,7 @@ export function buildRenewPolicyMessage(params: {
   const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
 
   return [
-    `${APP_NAME} — Renew Resolution Agent Policy`,
+    `${APP_NAME} - Renew Resolution Agent Policy`,
     `Action: renew_resolution_agent_policy`,
     `Agent ID: ${params.agentId}`,
     `Escrow Chain ID: ${params.escrowChainId}`,

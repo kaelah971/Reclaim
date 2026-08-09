@@ -10,9 +10,11 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi } from "vitest";
+import { signMessage, privateKeyToAccount } from "viem/accounts";
 import type { ResolutionAgent } from "../../types";
 import type { ResolutionAgentStore } from "../service";
 import { renewResolutionAgentPolicy } from "../service";
+import { buildRenewPolicyMessage, verifyAuth } from "../auth";
 
 function makeAgent(overrides: Partial<ResolutionAgent> = {}): ResolutionAgent {
   return {
@@ -192,5 +194,99 @@ describe("renewResolutionAgentPolicy", () => {
         store,
       }),
     ).rejects.toThrow('Policy cannot be renewed from status "draft"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RA1R.7F — header-safe transport + signature round-trip
+//
+// The wallet-auth message travels in the x-wallet-message HTTP header, so
+// it must be pure ASCII (browser fetch rejects non-ISO-8859-1 header
+// values). The canonical builder is ASCII-only; the server verifies the
+// header message EXACTLY as signed (no re-encoding, no character
+// alteration on either side).
+// ---------------------------------------------------------------------------
+
+describe("renewal message transport + verification (RA1R.7F)", () => {
+  const FUNDER_KEY =
+    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+  const FUNDER_ACCOUNT = privateKeyToAccount(FUNDER_KEY);
+
+  function buildMessage(): string {
+    return buildRenewPolicyMessage({
+      agentId: "agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235",
+      escrowChainId: "eip155:11142220",
+      escrowPaymentId: "1",
+      oldExpiresAtMs: 1786161440000,
+      newExpiresAtMs: 1786161440000 + 86400000,
+      funderAddress: FUNDER_ACCOUNT.address,
+    });
+  }
+
+  it("canonical message is fully ASCII-safe for the x-wallet-message header", () => {
+    const message = buildMessage();
+    expect(message.startsWith("Reclaim - Renew Resolution Agent Policy")).toBe(true);
+    // No non-ISO-8859-1 code points: a browser fetch can serialize this
+    // value into RequestInit.headers without throwing.
+    for (const char of message) {
+      expect(char.charCodeAt(0)).toBeLessThanOrEqual(0xff);
+    }
+    expect(message).not.toMatch(/[\u2014\u2013\u201C\u201D]/); // no em/en dash or smart quotes
+    expect(message).toContain("renew_resolution_agent_policy");
+    expect(message).toContain("agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235");
+  });
+
+  it("server verifies the exact signed message (valid signature succeeds)", async () => {
+    const message = buildMessage();
+    const signature = await signMessage({
+      privateKey: FUNDER_KEY,
+      message,
+    });
+
+    const authResult = await verifyAuth({
+      claimedAddress: FUNDER_ACCOUNT.address,
+      message,
+      signature,
+    });
+
+    expect(authResult.verified).toBe(true);
+  });
+
+  it("tampered message fails verification (exact-string binding)", async () => {
+    const message = buildMessage();
+    const signature = await signMessage({
+      privateKey: FUNDER_KEY,
+      message,
+    });
+
+    // A single altered character anywhere in the transported message must
+    // break the signature — proving server and client reconstruct the same
+    // canonical string.
+    const tampered = message.replace("+24h", "+24h ").trim() + "x";
+    const authResult = await verifyAuth({
+      claimedAddress: FUNDER_ACCOUNT.address,
+      message: tampered,
+      signature,
+    });
+
+    expect(authResult.verified).toBe(false);
+  });
+
+  it("wrong funder signature fails verification", async () => {
+    const message = buildMessage();
+    const WRONG_KEY =
+      "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
+    const signature = await signMessage({
+      privateKey: WRONG_KEY,
+      message,
+    });
+
+    const authResult = await verifyAuth({
+      claimedAddress: FUNDER_ACCOUNT.address,
+      message,
+      signature,
+    });
+
+    expect(authResult.verified).toBe(false);
   });
 });
