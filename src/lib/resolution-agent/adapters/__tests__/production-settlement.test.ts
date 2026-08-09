@@ -19,12 +19,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 
 const settlePaymentMock = vi.fn();
+const verifyPaymentMock = vi.fn();
 const providerMock = {
   identifier: "celo-facilitator",
   network: "eip155:42220",
   payToAddress: "0x85522bdE267d05bf8CE8813F97c75417b7894A33",
   settlePayment: settlePaymentMock,
-  verifyPayment: vi.fn(),
+  verifyPayment: verifyPaymentMock,
 };
 
 vi.mock("@/lib/x402/settlementProvider", () => ({
@@ -96,7 +97,46 @@ function baseParams() {
 describe("createProductionSettlementClient().settleEvidenceQualityCheck", () => {
   beforeEach(() => {
     settlePaymentMock.mockReset();
+    verifyPaymentMock.mockReset();
+    verifyPaymentMock.mockResolvedValue({ valid: true, payer: undefined, reason: undefined });
   });
+
+  it("calls /verify BEFORE /settle with the exact payload intended for settlement", async () => {
+    settlePaymentMock.mockResolvedValue({
+      success: true,
+      txHash: "0xsettle-tx",
+      receipt: SUCCESS_RECEIPT,
+    });
+
+    const client = await loadProductionClient();
+    const result = await client.settleEvidenceQualityCheck(baseParams());
+
+    expect(result.success).toBe(true);
+    expect(verifyPaymentMock).toHaveBeenCalledTimes(1);
+    expect(settlePaymentMock).toHaveBeenCalledTimes(1);
+    const [verifyPayload, verifyRequirement] = verifyPaymentMock.mock.calls[0];
+    expect(verifyPayload.x402Version).toBe(2);
+    expect(verifyRequirement).toEqual(expect.objectContaining({ scheme: "exact", amount: "10000" }));
+  }, 30000);
+
+  it("never calls /settle when /verify rejects the payment (sanitized reason surfaced)", async () => {
+    verifyPaymentMock.mockResolvedValue({
+      valid: false,
+      reason: "unsupported_scheme: scheme=exact version=2 network=eip155:42220",
+    });
+
+    const client = await loadProductionClient();
+    const result = await client.settleEvidenceQualityCheck(baseParams());
+
+    expect(result.success).toBe(false);
+    expect(result.ambiguous).toBe(false);
+    expect(settlePaymentMock).not.toHaveBeenCalled();
+    // Explicitly reports the full sanitized version/scheme/network tuple.
+    expect(result.error).toContain("/verify");
+    expect(result.error).toContain("unsupported_scheme");
+    expect(result.error).toContain("exact");
+    expect(result.error).toContain("eip155:42220");
+  }, 30000);
 
   it("sends the exact-scheme payload to the official facilitator config", async () => {
     settlePaymentMock.mockResolvedValue({

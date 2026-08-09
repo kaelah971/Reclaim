@@ -228,6 +228,32 @@ export function createProductionSettlementClient(): ResolutionAgentX402Settlemen
           payload: { authorization, signature },
         };
 
+        // ---- STEP: /verify FIRST ------------------------------------------
+        // Never settle an unverified payment. The facilitator cryptographically
+        // verifies the exact payload that would be settled.
+        const verifyResult = await settlementProvider.verifyPayment(
+          settlePayload as Parameters<typeof settlementProvider.verifyPayment>[0],
+          requirement,
+        );
+
+        if (!verifyResult.valid) {
+          const reason = verifyResult.reason ?? "invalid payment";
+          const detail = sanitizeFacilitatorFailure(
+            new Error(reason),
+            "POST https://api.x402.celo.org/verify",
+          );
+          const rejected =
+            `${detail}` +
+            (verifyResult.payer
+              ? ` | payer: ${verifyResult.payer}`
+              : "");
+          return {
+            success: false,
+            ambiguous: false,
+            error: rejected,
+          };
+        }
+
         const settleResult = await settlementProvider.settlePayment(
           settlePayload as Parameters<typeof settlementProvider.settlePayment>[0],
           requirement,
