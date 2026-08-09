@@ -113,7 +113,22 @@ export function classifyResolutionAgentRecovery(params: {
   }
 
   // Rule 7: failed_recoverable — already in that state, needs human
+  //         review — EXCEPT verified-unpaid (released_unpaid_at) rows,
+  //         which are legitimate retry candidates handled by the planner
+  //         and the 00014 row-reuse path (RA1R.7O). Recovery must not
+  //         intercept a released-unpaid retry.
   if (state === "failed_recoverable") {
+    if (
+      execution.released_unpaid_at != null &&
+      execution.settlement_tx_hash === null &&
+      execution.payment_reference === null
+    ) {
+      return {
+        kind: "no_recovery_needed",
+        reason:
+          "Released-unpaid execution (verified zero settlement) — planner will retry via row reuse",
+      };
+    }
     return {
       kind: "manual_review_required",
       reason: "Execution is in failed_recoverable state; manual review required",

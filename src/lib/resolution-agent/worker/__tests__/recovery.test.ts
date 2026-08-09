@@ -238,6 +238,35 @@ describe("classifyResolutionAgentRecovery", () => {
     expect(result.kind).toBe("manual_review_required");
   });
 
+  it("released-unpaid failed_recoverable → no_recovery_needed (RA1R.7O retry)", () => {
+    const agent = makeTestAgent({ status: "active" });
+    const exec = makeExecution({
+      state: "failed_recoverable",
+      released_unpaid_at: "2026-08-09T06:31:56.579+00:00",
+    });
+    const result = classifyResolutionAgentRecovery({
+      agent,
+      latestToolExecution: exec,
+      now,
+    });
+    expect(result.kind).toBe("no_recovery_needed");
+  });
+
+  it("released-unpaid failed_recoverable WITH settlement proof still requires review", () => {
+    const agent = makeTestAgent({ status: "active" });
+    const exec = makeExecution({
+      state: "failed_recoverable",
+      released_unpaid_at: "2026-08-09T06:31:56.579+00:00",
+      settlement_tx_hash: "0xsettled",
+    });
+    const result = classifyResolutionAgentRecovery({
+      agent,
+      latestToolExecution: exec,
+      now,
+    });
+    expect(result.kind).toBe("manual_review_required");
+  });
+
   it("currentRunningToolId with no execution → mark_failed_recoverable", () => {
     const agent = makeTestAgent({
       currentRunningToolId: "evidence-quality-check",
