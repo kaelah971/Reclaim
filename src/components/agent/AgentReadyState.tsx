@@ -1,5 +1,8 @@
 "use client";
 
+import Link from "next/link";
+import Button from "@/components/ui/Button";
+
 interface AgentReadyStateProps {
   status: string;
   toolExecutions: {
@@ -11,14 +14,20 @@ interface AgentReadyStateProps {
   evidenceRequests: {
     status: string;
   }[];
+  /** True when a durable review_packet_prepared event exists (RA1R.8C). */
+  hasReviewPacket?: boolean;
+  /** Where the human review surface lives. */
+  reviewHref?: string;
 }
 
 export default function AgentReadyState({
   status,
   toolExecutions,
   evidenceRequests,
+  hasReviewPacket = false,
+  reviewHref,
 }: AgentReadyStateProps) {
-  if (status === "ready_for_human_review") {
+  if (status === "ready_for_human_review" || hasReviewPacket) {
     const briefExec = toolExecutions.find(
       (te) => te.toolIdentifier === "reclaim-dispute-brief-v1" && te.state === "settled",
     );
@@ -48,6 +57,16 @@ export default function AgentReadyState({
             </p>
           </div>
         </div>
+
+        {hasReviewPacket && reviewHref && (
+          <div className="mt-4 border-t border-border pt-4">
+            <Link href={reviewHref}>
+              <Button variant="primary" size="sm">
+                Review case
+              </Button>
+            </Link>
+          </div>
+        )}
 
         {briefExec?.resultReference && (
           <div className="mt-4 border-t border-border pt-4">

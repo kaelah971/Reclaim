@@ -14,4 +14,13 @@ describe("Agent Control Room — Review case navigation", () => {
     expect(source).toContain("Review case");
     expect(source).toContain("/payments/${paymentId}/review");
   });
+
+  it("loads the real review-packet state (read-only) and wires it to AgentReadyState", () => {
+    const source = readFileSync(PAGE_PATH, "utf-8");
+    // The control room must load the packet availability so it stops showing
+    // the stale "still assessing" state when review_packet_prepared exists.
+    expect(source).toContain("/api/payments/${paymentId}/review-packet");
+    expect(source).toContain("hasReviewPacket");
+    expect(source).toContain("reviewHref");
+  });
 });

@@ -145,6 +145,27 @@ export default function AgentControlRoomPage() {
     })();
   }, [load]);
 
+  // ---- Human-review packet state (best-effort, read-only) ----
+  const [hasReviewPacket, setHasReviewPacket] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    async function checkPacket() {
+      if (!paymentId) return;
+      try {
+        const res = await fetch(`/api/payments/${paymentId}/review-packet`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { found?: boolean };
+        if (!cancelled && data.found) setHasReviewPacket(true);
+      } catch {
+        // Best-effort — the packet section falls back to the assessing state.
+      }
+    }
+    void checkPacket();
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentId]);
+
   // Loading state
   if (loading) {
     return (
@@ -211,6 +232,8 @@ export default function AgentControlRoomPage() {
             status={publicView.status}
             toolExecutions={toolExecutions}
             evidenceRequests={evidenceRequests}
+            hasReviewPacket={hasReviewPacket}
+            reviewHref={`/payments/${paymentId}/review`}
           />
 
           <AgentEvidenceRequests requests={evidenceRequests} />
