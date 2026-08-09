@@ -68,6 +68,8 @@ export interface ToolExecutionRow {
   result_reference: string | null;
   result_data: Record<string, unknown> | null;
   failure_reason: string | null;
+  /** Set when an unpaid reservation was atomically released (RA1R.7L). */
+  released_unpaid_at?: string | null;
   created_at: string;
   updated_at: string;
 }

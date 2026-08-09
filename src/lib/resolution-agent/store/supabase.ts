@@ -737,9 +737,10 @@ export class SupabaseResolutionAgentStore {
     serviceIdentifier: string;
     policyVersion: string;
     now: number;
-  }): Promise<
+  }  ): Promise<
     | { kind: "created"; agentId: string; requestHash: string; state: string }
     | { kind: "existing"; agentId: string; requestHash: string; state: string }
+    | { kind: "reused"; agentId: string; requestHash: string; state: string }
   > {
     const { data, error } = await this.client.rpc(
       "reserve_resolution_agent_tool_execution",
@@ -771,7 +772,7 @@ export class SupabaseResolutionAgentStore {
 
     const result = data as { kind: string; agent_id: string; request_hash: string; state: string };
     return {
-      kind: result.kind as "created" | "existing",
+      kind: result.kind as "created" | "existing" | "reused",
       agentId: result.agent_id,
       requestHash: result.request_hash,
       state: result.state,

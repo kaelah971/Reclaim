@@ -197,6 +197,7 @@ export interface EvidenceQualityCheckStore {
   }): Promise<
     | { kind: "created"; agentId: string; requestHash: string; state: string }
     | { kind: "existing"; agentId: string; requestHash: string; state: string }
+    | { kind: "reused"; agentId: string; requestHash: string; state: string }
   >;
   releaseUnpaidToolExecution(params: {
     agentId: string;

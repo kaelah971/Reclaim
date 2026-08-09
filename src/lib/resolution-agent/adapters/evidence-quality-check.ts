@@ -107,7 +107,8 @@ export async function executeEvidenceQualityCheck(params: {
   );
 
   if (existing) {
-    return handleExistingExecution({ existing });
+    const existingHandled = await handleExistingExecution({ existing });
+    if (existingHandled) return existingHandled;
   }
 
   // ---- Step 6: Create new execution ---------------------------------------
@@ -253,8 +254,22 @@ function computeCanonicalRequestHash(
 
 async function handleExistingExecution(params: {
   existing: ToolExecutionRow;
-}): Promise<ActionExecutionResult> {
+}): Promise<ActionExecutionResult | null> {
   const { existing } = params;
+
+  // VERIFIED-UNPAID (released) execution: a legitimate retry. Return null
+  // so the flow proceeds to the atomic reserve RPC, which will REUSE the
+  // same audit row exactly once (kind: 'reused'). Settled executions and
+  // executions with any settlement proof never reach this branch in the
+  // RPC, but are guarded here as well for defense in depth.
+  if (
+    existing.released_unpaid_at != null &&
+    existing.state !== "settled" &&
+    existing.settlement_tx_hash === null &&
+    existing.payment_reference === null
+  ) {
+    return null;
+  }
 
   switch (existing.state) {
     case "settled": {
@@ -401,6 +416,15 @@ async function createExecution(params: {
       default:
         return { kind: "waiting", reason: `Unknown execution state: ${rpcResult.state}` };
     }
+  }
+
+  // kind "reused" (or "created"): a fresh reservation (or a verified-unpaid
+  // retry reusing the same audit row) — proceed with the normal flow.
+  if (rpcResult.kind !== "created" && rpcResult.kind !== "reused") {
+    return {
+      kind: "failed_recoverable",
+      reason: `Unexpected reservation result kind: ${(rpcResult as { kind: string }).kind}`,
+    };
   }
 
   // ---- Step 6d: Reload agent from store to get the updated state ----------
