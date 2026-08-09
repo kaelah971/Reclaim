@@ -2,7 +2,8 @@
 
 import { useConnection, useDisconnect } from "wagmi";
 import { isSupportedChain } from "@/lib/web3/chains";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
+import { useProviderWalletChain } from "./useProviderWalletChain";
 
 export type WalletConnectionState =
   | "disconnected"
@@ -28,43 +29,16 @@ export function shortenAddress(address: string | undefined): string {
 }
 
 export function useWalletState(): WalletState {
-  const { address, chainId, connector, isConnecting, isReconnecting, isConnected } =
-    useConnection();
+  const { address, isConnecting, isReconnecting, isConnected } = useConnection();
   const { mutate: disconnect } = useDisconnect();
 
-  // ---------------------------------------------------------------------
-  // Live chain reconciliation
-  //
-  // The wagmi connection chainId is hydrated from a persisted cookie and
-  // can be stale (e.g. 42220 from a previous Celo Mainnet session). The
-  // wallet's REAL chain is read from the connector (eth_chainId) and is
-  // authoritative once resolved. While wagmi is still reconnecting, the
-  // hydrated chainId must never be presented as authoritative.
-  // ---------------------------------------------------------------------
-  const [liveChainId, setLiveChainId] = useState<number | undefined>();
+  // Authoritative chain: direct EIP-1193 provider read (eth_chainId).
+  // The hydrated/store chainId is NEVER used as chain truth — while the
+  // provider chain is unresolved (or wagmi is reconnecting) chainId is
+  // undefined rather than a stale hydrated value.
+  const providerChainId = useProviderWalletChain();
 
-  useEffect(() => {
-    if (!isConnected || !connector) return;
-    let cancelled = false;
-    connector
-      .getChainId()
-      .then((live) => {
-        if (!cancelled) setLiveChainId(live);
-      })
-      .catch(() => {
-        if (!cancelled) setLiveChainId(undefined);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [connector, isConnected, chainId]);
-
-  const resolvedChainId =
-    !isConnected || isReconnecting
-      ? undefined
-      : liveChainId !== undefined
-        ? liveChainId
-        : chainId;
+  const resolvedChainId = !isConnected || isReconnecting ? undefined : providerChainId;
 
   const chainSupported = isConnected && isSupportedChain(resolvedChainId);
 

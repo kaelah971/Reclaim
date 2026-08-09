@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { CELO_NETWORK_NAME, getChainName } from "@/lib/web3/chains";
 import { useWalletGate } from "@/providers/WalletGateProvider";
+import ChainDiagnostics from "./ChainDiagnostics";
 
 interface WalletMenuData {
   address: string | undefined;
@@ -71,6 +72,7 @@ export default function WalletAccountMenu({
             {getChainName(wallet.chainId)}
           </span>
         </div>
+        <ChainDiagnostics />
       </div>
 
       <div className="p-2">

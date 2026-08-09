@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
 // ---------------------------------------------------------------------------
-// useWalletState — live chain reconciliation tests
+// useWalletState — authoritative provider-chain resolution tests
 //
-// The wagmi connection chainId can be a stale hydrated value (e.g. 42220
-// persisted from a previous Celo Mainnet session). useWalletState must
-// resolve the LIVE connector chain (eth_chainId) and present that as
-// authoritative. Cases covered:
-//   a) hydrated 42220    + live connector 11142220 => UI resolves Sepolia
-//   b) hydrated 11142220 + live connector 42220    => UI resolves Mainnet
-//   c) reconnecting state is not presented as authoritative
-//   d) Celo Mainnet remains supported (x402 facilitator flows stay valid)
+// The DIRECT EIP-1193 provider read (provider.request eth_chainId) is the
+// single source of chain truth once connected. The hydrated/store chainId
+// and connector.getChainId() are never the final truth. Cases covered:
+//   1) store 42220 + connector.getChainId 42220 + provider eth_chainId
+//      11142220 => UI resolves Celo Sepolia
+//   2) store 11142220 + provider eth_chainId 42220 => UI resolves Mainnet
+//   3) provider chainChanged => UI updates immediately
+//   4) unresolved provider never exposes a stale chain
+//   6) already-Sepolia provider reconciles without any wallet switch
+//   7) Celo Mainnet remains supported (x402 facilitator flows valid)
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -18,6 +20,7 @@ import { resolve } from "path";
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { getChainName, isSupportedChain, CELO_CHAIN_ID } from "@/lib/web3/chains";
+import { toHex } from "viem";
 
 const wagmiMocks = vi.hoisted(() => ({
   useConnection: vi.fn(),
@@ -39,20 +42,48 @@ type WalletApi = ReturnType<typeof useWalletState>;
 let latest: WalletApi | null = null;
 let root: Root | null = null;
 
-function setupWagmiMocks(
-  options: {
-    storeChainId?: number;
-    isReconnecting?: boolean;
-    liveChainId?: number;
-    liveChainRejects?: boolean;
-  } = {},
-) {
+interface FakeProvider {
+  request: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  removeListener: ReturnType<typeof vi.fn>;
+  isMetaMask: boolean;
+  emit: (event: "chainChanged", value: string) => void;
+}
+
+function makeProvider(initialChainId: number): FakeProvider {
+  const listeners = new Map<string, Set<(value: string) => void>>();
+  const provider: FakeProvider = {
+    isMetaMask: true,
+    request: vi.fn(async () => toHex(initialChainId)),
+    on: vi.fn((event: string, handler: (value: string) => void) => {
+      if (!listeners.has(event)) listeners.set(event, new Set());
+      listeners.get(event)!.add(handler);
+    }),
+    removeListener: vi.fn((event: string, handler: (value: string) => void) => {
+      listeners.get(event)?.delete(handler);
+    }),
+    emit: (event: "chainChanged", value: string) => {
+      listeners.get(event)?.forEach((handler) => handler(value));
+    },
+  };
+  return provider;
+}
+
+function setupWagmiMocks(options: {
+  storeChainId?: number;
+  connectorGetChainId?: number;
+  providerChainId?: number;
+  providerRejects?: boolean;
+  isReconnecting?: boolean;
+}) {
+  const provider = makeProvider(options.providerChainId ?? CELO_SEPOLIA_ID);
+  if (options.providerRejects) {
+    provider.request.mockRejectedValue(new Error("provider unavailable"));
+  }
+
   const connector = {
-    getChainId: vi.fn(() =>
-      options.liveChainRejects
-        ? Promise.reject(new Error("provider unavailable"))
-        : Promise.resolve(options.liveChainId ?? CELO_SEPOLIA_ID),
-    ),
+    getChainId: vi.fn(async () => options.connectorGetChainId ?? CELO_SEPOLIA_ID),
+    getProvider: vi.fn(async () => provider),
   };
 
   wagmiMocks.useConnection.mockReturnValue({
@@ -68,7 +99,7 @@ function setupWagmiMocks(
 
   wagmiMocks.useDisconnect.mockReturnValue({ mutate: vi.fn() });
 
-  return { connector };
+  return { connector, provider };
 }
 
 function Harness() {
@@ -86,7 +117,7 @@ async function mountHarness() {
   await act(async () => {
     root!.render(<Harness />);
   });
-  // Flush the async connector.getChainId() reconciliation.
+  // Flush the async provider eth_chainId resolution.
   await act(async () => {});
 }
 
@@ -103,51 +134,91 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-describe("useWalletState — live chain reconciliation", () => {
-  it("a) resolves Sepolia when live connector is 11142220 despite hydrated 42220", async () => {
-    const { connector } = setupWagmiMocks({
+describe("useWalletState — authoritative provider chain resolution", () => {
+  it("1) resolves Sepolia when store AND connector.getChainId are 42220 but the provider eth_chainId is 11142220", async () => {
+    const { provider } = setupWagmiMocks({
       storeChainId: CELO_MAINNET_ID,
-      liveChainId: CELO_SEPOLIA_ID,
+      connectorGetChainId: CELO_MAINNET_ID,
+      providerChainId: CELO_SEPOLIA_ID,
     });
     await mountHarness();
 
-    expect(connector.getChainId).toHaveBeenCalled();
+    expect(provider.request).toHaveBeenCalledWith({ method: "eth_chainId" });
     expect(latest!.chainId).toBe(CELO_SEPOLIA_ID);
     expect(getChainName(latest!.chainId)).toBe("Celo Sepolia");
     expect(latest!.chainSupported).toBe(true);
   });
 
-  it("b) resolves Mainnet when live connector is 42220 despite hydrated 11142220", async () => {
-    const { connector } = setupWagmiMocks({
+  it("2) resolves Mainnet when the provider eth_chainId is 42220 despite store 11142220", async () => {
+    setupWagmiMocks({
       storeChainId: CELO_SEPOLIA_ID,
-      liveChainId: CELO_MAINNET_ID,
+      providerChainId: CELO_MAINNET_ID,
     });
     await mountHarness();
 
-    expect(connector.getChainId).toHaveBeenCalled();
     expect(latest!.chainId).toBe(CELO_MAINNET_ID);
     expect(getChainName(latest!.chainId)).toBe("Celo Mainnet");
     expect(latest!.chainSupported).toBe(true);
   });
 
-  it("c) does not present the hydrated chain as authoritative while reconnecting", async () => {
-    setupWagmiMocks({
+  it("3) updates the UI immediately when the provider emits chainChanged to 11142220", async () => {
+    const { provider } = setupWagmiMocks({
       storeChainId: CELO_MAINNET_ID,
-      isReconnecting: true,
-      liveChainId: CELO_SEPOLIA_ID,
+      providerChainId: CELO_MAINNET_ID,
     });
     await mountHarness();
 
-    expect(latest!.isReconnecting).toBe(true);
+    expect(latest!.chainId).toBe(CELO_MAINNET_ID);
+
+    await act(async () => {
+      provider.emit("chainChanged", toHex(CELO_SEPOLIA_ID));
+    });
+
+    expect(latest!.chainId).toBe(CELO_SEPOLIA_ID);
+    expect(getChainName(latest!.chainId)).toBe("Celo Sepolia");
+  });
+
+  it("4) never exposes a stale chain while the provider chain is unresolved", async () => {
+    setupWagmiMocks({
+      storeChainId: CELO_MAINNET_ID,
+      providerRejects: true,
+    });
+    await mountHarness();
+
     expect(latest!.chainId).toBeUndefined();
     expect(latest!.chainSupported).toBe(false);
     expect(getChainName(latest!.chainId)).toBe("Unknown network");
   });
 
-  it("d) keeps Celo Mainnet supported when the live connector reports 42220 (x402 facilitator)", async () => {
+  it("4b) does not expose the hydrated chain while wagmi is still reconnecting", async () => {
+    setupWagmiMocks({
+      storeChainId: CELO_MAINNET_ID,
+      providerChainId: CELO_SEPOLIA_ID,
+      isReconnecting: true,
+    });
+    await mountHarness();
+
+    expect(latest!.isReconnecting).toBe(true);
+    expect(latest!.chainId).toBeUndefined();
+  });
+
+  it("6) already-Sepolia provider resolves without asking the wallet to switch", async () => {
+    const { connector, provider } = setupWagmiMocks({
+      storeChainId: CELO_MAINNET_ID,
+      connectorGetChainId: CELO_MAINNET_ID,
+      providerChainId: CELO_SEPOLIA_ID,
+    });
+    await mountHarness();
+
+    expect(latest!.chainId).toBe(CELO_SEPOLIA_ID);
+    expect(provider.request).toHaveBeenCalledTimes(1); // one direct read, no switch involved
+    expect(connector.getChainId).toHaveBeenCalledTimes(0); // connector read NOT used for truth
+  });
+
+  it("7) keeps Celo Mainnet supported when the provider reports 42220 (x402 facilitator)", async () => {
     setupWagmiMocks({
       storeChainId: CELO_SEPOLIA_ID,
-      liveChainId: CELO_MAINNET_ID,
+      providerChainId: CELO_MAINNET_ID,
     });
     await mountHarness();
 
@@ -155,12 +226,15 @@ describe("useWalletState — live chain reconciliation", () => {
     expect(isSupportedChain(CELO_SEPOLIA_ID)).toBe(true);
     expect(latest!.chainId).toBe(CELO_MAINNET_ID);
     expect(latest!.chainSupported).toBe(true);
+    expect(CELO_CHAIN_ID).toBe(CELO_SEPOLIA_ID); // escrow chain unchanged
   });
 });
 
-describe("remaining action gates use the reconciled chain", () => {
+describe("remaining action gates consume the shared resolved chain", () => {
   const createPaymentPath = resolve(__dirname, "..", "..", "contracts", "useCreatePayment.ts");
   const tokenApprovalPath = resolve(__dirname, "..", "..", "contracts", "useTokenApproval.ts");
+  const walletStatePath = resolve(__dirname, "..", "useWalletState.ts");
+  const providerChainPath = resolve(__dirname, "..", "useProviderWalletChain.ts");
 
   it("useCreatePayment gates on useWalletState chainId, not useAccount", () => {
     const source = readFileSync(createPaymentPath, "utf-8");
@@ -176,7 +250,17 @@ describe("remaining action gates use the reconciled chain", () => {
     expect(source).toContain("wallet.chainId !== getEscrowChainId()");
   });
 
-  it("escrow chain constants remain on Celo Sepolia", () => {
-    expect(CELO_CHAIN_ID).toBe(CELO_SEPOLIA_ID);
+  it("useWalletState resolves the chain from the shared provider resolver, not the store", () => {
+    const source = readFileSync(walletStatePath, "utf-8");
+    expect(source).toContain("useProviderWalletChain");
+    expect(source).toContain("resolvedChainId = !isConnected || isReconnecting ? undefined : providerChainId");
+  });
+
+  it("useProviderWalletChain reads eth_chainId directly from the EIP-1193 provider", () => {
+    const source = readFileSync(providerChainPath, "utf-8");
+    expect(source).toContain("getProvider");
+    expect(source).toContain('method: "eth_chainId"');
+    expect(source).toContain("chainChanged");
+    expect(source).toContain("removeListener");
   });
 });

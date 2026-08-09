@@ -20,6 +20,7 @@ import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";
+import SwitchToSepoliaButton from "@/components/ui/SwitchToSepoliaButton";
 import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
 import { normalizeForJson } from "@/lib/x402/jsonSafe";
 import {
@@ -654,6 +655,16 @@ export default function EvidencePage() {
       </div>
 
       <div className="mt-8">
+        {/* Real network action: shown only when the resolved provider chain
+            is NOT Celo Sepolia. Hides itself when already on Sepolia. */}
+        {wallet.isConnected &&
+          wallet.chainId !== undefined &&
+          wallet.chainId !== 11142220 && (
+            <div className="mb-6">
+              <SwitchToSepoliaButton />
+            </div>
+          )}
+
         {error && (
           <div className="mb-6">
             <Notice variant="warning">
