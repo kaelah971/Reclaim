@@ -32,26 +32,78 @@ export interface ServiceInput extends EvidenceCheckRequestInput {
 // Build ServiceInput from observation
 // ---------------------------------------------------------------------------
 
+export interface EvidenceInputFacts {
+  title?: string | null;
+  description?: string | null;
+  evidenceType?: string | null;
+  relatedClaim?: string | null;
+  pastedText?: string | null;
+  evidenceDate?: string | null;
+  externalRef?: string | null;
+  fileHash?: string | null;
+}
+
+/**
+ * Build a service input for the evidence-quality-check tool.
+ *
+ * When durable evidence facts are provided (RA1R.8D), ALL substantive fields
+ * that exist are carried through verbatim — title, description, type, claim,
+ * pasted text, date, external ref, file hash. Fields that do not exist stay
+ * empty; nothing is fabricated. Without facts (legacy observations) the
+ * previous counter-based fallback is preserved.
+ */
 export function buildEvidenceCheckInput(
   caseIdentity: AgentCaseIdentity,
   observation: NonNullable<ResolutionAgent["observation"]>,
+  facts?: EvidenceInputFacts,
 ): ServiceInput {
   const escrowState = observation.escrowState || "";
+
+  const hasFacts = facts && (facts.pastedText || facts.description || facts.relatedClaim);
+
+  const evidenceTitle =
+    (hasFacts && facts!.title && facts!.title.trim().length > 0
+      ? facts!.title
+      : escrowState) || "Case Evidence";
+  const evidenceDescription =
+    hasFacts && facts!.description
+      ? facts!.description
+      : `Evidence count: ${observation.evidenceCount}. ` +
+        `Has meaningful change: ${observation.hasMeaningfulChange}. ` +
+        `Unresolved gaps: ${observation.unresolvedGaps?.length ?? 0}.`;
+  const evidenceType =
+    hasFacts && facts!.evidenceType && facts!.evidenceType.trim().length > 0
+      ? facts!.evidenceType
+      : "case_evidence";
+  const relatedClaim =
+    hasFacts && facts!.relatedClaim && facts!.relatedClaim.trim().length > 0
+      ? facts!.relatedClaim
+      : "";
+  const pastedText =
+    hasFacts && facts!.pastedText && facts!.pastedText.trim().length > 0
+      ? facts!.pastedText
+      : "";
+  const evidenceDate =
+    hasFacts && facts!.evidenceDate && facts!.evidenceDate.trim().length > 0
+      ? facts!.evidenceDate
+      : "";
+  const externalRef =
+    hasFacts && facts!.externalRef && facts!.externalRef.trim().length > 0
+      ? facts!.externalRef
+      : "";
+  const fileHash = hasFacts && facts!.fileHash ? facts!.fileHash : "";
 
   return {
     // Zod-validated fields
     escrowPaymentId: caseIdentity.escrowPaymentId,
-    evidenceTitle: escrowState || "Case Evidence",
-    evidenceDescription:
-      `Evidence count: ${observation.evidenceCount}. ` +
-      `Has meaningful change: ${observation.hasMeaningfulChange}. ` +
-      `Unresolved gaps: ${observation.unresolvedGaps?.length ?? 0}.`,
-    evidenceType: "case_evidence",
-    relatedClaim: "",
-    evidenceDate: "",
-    externalRef: "",
-    pastedText: "",
-    fileHash: "",
+    evidenceTitle,
+    evidenceDescription,
+    evidenceType,
+    relatedClaim,
+    evidenceDate,
+    externalRef,
+    pastedText,
+    fileHash,
 
     // Extended fields (not in Zod schema)
     escrowChainId: caseIdentity.escrowChainId,

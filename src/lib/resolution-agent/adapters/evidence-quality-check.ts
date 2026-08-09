@@ -21,6 +21,7 @@ import type {
 import {
   buildEvidenceCheckInput,
   computeEvidenceInputHash,
+  type EvidenceInputFacts,
   type ServiceInput,
 } from "./evidence-quality-input";
 import { normalizeEvidenceQualityResult } from "./evidence-quality-result";
@@ -88,10 +89,45 @@ export async function executeEvidenceQualityCheck(params: {
   if (!observation) {
     return { kind: "skipped", reason: "Agent has no observation — cannot build service input" };
   }
+  // Load the DURABLE evidence facts (RA1R.8D): substantive fields such as
+  // pasted text, claim, and date must reach the QC input. Best-effort — a
+  // reader failure falls back to the observation-derived input.
+  let evidenceFacts:
+    | {
+        title: string | null;
+        description: string | null;
+        evidenceType: string | null;
+        relatedClaim?: string | null;
+        pastedText?: string | null;
+        evidenceDate?: string | null;
+        externalRef?: string | null;
+        fileHash?: string | null;
+      }
+    | undefined;
+  if (dependencies.evidenceReader) {
+    try {
+      const meta = await dependencies.evidenceReader.getEvidenceMetadata(
+        agent.identity.escrowPaymentId,
+      );
+      evidenceFacts = {
+        title: meta.title,
+        description: meta.description,
+        evidenceType: meta.evidenceType,
+        relatedClaim: meta.relatedClaim ?? meta.relatedDeliverable,
+        pastedText: meta.pastedText,
+        evidenceDate: meta.evidenceDate,
+        externalRef: meta.externalRef,
+        fileHash: meta.fileHash,
+      };
+    } catch {
+      evidenceFacts = undefined;
+    }
+  }
   const evidenceInput = buildServiceInput(
     agent.identity,
     observation,
     agent.caseWalletAddress,
+    evidenceFacts,
   );
   const evidenceInputHash = computeEvidenceInputHash(evidenceInput);
   const requestHash = computeCanonicalRequestHash(
@@ -207,8 +243,9 @@ function buildServiceInput(
   caseIdentity: AgentCaseIdentity,
   observation: NonNullable<ResolutionAgent["observation"]>,
   caseWalletAddress: string,
+  facts?: EvidenceInputFacts,
 ): ServiceInput {
-  const base = buildEvidenceCheckInput(caseIdentity, observation);
+  const base = buildEvidenceCheckInput(caseIdentity, observation, facts);
   return {
     ...base,
     escrowChainId: caseIdentity.escrowChainId,

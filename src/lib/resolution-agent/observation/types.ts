@@ -257,5 +257,11 @@ export interface CaseEvidenceReader {
     fileCount: number;
     latestUpdateTimestamp: number | null;
     substantiveEvidence: boolean;
+    /** Manifest-derived substantive facts (RA1R.8D). */
+    relatedClaim?: string | null;
+    pastedText?: string | null;
+    evidenceDate?: string | null;
+    externalRef?: string | null;
+    fileHash?: string | null;
   }>;
 }

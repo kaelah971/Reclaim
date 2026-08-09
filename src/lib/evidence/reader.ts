@@ -44,14 +44,43 @@ function isManifestSubstantive(manifest: string | null): boolean {
 // Exported for direct unit testing
 export { isManifestSubstantive };
 
+export interface DurableEvidenceMetadata {
+  evidenceReference: string | null;
+  title: string | null;
+  evidenceType: string | null;
+  description: string | null;
+  relatedDeliverable: string | null;
+  externalReference: string | null;
+  fileCount: number;
+  latestUpdateTimestamp: number | null;
+  substantiveEvidence: boolean;
+  /** Verified on-chain submitter label (e.g. "chain_verified"). */
+  submitterAddress: string | null;
+  /** Manifest-derived fields (RA1R.8D) — parsed from the canonical manifest
+   *  so substantive facts like pasted text, claim, and date survive into QC
+   *  inputs and review packets. */
+  relatedClaim: string | null;
+  pastedText: string | null;
+  evidenceDate: string | null;
+  externalRef: string | null;
+  fileHash: string | null;
+}
+
+/** Extract a single manifest field value (`key:value` up to ` | ` or EOL). */
+export function extractManifestField(manifest: string, key: string): string | null {
+  const match = manifest.match(new RegExp(`\\b${key}:(.*?)(?:\\s*\\||$)`));
+  const value = match?.[1]?.trim();
+  return value && value.length > 0 ? value : null;
+}
+
 export class SupabaseEvidenceReader implements CaseEvidenceReader {
-  async getEvidenceMetadata(escrowPaymentId: string) {
+  async getEvidenceMetadata(escrowPaymentId: string): Promise<DurableEvidenceMetadata> {
     const client = getSupabaseClient();
 
     const { data, error } = await client
       .from("evidence_metadata")
       .select(
-        "evidence_reference, title, description, evidence_type, file_hash, file_count, submitted_at, manifest",
+        "evidence_reference, title, description, evidence_type, file_hash, file_count, submitted_at, submitter_address, manifest",
       )
       .eq("escrow_payment_id", escrowPaymentId)
       .eq("is_current", true)
@@ -68,23 +97,36 @@ export class SupabaseEvidenceReader implements CaseEvidenceReader {
         fileCount: 0,
         latestUpdateTimestamp: null,
         substantiveEvidence: false,
+        submitterAddress: null,
+        relatedClaim: null,
+        pastedText: null,
+        evidenceDate: null,
+        externalRef: null,
+        fileHash: null,
       };
     }
 
-    const substantive = isManifestSubstantive(data.manifest ?? null);
+    const manifest = (data.manifest as string | null) ?? "";
+    const substantive = isManifestSubstantive(manifest);
 
     return {
       evidenceReference: data.evidence_reference,
       title: data.title,
       evidenceType: data.evidence_type,
       description: data.description,
-      relatedDeliverable: null,
+      relatedDeliverable: extractManifestField(manifest, "claim"),
       externalReference: data.evidence_reference,
       fileCount: data.file_count,
       latestUpdateTimestamp: data.submitted_at
         ? new Date(data.submitted_at).getTime()
         : null,
       substantiveEvidence: substantive,
+      submitterAddress: (data.submitter_address as string | null) ?? null,
+      relatedClaim: extractManifestField(manifest, "claim"),
+      pastedText: extractManifestField(manifest, "text"),
+      evidenceDate: extractManifestField(manifest, "date"),
+      externalRef: extractManifestField(manifest, "ref"),
+      fileHash: (data.file_hash as string | null) ?? null,
     };
   }
 }

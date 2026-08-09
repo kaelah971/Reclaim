@@ -220,6 +220,26 @@ export interface EvidenceQualityCheckDependencies {
   generator: EvidenceQualityCheckGenerator;
   walletDecryptor: ResolutionAgentWalletDecryptor;
   paymentStore: ResolutionAgentPaymentStore;
+  /** Durable evidence metadata reader (RA1R.8D) — supplies substantive
+   *  facts (pasted text, claim, date, …) into the QC service input. */
+  evidenceReader?: {
+    getEvidenceMetadata(escrowPaymentId: string): Promise<{
+      evidenceReference: string | null;
+      title: string | null;
+      evidenceType: string | null;
+      description: string | null;
+      relatedDeliverable: string | null;
+      externalReference: string | null;
+      fileCount: number;
+      latestUpdateTimestamp: number | null;
+      substantiveEvidence: boolean;
+      relatedClaim?: string | null;
+      pastedText?: string | null;
+      evidenceDate?: string | null;
+      externalRef?: string | null;
+      fileHash?: string | null;
+    }>;
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -407,6 +407,9 @@ export function createProductionAdapterDependencies(
     generator: createProductionEvidenceGenerator(),
     walletDecryptor: createProductionWalletDecryptor(),
     paymentStore: createProductionPaymentStore(eventStore),
+    // Durable evidence facts (pasted text, claim, date, …) reach the QC
+    // input from the verified evidence_metadata row (RA1R.8D).
+    evidenceReader: new SupabaseEvidenceReader(),
   };
 }
 

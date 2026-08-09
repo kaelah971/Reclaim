@@ -128,6 +128,7 @@ function makeObservationResult(
         fileCount: 2,
         latestUpdateTimestamp: NOW,
         availability: "package_available",
+        substantiveEvidence: true,
       },
       priorContext: {
         agentStatus: "active",
@@ -393,6 +394,7 @@ describe("Rule: noEvidence", () => {
           ...makeObservationResult("agent_test_1", "case_hash_v1", "ev_hash_v1").observation.evidence,
           fileCount: 0,
           availability: "none",
+          substantiveEvidence: false,
         },
       },
     });
@@ -424,6 +426,7 @@ describe("Rule: noEvidence", () => {
           ...makeObservationResult("agent_test_1", "case_hash_v1", "ev_hash_v1").observation.evidence,
           fileCount: 0,
           availability: "none",
+          substantiveEvidence: false,
         },
       },
     });
@@ -1216,6 +1219,7 @@ describe("One-Action Guarantee", () => {
           ...makeObservationResult("agent_test_1", "case_hash_v1", "ev_empty").observation.evidence,
           fileCount: 0,
           availability: "none",
+          substantiveEvidence: false,
         },
       },
     });

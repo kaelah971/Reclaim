@@ -51,6 +51,11 @@ interface ReviewPacketData {
       substantiveEvidence?: boolean;
       caseVersionHash?: string | null;
       evidenceVersionHash?: string | null;
+      relatedClaim?: string | null;
+      pastedText?: string | null;
+      evidenceDate?: string | null;
+      externalRef?: string | null;
+      fileHash?: string | null;
     };
     qualityCheck?: {
       toolId?: string;
@@ -64,6 +69,7 @@ interface ReviewPacketData {
       paymentReference?: string | null;
       resultReference?: string | null;
     };
+    qcInconsistency?: string[];
     decision?: string;
   };
 }
@@ -108,6 +114,7 @@ export default function ReviewPage() {
 
   const packet = packetData?.packet;
   const qc = packet?.qualityCheck;
+  const qcPacket = packet;
   const evidence = packet?.evidence;
   const escrow = packet?.case;
 
@@ -226,6 +233,21 @@ export default function ReviewPage() {
             <Row label="Title" value={evidence?.title ?? "—"} />
             <Row label="Type" value={evidence?.evidenceType ?? "—"} />
             <Row label="Description" value={evidence?.description ?? "—"} />
+            {evidence?.relatedClaim ? (
+              <Row label="Related claim" value={evidence.relatedClaim} />
+            ) : null}
+            {evidence?.evidenceDate ? (
+              <Row label="Date" value={evidence.evidenceDate} />
+            ) : null}
+            {evidence?.pastedText ? (
+              <Row label="Pasted text" value={evidence.pastedText} />
+            ) : null}
+            {evidence?.externalRef ? (
+              <Row label="External ref" value={evidence.externalRef} mono breakAll />
+            ) : null}
+            {evidence?.fileHash ? (
+              <Row label="File hash" value={evidence.fileHash} mono breakAll />
+            ) : null}
             <Row label="Availability" value={evidence?.availability ?? "—"} />
             <Row label="Files" value={String(evidence?.fileCount ?? 0)} />
             <Row label="Reference" value={evidence?.evidenceReference ?? "—"} mono breakAll />
@@ -240,6 +262,16 @@ export default function ReviewPage() {
         <h2 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
           Evidence Quality Check
         </h2>
+        {Array.isArray(qcPacket?.qcInconsistency) && qcPacket.qcInconsistency.length > 0 && (
+          <div className="mt-3 rounded-[--radius] border border-destructive/40 bg-destructive/5 p-3 text-[13px] text-destructive">
+            <p className="font-semibold">QC may be stale relative to verified evidence</p>
+            <ul className="mt-1 list-disc pl-5">
+              {qcPacket.qcInconsistency.map((inc, i) => (
+                <li key={i}>{inc}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="mt-4 grid gap-4 md:grid-cols-2">
           <div>
             <p className="text-[12px] uppercase tracking-[0.08em] text-muted">Readiness</p>
