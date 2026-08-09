@@ -932,6 +932,11 @@ export default function PaymentRoomPage() {
             <StatusBadge variant="pending" label="Viewer" />
           )}
           {primaryActionContent}
+          <Link href={`/payments/${paymentIdStr}/agent`}>
+            <Button variant="ghost" size="sm">
+              Open Resolution Agent
+            </Button>
+          </Link>
         </div>
       }
       timeline={

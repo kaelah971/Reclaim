@@ -40,4 +40,13 @@ describe("Payment Room — DeliverySubmitted worker evidence navigation", () => 
     const containsRequestRelease = source.includes("Request release");
     expect(containsRequestRelease).toBe(true);
   });
+
+  it("renders 'Open Resolution Agent' navigation to /payments/[paymentId]/agent", () => {
+    const source = readPageSource();
+
+    // The secondary action must label the Agent Control Room…
+    expect(source).toContain("Open Resolution Agent");
+    // …and link to /payments/[paymentId]/agent using the dynamic paymentId.
+    expect(source).toContain(`/payments/\${paymentIdStr}/agent`);
+  });
 });
