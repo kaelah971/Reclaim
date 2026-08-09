@@ -1136,6 +1136,118 @@ export async function amendBudgetResolutionAgent(
 }
 
 // ---------------------------------------------------------------------------
+// Public API: renewResolutionAgentPolicy
+// ---------------------------------------------------------------------------
+
+export interface RenewPolicyParams {
+  /** The agent whose policy expiry is being extended. */
+  agentId: string;
+  /** Verified wallet address of the funder. */
+  authenticatedCaller: string;
+  /** New policy expiry (epoch ms) — must be in the future and strictly
+   *  later than the agent's current expiry. */
+  newExpiresAt: number;
+  now: number;
+  store: ResolutionAgentStore;
+}
+
+/**
+ * Operational statuses on which an explicit policy renewal is meaningful.
+ * Terminal/closed states (closed, closing, expired-due-to-close) and
+ * pre-activation drafts are NOT renewable.
+ */
+const RENEWABLE_STATUSES: ReadonlySet<string> = new Set([
+  "active",
+  "running_tool",
+  "waiting_for_evidence",
+  "waiting_for_human_approval",
+  "paused",
+  "failed_recoverable",
+  "budget_exhausted",
+]);
+
+/**
+ * Explicitly renews an EXISTING agent's policy expiry.
+ *
+ * - Only the original funder may renew (preserves the agent's binding).
+ * - Policies are NEVER auto-renewed — this signed action is the only path.
+ * - Renewal only extends: `newExpiresAt` must be strictly after the
+ *   current `policy.expiresAt` AND in the future.
+ * - Everything else is preserved unchanged: agent id, case wallet,
+ *   approved budget, spent/reserved accounting, payment binding,
+ *   allowed tools/actions, observation, and plan.
+ *
+ * @throws If the agent is not found, the caller is not the funder, the
+ *   status is not renewable, or the new expiry is not a strict extension.
+ */
+export async function renewResolutionAgentPolicy(
+  params: RenewPolicyParams,
+): Promise<ResolutionAgentPublicView> {
+  const { agentId, authenticatedCaller, newExpiresAt, now, store } = params;
+
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  if (
+    agent.policy.funderAddress.toLowerCase() !==
+    authenticatedCaller.toLowerCase()
+  ) {
+    throw new Error(
+      "Access denied: only the agent's funder may renew the policy.",
+    );
+  }
+
+  if (!RENEWABLE_STATUSES.has(agent.status)) {
+    throw new Error(
+      `Policy cannot be renewed from status "${agent.status}".`,
+    );
+  }
+
+  if (newExpiresAt <= now) {
+    throw new Error(
+      "New expiry must be in the future relative to the server clock.",
+    );
+  }
+
+  if (newExpiresAt <= agent.policy.expiresAt) {
+    throw new Error(
+      "New expiry must be strictly later than the current policy expiry.",
+    );
+  }
+
+  const oldExpiresAt = agent.policy.expiresAt;
+  const currentVersion = await readAgentVersion(store, agentId);
+
+  const renewedAgent: ResolutionAgent = {
+    ...agent,
+    policy: {
+      ...agent.policy,
+      expiresAt: newExpiresAt,
+    },
+    updatedAt: now,
+  };
+
+  await store.updateAgent(renewedAgent, currentVersion);
+
+  await store.appendEvent(
+    agentId,
+    "policy_renewed",
+    `Policy expiry renewed from ${oldExpiresAt} to ${newExpiresAt}`,
+    agent.status,
+    agent.status,
+    {
+      oldExpiresAtMs: oldExpiresAt,
+      newExpiresAtMs: newExpiresAt,
+      renewedBy: authenticatedCaller,
+    },
+  );
+
+  return toResolutionAgentPublicView(renewedAgent);
+}
+
+// ---------------------------------------------------------------------------
 // Reclaim Transfer Abstraction
 // ---------------------------------------------------------------------------
 

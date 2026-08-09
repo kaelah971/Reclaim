@@ -29,6 +29,7 @@ import { classifyResolutionAgentRecovery } from "./recovery";
 import { dispatchControlAction, isPlanStale } from "./dispatcher";
 import { generateLeaseToken } from "./lease";
 import { SupabaseEvidenceReader } from "@/lib/evidence/reader";
+import { CeloSepoliaEscrowCaseReader } from "../api/escrow-reader";
 import { transitionAgentStatus } from "../state-machine";
 import { evaluateResolutionAgentResumption } from "../resumer";
 import type { EvidenceRequestRow } from "../store/types";
@@ -386,8 +387,9 @@ export async function runResolutionAgentWorkerIteration(params: {
     }
 
     // 8. Observe the case
-    // Build minimal mocks for readers — worker only runs observation for
-    // hash generation, not actual RPC calls.
+    // Use REAL production readers: the escrow reader performs a live RPC
+    // getPayment read and the evidence reader reads durable evidence
+    // metadata, so the agent observes the CURRENT case truth.
     const observationStore = store as unknown as Parameters<
       typeof observer
     >[0]["store"];
@@ -395,19 +397,10 @@ export async function runResolutionAgentWorkerIteration(params: {
       agentId: agent.id,
       now,
       store: observationStore,
-      escrowReader: {
-        getFullPayment: async () => {
-          throw new Error(
-            "Escrow reader not available in worker iteration",
-          );
-        },
-        getCaseParties: async () => {
-          throw new Error(
-            "Escrow reader not available in worker iteration",
-          );
-        },
-      } as unknown as Parameters<typeof observer>[0]["escrowReader"],
-      evidenceReader: new SupabaseEvidenceReader() as Parameters<typeof observer>[0]["evidenceReader"],
+      escrowReader: new CeloSepoliaEscrowCaseReader(
+        process.env.CELO_SEPOLIA_RPC_URL,
+      ),
+      evidenceReader: new SupabaseEvidenceReader(),
     });
 
     // 8a. Reload agent after observation (observer persists updated observation)

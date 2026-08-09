@@ -345,7 +345,7 @@ describe("dispatchControlAction", () => {
   });
 
   describe("run_tool", () => {
-    it("returns unsupported_action", async () => {
+    it("delegates to the injected action executor (real paid-tool path)", async () => {
       const action: ResolutionAgentNextAction = {
         kind: "run_tool",
         toolId: "evidence-quality-check",
@@ -368,6 +368,38 @@ describe("dispatchControlAction", () => {
         now,
         store,
         executor,
+      });
+      expect(executor.executeOneAction).toHaveBeenCalledTimes(1);
+      expect(executor.executeOneAction).toHaveBeenCalledWith(
+        expect.objectContaining({ action, plan, agent }),
+      );
+      expect(result.kind).toBe("executed");
+      expect(updated.status).toBe("active"); // executor owns state changes
+    });
+
+    it("falls back to unsupported_action defensively when no executor is wired", async () => {
+      const action: ResolutionAgentNextAction = {
+        kind: "run_tool",
+        toolId: "evidence-quality-check",
+        reason: "evidence_quality_check_required" as PlannerReasonCode,
+        toolRequest: {
+          toolId: "evidence-quality-check",
+          priceAtomic: 10_000n,
+          network: "eip155:42220",
+          asset: "0xcebA9300f2b948710d2653dD7B07f33A8B32118C",
+          payTo: "0x85522bdE267d05bf8CE8813F97c75417b7894A33",
+          caseVersionHash: "case_v1",
+          evidenceVersionHash: "ev_v1",
+        },
+      };
+      const { result, agent: updated } = await dispatchControlAction({
+        agent,
+        plan,
+        action,
+        leaseContext: leaseCtx,
+        now,
+        store,
+        executor: undefined as unknown as ResolutionAgentActionExecutor,
       });
       expect(result.kind).toBe("unsupported_action");
       expect(updated.status).toBe("active"); // no state change

@@ -97,6 +97,25 @@ export const amendBudgetRequestSchema = z.object({
 export type AmendBudgetRequestBody = z.infer<typeof amendBudgetRequestSchema>;
 
 // ---------------------------------------------------------------------------
+// Policy renewal
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema for POST /api/resolution-agents/[agentId]/renew request body.
+ *
+ * `expiresAt` is the new policy expiry as an epoch-ms string. It must be
+ * strictly after the agent's CURRENT expiry (renewal only extends) and
+ * must be in the future relative to the server clock at renewal time.
+ */
+export const renewPolicyRequestSchema = z.object({
+  expiresAt: z.string().refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
+    message: "expiresAt must be a positive epoch-ms integer string",
+  }),
+});
+
+export type RenewPolicyRequestBody = z.infer<typeof renewPolicyRequestSchema>;
+
+// ---------------------------------------------------------------------------
 // Wallet auth headers
 // ---------------------------------------------------------------------------
 

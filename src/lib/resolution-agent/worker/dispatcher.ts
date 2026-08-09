@@ -158,13 +158,28 @@ export async function dispatchControlAction(params: {
       });
 
     // -----------------------------------------------------------------------
-    // Run tool — unsupported (no real adapters exist yet)
+    // Run tool — delegate to the injected action executor (real adapters).
+    // The executor re-validates policy/budget at execution time and is
+    // responsible for the full paid-tool lifecycle (reserve → settle →
+    // verify → generate → persist). Falls back to unsupported_action when
+    // no executor is wired (defensive only).
     // -----------------------------------------------------------------------
-    case "run_tool":
+    case "run_tool": {
+      if (params.executor) {
+        const result = await params.executor.executeOneAction({
+          agent,
+          plan,
+          action,
+          leaseContext,
+          now,
+        });
+        return { result, agent };
+      }
       return {
         result: { kind: "unsupported_action", actionKind: "run_tool" },
         agent,
       };
+    }
 
     // -----------------------------------------------------------------------
     // Unknown action — fallback

@@ -316,3 +316,41 @@ export function buildAmendBudgetMessage(params: {
     `By signing this message, you confirm that you control the funder wallet and authorise amending this resolution agent's approved budget.`,
   ].join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// buildRenewPolicyMessage
+//
+// Explicit, funder-signed renewal of an EXISTING agent's policy expiry.
+// Binds the agent identity, the old and new expiry, and the renew action so
+// the signature cannot be replayed for a different extension. This is the
+// ONLY supported way to extend an expired/expiring policy — policies are
+// never auto-renewed.
+// ---------------------------------------------------------------------------
+export function buildRenewPolicyMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+  oldExpiresAtMs: number;
+  newExpiresAtMs: number;
+  funderAddress: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} — Renew Resolution Agent Policy`,
+    `Action: renew_resolution_agent_policy`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Old Expires At (epoch ms): ${params.oldExpiresAtMs}`,
+    `New Expires At (epoch ms): ${params.newExpiresAtMs}`,
+    `Funder Address: ${params.funderAddress}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `By signing this message, you confirm that you control the funder wallet and authorise renewing this resolution agent's policy.`,
+  ].join("\n");
+}

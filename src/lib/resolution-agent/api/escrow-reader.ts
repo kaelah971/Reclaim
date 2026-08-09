@@ -13,6 +13,7 @@ import { celoSepolia } from "viem/chains";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
 import { CELO_CHAIN_ID } from "@/lib/web3/chains";
+import type { CaseObservationReader } from "../observation/types";
 
 // ---------------------------------------------------------------------------
 // Canonical constants — server-owned, never user-provided
@@ -158,6 +159,39 @@ export class CeloSepoliaEscrowCaseReader
         };
       }
       // Re-throw unexpected errors (RPC failures, etc.)
+      throw error;
+    }
+  }
+
+  /**
+   * Reads the FULL Payment struct via `getPayment(paymentId)` using the
+   * canonical escrow ABI. Used by the observation service for case
+   * snapshotting. Returns `{ exists: false }` when the payment does not
+   * exist on-chain (contract reverts with PaymentNotFound).
+   */
+  async getFullPayment(
+    escrowPaymentId: string,
+  ): Promise<Awaited<ReturnType<CaseObservationReader["getFullPayment"]>>> {
+    const paymentId = parsePaymentIdToBigInt(escrowPaymentId);
+
+    try {
+      const payment = (await this.client.readContract({
+        address: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        abi: protectedPaymentEscrowABI,
+        functionName: "getPayment",
+        args: [paymentId],
+      })) as Awaited<ReturnType<CaseObservationReader["getFullPayment"]>>;
+
+      return payment;
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (
+        errMsg.includes("PaymentNotFound") ||
+        errMsg.includes("revert") ||
+        errMsg.includes("execution reverted")
+      ) {
+        return { exists: false };
+      }
       throw error;
     }
   }
