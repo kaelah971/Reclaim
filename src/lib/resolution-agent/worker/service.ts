@@ -225,6 +225,50 @@ async function recoverMissingExecution(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Failure observability
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize an error message so no secrets can leak (private keys, wallet
+ * auth payloads, ciphertext). Shared with the worker's error path.
+ */
+export function sanitizeWorkerError(message: string): string {
+  return message
+    .replace(/sk-[a-zA-Z0-9_-]+/g, "[REDACTED]")
+    .replace(/private\s*key/gi, "")
+    .replace(/ciphertext/gi, "")
+    .replace(/authenticationTag/gi, "")
+    .replace(/0x[0-9a-fA-F]{64,}/g, "[REDACTED_HEX]");
+}
+
+/**
+ * Best-effort persist a sanitized failure event so dispatch/execution
+ * failures are always observable. Never stores signatures, secrets, or
+ * wallet-auth payloads — only the sanitized reason.
+ */
+export async function recordWorkerIterationFailure(
+  store: Pick<ResolutionAgentWorkerDependencies["store"], "appendEvent">,
+  agentId: string | null,
+  error: unknown,
+): Promise<void> {
+  if (!agentId) return;
+  const raw = error instanceof Error ? error.message : String(error);
+  const safe = sanitizeWorkerError(raw).substring(0, 500);
+  try {
+    await store.appendEvent(
+      agentId,
+      "worker_iteration_failed",
+      `Worker iteration failed: ${safe || "unknown error"}`,
+      null,
+      null,
+      { sanitizedReason: safe },
+    );
+  } catch {
+    // Best-effort only — observability must never break the worker.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -565,11 +609,11 @@ export async function runResolutionAgentWorkerIteration(params: {
     const errorMessage =
       err instanceof Error ? err.message : "Unknown worker error";
     // Ensure no secrets leak in error messages
-    const safeError = errorMessage
-      .replace(/sk-[a-zA-Z0-9_-]+/g, "[REDACTED]")
-      .replace(/private\s*key/gi, "")
-      .replace(/ciphertext/gi, "")
-      .replace(/authenticationTag/gi, "");
+    const safeError = sanitizeWorkerError(errorMessage);
+
+    // Persist the sanitized failure so dispatch/execution errors are
+    // always observable (best-effort, never fatal).
+    await recordWorkerIterationFailure(store, processedAgent?.id ?? null, err);
 
     return {
       workerIterationId: iterationId,

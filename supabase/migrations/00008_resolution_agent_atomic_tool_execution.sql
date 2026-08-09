@@ -43,7 +43,7 @@ DECLARE
 BEGIN
   -- 1. Lock the agent row
   SELECT * INTO v_agent
-  FROM resolution_agents
+  FROM public.resolution_agents
   WHERE agent_id = p_agent_id
   FOR UPDATE;
 
@@ -78,7 +78,7 @@ BEGIN
 
   -- 6. Check for existing execution
   SELECT * INTO v_existing_execution
-  FROM resolution_agent_tool_executions
+  FROM public.resolution_agent_tool_executions
   WHERE agent_id = p_agent_id AND request_hash = p_request_hash;
 
   IF FOUND THEN
@@ -96,7 +96,7 @@ BEGIN
   -- 7. Insert new execution
   v_new_execution_id := gen_random_uuid();
 
-  INSERT INTO resolution_agent_tool_executions (
+  INSERT INTO public.resolution_agent_tool_executions (
     id, agent_id, tool_identifier, request_hash,
     case_version_hash, evidence_version_hash,
     state, price_atomic, network, asset_address, pay_to_address,
@@ -110,7 +110,7 @@ BEGIN
   );
 
   -- 8. Update agent: reserve budget, set currentRunningToolId, transition status
-  UPDATE resolution_agents
+  UPDATE public.resolution_agents
   SET
     reserved_budget_atomic = reserved_budget_atomic + p_price_atomic,
     current_running_tool_id = p_tool_id,

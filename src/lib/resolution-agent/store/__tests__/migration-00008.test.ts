@@ -103,7 +103,7 @@ describe("migration 00008 — structure", () => {
 
   it("inserts execution into resolution_agent_tool_executions", () => {
     expect(sql).toMatch(
-      /INSERT INTO resolution_agent_tool_executions/i,
+      /INSERT INTO (public\.)?resolution_agent_tool_executions/i,
     );
   });
 
@@ -125,6 +125,35 @@ describe("migration 00008 — structure", () => {
 
   it("increments agent version", () => {
     expect(sql).toMatch(/version = version \+ 1/i);
+  });
+});
+
+describe("migration 00008 — RA1R.7I schema-qualified references under empty search_path", () => {
+  it("function body table references are schema-qualified (public.*)", () => {
+    // SECURITY DEFINER + SET search_path = '' means ONLY pg_catalog is
+    // searched — unqualified public tables would fail every invocation with
+    // `relation ... does not exist`. Every table reference in the body must
+    // be qualified.
+    expect(sql).toMatch(/FROM public\.resolution_agents/i);
+    expect(sql).toMatch(/FROM public\.resolution_agent_tool_executions/i);
+    expect(sql).toMatch(/INSERT INTO public\.resolution_agent_tool_executions/i);
+    expect(sql).toMatch(/UPDATE public\.resolution_agents/i);
+  });
+
+  it("contains NO unqualified table references inside the function body", () => {
+    const body = sql.slice(
+      sql.indexOf("AS $$") + 5,
+      sql.lastIndexOf("$$;"),
+    );
+    // Unqualified occurrences (not preceded by a schema qualifier).
+    const unqualifiedAgent = body.match(
+      /(?<!public\.)(?<!\.)\bFROM resolution_agents\b|(?<!public\.)\bUPDATE resolution_agents\b/i,
+    );
+    const unqualifiedExecutions = body.match(
+      /(?<!public\.)\bINTO resolution_agent_tool_executions\b|(?<!public\.)\bFROM resolution_agent_tool_executions\b/i,
+    );
+    expect(unqualifiedAgent).toBeNull();
+    expect(unqualifiedExecutions).toBeNull();
   });
 });
 
