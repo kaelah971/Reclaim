@@ -19,12 +19,31 @@ import { useConnection } from "wagmi";
 // the ONLY way the chain updates after the wallet switches networks.
 // While the chain is unresolved (or wagmi is still reconnecting), undefined
 // is exposed instead of any stale hydrated value.
+//
+// LISTENER LIFECYCLE (critical):
+//   The provider instance captured for the subscription (`providerForEffect`)
+//   is the SAME object used for cleanup, with DIRECT method invocation:
+//     providerForEffect.on("chainChanged", handler)
+//     providerForEffect.removeListener("chainChanged", handler)
+//   removeListener is NEVER copied, destructured, or unbound from the
+//   provider — MetaMask's EventEmitter methods read instance state via
+//   `this` (e.g. `this._events`), so an unbound call crashes.
+//   An effect-local `cancelled` guard prevents an obsolete async provider
+//   lookup from installing a listener after cleanup.
 // ---------------------------------------------------------------------------
 
 interface Eip1193Provider {
   request(args: { method: "eth_chainId" }): Promise<string>;
   on?(event: "chainChanged", handler: (chainId: string) => void): void;
   removeListener?(event: "chainChanged", handler: (chainId: string) => void): void;
+}
+
+/** Same shape as Eip1193Provider but with non-optional event methods —
+ *  only reachable after runtime guards, so the cleanup closure never needs
+ *  to copy/unbind the methods. */
+interface Eip1193ChainEvents {
+  on(event: "chainChanged", handler: (chainId: string) => void): void;
+  removeListener(event: "chainChanged", handler: (chainId: string) => void): void;
 }
 
 function parseChainId(hexOrDec: string | number): number | undefined {
@@ -47,13 +66,13 @@ export function useProviderWalletChain(): number | undefined {
       .getProvider()
       .then((rawProvider) => {
         if (cancelled) return;
-        const provider = rawProvider as unknown as Eip1193Provider;
-        if (!provider || typeof provider.request !== "function") {
+        const providerForEffect = rawProvider as unknown as Eip1193Provider;
+        if (!providerForEffect || typeof providerForEffect.request !== "function") {
           if (!cancelled) setProviderChainId(undefined);
           return;
         }
 
-        return provider
+        return providerForEffect
           .request({ method: "eth_chainId" })
           .then((hexChainId) => {
             if (cancelled) return;
@@ -64,19 +83,24 @@ export function useProviderWalletChain(): number | undefined {
             }
             setProviderChainId(parsed);
 
-            // Subscribe to live chain changes on the provider itself.
             if (
-              typeof provider.on === "function" &&
-              typeof provider.removeListener === "function"
+              typeof providerForEffect.on === "function" &&
+              typeof providerForEffect.removeListener === "function"
             ) {
+              // Narrowed cast of the SAME provider instance — no copying.
+              const eventedProvider = providerForEffect as Eip1193ChainEvents;
+
               const handleChainChanged = (chain: string) => {
                 const next = parseChainId(chain);
                 if (next !== undefined) setProviderChainId(next);
               };
-              const removeListenerFn = provider.removeListener;
-              provider.on("chainChanged", handleChainChanged);
+
+              // Subscribe on the captured instance…
+              eventedProvider.on("chainChanged", handleChainChanged);
+              // …and clean up on the SAME instance via direct method
+              // invocation so `this` (EventEmitter state) is preserved.
               removeListener = () =>
-                removeListenerFn("chainChanged", handleChainChanged);
+                eventedProvider.removeListener("chainChanged", handleChainChanged);
             }
           });
       })
