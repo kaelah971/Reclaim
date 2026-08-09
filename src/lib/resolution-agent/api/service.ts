@@ -43,9 +43,13 @@ import type { FundingReader } from "./funding";
 import { SUPPORTED_BUDGETS, type SupportedBudget } from "./types";
 import type { EscrowCaseAuthorizationReader } from "./escrow-reader";
 import {
+  CANONICAL_ESCROW_CHAIN_ID,
   CANONICAL_ESCROW_CONTRACT_ADDRESS,
 } from "./escrow-reader";
 import { buildActivationMessage } from "./auth";
+import { runResolutionAgentWorkerIteration } from "../worker/service";
+import type { ResolutionAgentWorkerResult } from "../worker/types";
+import type { CaseObservationReader } from "../observation/types";
 
 // ---------------------------------------------------------------------------
 // Store interface (structural — matches any conforming store)
@@ -272,7 +276,7 @@ function validateApprovedBudget(atomic: bigint): asserts atomic is SupportedBudg
  *
  * All comparisons are case-insensitive.
  */
-async function isAuthorizedForAgent(
+export async function isAuthorizedForAgent(
   agent: ResolutionAgent,
   caller: string,
   escrowReader: EscrowCaseAuthorizationReader,
@@ -1514,4 +1518,124 @@ export async function closeResolutionAgent(
   );
 
   return toResolutionAgentPublicView(closedAgent);
+}
+
+// ---------------------------------------------------------------------------
+// Public API: runResolutionAgentIteration
+// ---------------------------------------------------------------------------
+
+/**
+ * Reader required for the manual run gate: the on-chain party reader PLUS a
+ * full-payment reader so the escrow case state (and terminal states) can be
+ * verified before any worker work is triggered.
+ */
+export type EscrowCaseRunReader = EscrowCaseAuthorizationReader &
+  Pick<CaseObservationReader, "getFullPayment">;
+
+/** Escrow contract terminal states (released, cancelled, refunded). */
+const TERMINAL_ESCROW_STATES: readonly number[] = [5, 7, 8];
+
+/**
+ * Request-triggered execution of AT MOST ONE resolution agent worker
+ * iteration for a specific EXISTING agent.
+ *
+ * # Safety
+ * - Exactly one worker iteration, targeted at the requested agent only
+ *   (`targetAgentId`). No loops, no cron, no automatic/recurring execution.
+ * - The worker itself enforces all policy, budget, lease, idempotency, and
+ *   x402 protections internally — they are NOT duplicated here.
+ * - No worker work is triggered when the escrow case is missing on-chain or
+ *   in a terminal state (released / cancelled / refunded).
+ *
+ * # Authorisation
+ * Access is granted if the caller is the stored funder, the on-chain client,
+ * or the on-chain worker of the escrow payment (same model as viewing).
+ *
+ * # Binding re-check
+ * The agent must still be bound to the canonical escrow chain + contract.
+ *
+ * @throws ResolutionAgentNotFoundError if the agent does not exist.
+ * @throws Error if the caller is not authorized, the agent is not bound to
+ *   the canonical escrow case, or the escrow case is missing/terminal.
+ */
+export async function runResolutionAgentIteration(params: {
+  agentId: string;
+  authenticatedCaller: string;
+  store: ResolutionAgentStore;
+  escrowReader: EscrowCaseRunReader;
+  now: number;
+}): Promise<{ result: ResolutionAgentWorkerResult; agent: ResolutionAgentPublicView }> {
+  const { agentId, authenticatedCaller, store, escrowReader, now } = params;
+
+  // 1. Read agent
+  const agent = await store.getAgentById(agentId);
+  if (!agent) {
+    throw new ResolutionAgentNotFoundError(agentId);
+  }
+
+  // 2. Authorisation check (funder, client, or worker)
+  const authorized = await isAuthorizedForAgent(
+    agent,
+    authenticatedCaller,
+    escrowReader,
+  );
+  if (!authorized) {
+    throw new Error(
+      "Access denied: only the agent's funder or the escrow case parties (client/worker) may run the resolution agent.",
+    );
+  }
+
+  // 3. Binding re-check — the agent must still point at the canonical case.
+  //    Agents persist the chain ID in CAIP-2 form ("eip155:11142220") while
+  //    CANONICAL_ESCROW_CHAIN_ID is the numeric chain ID; normalize the
+  //    prefix so both stored forms are accepted.
+  const normalizedStoredChain = agent.identity.escrowChainId.replace(
+    /^eip155:/,
+    "",
+  );
+  if (
+    normalizedStoredChain !== String(CANONICAL_ESCROW_CHAIN_ID) ||
+    agent.identity.escrowContractAddress.toLowerCase() !==
+      CANONICAL_ESCROW_CONTRACT_ADDRESS.toLowerCase()
+  ) {
+    throw new Error("Agent is not bound to the canonical escrow case.");
+  }
+
+  // 4. Terminal gate — do not run worker work on missing or finished cases
+  const full = await escrowReader.getFullPayment(agent.identity.escrowPaymentId);
+  if (!("state" in full)) {
+    throw new Error(
+      "The escrow case does not exist on-chain. The resolution agent cannot run.",
+    );
+  }
+  if (
+    typeof full.state === "number" &&
+    TERMINAL_ESCROW_STATES.includes(full.state)
+  ) {
+    throw new Error(
+      "The escrow case is in a terminal state; no further resolution agent iteration is meaningful.",
+    );
+  }
+
+  // 5. Build production worker dependencies lazily (keeps this module's
+  //    import graph light and lets tests mock the adapter cleanly).
+  const dependencies = (await import("@/lib/resolution-agent/adapters/production"))
+    .createResolutionAgentWorkerDependencies();
+
+  // 6. Run AT MOST ONE worker iteration targeted at this agent.
+  const result = await runResolutionAgentWorkerIteration({
+    workerId: `manual_${crypto.randomUUID()}`,
+    now,
+    dependencies,
+    targetAgentId: agentId,
+  });
+
+  // 7. Reload the agent (the iteration may have transitioned it) and return
+  //    the public-safe view alongside the worker result. Both are safe to
+  //    expose — no secrets are ever included.
+  const reloaded = await store.getAgentById(agentId);
+  return {
+    result,
+    agent: toResolutionAgentPublicView(reloaded ?? agent),
+  };
 }

@@ -276,8 +276,15 @@ export async function runResolutionAgentWorkerIteration(params: {
   workerId: string;
   now: number;
   dependencies: ResolutionAgentWorkerDependencies;
+  /**
+   * Optional single-agent targeting: when set, only this agent is considered
+   * as a candidate. If the agent is not currently runnable (absent from the
+   * runnable list), the iteration returns `no_work` with the target agent ID.
+   * When omitted, the default untargeted scan behaviour is unchanged.
+   */
+  targetAgentId?: string;
 }): Promise<ResolutionAgentWorkerResult> {
-  const { workerId, now, dependencies } = params;
+  const { workerId, now, dependencies, targetAgentId } = params;
   const { store, observer, planner, actionExecutor, recoveryHandler } =
     dependencies;
 
@@ -293,11 +300,18 @@ export async function runResolutionAgentWorkerIteration(params: {
       DEFAULT_MAX_CANDIDATES_TO_SCAN,
     );
 
+    // 1a. When targeting a specific agent (manual run), restrict the
+    //     candidate scope to that agent only. Untargeted iterations are
+    //     unaffected (byte-for-byte identical behaviour).
+    const scoped = targetAgentId
+      ? candidates.filter((c) => c.agentId === targetAgentId)
+      : candidates;
+
     // 2. No candidates → no work
-    if (candidates.length === 0) {
+    if (scoped.length === 0) {
       return {
         workerIterationId: iterationId,
-        agentId: null,
+        agentId: targetAgentId ?? null,
         outcome: "no_work",
         actionDispatched: null,
       };
@@ -307,7 +321,7 @@ export async function runResolutionAgentWorkerIteration(params: {
     let acquiredAgentId: string | null = null;
     let acquiredToken: string | null = null;
 
-    for (const candidate of candidates) {
+    for (const candidate of scoped) {
       const token = generateLeaseToken();
       const lease = await store.tryAcquireAgentLease(
         candidate.agentId,

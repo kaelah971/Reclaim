@@ -15,7 +15,7 @@ const previewStages: AccordStage[] = [
 
 const howItWorksSteps = [
   { label: "Define terms", description: "Both sides see the deliverable, the deadline, and the release rule before any money moves." },
-  { label: "Protect funds", description: "cUSD is held in escrow under the agreed terms." },
+  { label: "Protect funds", description: "USDC is held in escrow under the agreed terms." },
   { label: "Deliver work", description: "The worker submits the agreed deliverable and delivery evidence." },
   { label: "Submit proof", description: "Evidence is organized and connected to the terms of the agreement." },
   { label: "Resolve fairly", description: "If there is a disagreement, AI prepares the case and reviewers decide the outcome." },
@@ -33,17 +33,17 @@ const trustItems = [
 const x402Actions = [
   {
     title: "Terms Risk Check",
-    price: "0.01 cUSD",
+    price: "0.01 USDC",
     description: "Before you deposit, check the terms for missing deadlines, vague deliverables, and unclear release rules.",
   },
   {
     title: "Evidence Strength Check",
-    price: "0.01 cUSD",
+    price: "0.01 USDC",
     description: "Review the evidence against the agreed terms to identify missing proof or weak documentation.",
   },
   {
     title: "Dispute Packet",
-    price: "0.03 cUSD",
+    price: "0.03 USDC",
     description: "Generate a neutral, reviewer-ready case packet with claims, timeline, evidence inventory, and unresolved questions.",
   },
 ];
@@ -70,7 +70,7 @@ export default function LandingPage() {
                 Pay with proof.
               </h1>
               <p className="mt-6 max-w-lg text-lg leading-relaxed text-muted font-[family-name:var(--font-georama)]">
-                Protect cUSD payments with clear terms, delivery evidence, fair review, and on-chain settlement.
+                Protect USDC payments with clear terms, delivery evidence, fair review, and on-chain settlement.
               </p>
               <div className="mt-8 flex flex-wrap gap-3">
                 <Link href="/payments/new">
@@ -81,7 +81,17 @@ export default function LandingPage() {
                     See how it works
                   </Button>
                 </Link>
+                <Link href="/payments/1">
+                  <Button variant="ghost" size="lg">
+                    Explore the live demo case
+                  </Button>
+                </Link>
               </div>
+              <p className="mt-3 max-w-lg text-[13px] leading-relaxed text-muted font-[family-name:var(--font-georama)]">
+                The live demo is a completed on-chain proof: a real USDC payment that was
+                released on Celo Sepolia, with its receipt, resolution agent, and case
+                review available end-to-end.
+              </p>
             </div>
 
             {/* Payment Room preview */}
@@ -97,7 +107,7 @@ export default function LandingPage() {
                 <div>
                   <span className="text-[13px] uppercase tracking-[0.1em] text-muted">Amount</span>
                   <p className="mt-1 text-2xl font-[family-name:var(--font-ibm-plex-mono)] font-medium tabular-nums text-ink">
-                    100.00 cUSD
+                    100.00 USDC
                   </p>
                 </div>
 
@@ -281,7 +291,7 @@ export default function LandingPage() {
               },
               {
                 title: "Money state",
-                description: "Amount, cUSD, escrow status, and relevant deadlines. A sticky strip keeps the payment state visible throughout the Payment Room.",
+                description: "Amount, USDC, escrow status, and relevant deadlines. A sticky strip keeps the payment state visible throughout the Payment Room.",
               },
               {
                 title: "Evidence",

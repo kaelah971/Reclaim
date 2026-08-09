@@ -8,7 +8,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Reclaim — Pay with proof",
   description:
-    "Reclaim protects cUSD payments between clients and independent workers with clear terms, delivery evidence, fair review, and on-chain settlement.",
+    "Reclaim protects USDC payments between clients and independent workers with clear terms, delivery evidence, fair review, and on-chain settlement.",
 };
 
 export default async function RootLayout({

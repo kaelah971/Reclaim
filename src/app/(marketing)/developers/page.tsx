@@ -4,12 +4,12 @@ const integrationSurfaces = [
   {
     title: "Protected payment links",
     description:
-      "Generate a link that creates a Payment Room with pre-filled terms. Share it with a client or worker to start a protected cUSD payment immediately.",
+      "Generate a link that creates a Payment Room with pre-filled terms. Share it with a client or worker to start a protected USDC payment immediately.",
   },
   {
     title: "Checkout component",
     description:
-      "Embed a protected-payment checkout in your marketplace or service site. Buyers define terms, deposit cUSD, and track evidence — all without leaving your app.",
+      "Embed a protected-payment checkout in your marketplace or service site. Buyers define terms, deposit USDC, and track evidence — all without leaving your app.",
   },
   {
     title: "Escrow lifecycle API",
@@ -48,7 +48,7 @@ export default function DevelopersPage() {
               Developers
             </span>
             <h1 className="mt-3 text-[42px] leading-[1.05] tracking-[-0.025em] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[64px]">
-              Build protected cUSD payments into your product
+              Build protected USDC payments into your product
             </h1>
             <p className="mt-5 max-w-xl text-lg leading-relaxed text-muted">
               Reclaim is designed as a plug-and-play protection layer for Celo apps, marketplaces, and agentic commerce. Integrate protected payments without building escrow, disputes, or settlement from scratch.

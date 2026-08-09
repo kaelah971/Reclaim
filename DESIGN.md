@@ -1,7 +1,7 @@
 ---
 version: alpha
 name: Reclaim
-description: "The Proof Ledger — protected cUSD payments expressed as a calm, human-readable agreement from terms through settlement."
+description: "The Proof Ledger — protected USDC payments expressed as a calm, human-readable agreement from terms through settlement."
 colors:
   primary: "#231C15"
   page: "#F5EFE4"
@@ -91,7 +91,7 @@ components:
 
 ## Overview
 
-Reclaim is a protected-payment layer for cUSD commerce on Celo. It gives clients and digital workers one shared **Payment Room**: clear terms, funds held in escrow, delivery evidence, a fair dispute path, and an on-chain receipt.
+Reclaim is a protected-payment layer for USDC commerce on Celo. It gives clients and digital workers one shared **Payment Room**: clear terms, funds held in escrow, delivery evidence, a fair dispute path, and an on-chain receipt.
 
 The brand idea is **The Proof Ledger**. It makes an agreement visible from beginning to end:
 
@@ -138,7 +138,7 @@ The former memorial-style Playfair/Lora approach is replaced. Reclaim needs a mo
 |---|---|---|
 | Agreement / display | **Newsreader** | Landing-page statement, payment title, receipt title and major explanatory moments. It makes agreements feel human, not legalistic. |
 | Interface / body | **Georama** | Navigation, forms, body copy, buttons, statuses, claims and all functional UI. |
-| Data / verification | **IBM Plex Mono** | Dates, cUSD amounts, deadlines, state IDs, evidence identifiers, transaction hashes and receipt data. |
+| Data / verification | **IBM Plex Mono** | Dates, USDC amounts, deadlines, state IDs, evidence identifiers, transaction hashes and receipt data. |
 
 ### Type hierarchy
 
@@ -167,7 +167,7 @@ The supplied two-tier header, trust strip, cream hero, card elevation, and docum
 
 ### Payment Room hierarchy
 
-1. Current money state: amount, cUSD, escrow state, relevant deadline.
+1. Current money state: amount, USDC, escrow state, relevant deadline.
 2. What was agreed: deliverable, release rule and dispute window.
 3. The one next action for the current participant.
 4. Shared timeline: terms, deposit, acceptance, delivery, evidence, dispute and settlement.
@@ -196,13 +196,13 @@ On mobile, preserve a sticky money-state strip; stack the shared agreement befor
 
 ### Primary action
 
-Primary CTA is espresso with cream text: `Protect a payment`, `Deposit cUSD`, `Approve release`, or `Open dispute`. Use one primary action per decision area. A destructive action must be visually and verbally distinct; never hide it in a generic ellipsis menu.
+Primary CTA is espresso with cream text: `Protect a payment`, `Deposit USDC`, `Approve release`, or `Open dispute`. Use one primary action per decision area. A destructive action must be visually and verbally distinct; never hide it in a generic ellipsis menu.
 
 ### Payment state strip
 
 Shows amount, asset, current state, deadline and next owner. Example:
 
-> `100.00 cUSD · Funds protected · Delivery due 18 Jul · Seller action required`
+> `100.00 USDC · Funds protected · Delivery due 18 Jul · Seller action required`
 
 This remains visible in the Payment Room. Amounts and deadlines use IBM Plex Mono/tabular numerals.
 

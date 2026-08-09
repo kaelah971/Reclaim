@@ -318,6 +318,39 @@ export function buildAmendBudgetMessage(params: {
 }
 
 // ---------------------------------------------------------------------------
+// buildRunAgentMessage
+//
+// Signed authorization for ONE request-triggered resolution agent worker
+// iteration against an EXISTING agent. The message binds the agent identity
+// (agent id, escrow chain, canonical escrow contract, payment id) and the
+// run action, so a signature cannot be replayed for a different agent,
+// case, or action. The worker itself still enforces all policy, budget,
+// lease, and x402 protections — this signature only authorizes the request.
+// ---------------------------------------------------------------------------
+export function buildRunAgentMessage(params: {
+  agentId: string;
+  escrowChainId: string;
+  escrowPaymentId: string;
+}): string {
+  const timestamp = Date.now();
+  const nonce = crypto.randomUUID().slice(0, 12);
+  const authorizationExpiry = timestamp + AUTH_EXPIRY_WINDOW_MS;
+
+  return [
+    `${APP_NAME} - Run Resolution Agent`,
+    `Action: run_resolution_agent`,
+    `Agent ID: ${params.agentId}`,
+    `Escrow Chain ID: ${params.escrowChainId}`,
+    `Escrow Contract: ${CANONICAL_ESCROW_CONTRACT_ADDRESS}`,
+    `Escrow Payment ID: ${params.escrowPaymentId}`,
+    `Authorization Expires: ${authorizationExpiry}`,
+    `Timestamp: ${timestamp}`,
+    `Nonce: ${nonce}`,
+    `By signing this message, you confirm that you control this wallet and authorise running one resolution agent worker iteration for this agent.`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // buildRenewPolicyMessage
 //
 // Explicit, funder-signed renewal of an EXISTING agent's policy expiry.

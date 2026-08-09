@@ -36,7 +36,7 @@ export default function ForWorkersPage() {
               {
                 title: "Proof that funds exist before you start",
                 description:
-                  "Before you accept an agreement, the client defines the terms, and you can see the payment amount in cUSD. Once the client deposits, the funds are visible in escrow. You know the money is there before you begin the work.",
+                  "Before you accept an agreement, the client defines the terms, and you can see the payment amount in USDC. Once the client deposits, the funds are visible in escrow. You know the money is there before you begin the work.",
               },
               {
                 title: "Accepted terms you can rely on",

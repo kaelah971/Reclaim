@@ -2,7 +2,7 @@ import Button from "../ui/Button";
 
 export type PaymentActionLabel =
   | "Review terms"
-  | "Deposit cUSD"
+  | "Deposit USDC"
   | "Accept terms"
   | "Submit delivery"
   | "Request release"

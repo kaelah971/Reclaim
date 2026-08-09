@@ -1,11 +1,12 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import AgentHeader from "@/components/agent/AgentHeader";
 import AgentBudgetCard from "@/components/agent/AgentBudgetCard";
 import AgentPolicyRenewCard from "@/components/agent/AgentPolicyRenewCard";
+import AgentRunCard from "@/components/agent/AgentRunCard";
 import AgentEvidenceRequests from "@/components/agent/AgentEvidenceRequests";
 import AgentTimeline from "@/components/agent/AgentTimeline";
 import AgentReadyState from "@/components/agent/AgentReadyState";
@@ -13,6 +14,7 @@ import LoadingSkeleton from "@/components/ui/LoadingSkeleton";
 import ErrorState from "@/components/ui/ErrorState";
 import EmptyState from "@/components/ui/EmptyState";
 import Button from "@/components/ui/Button";
+import { usePayment } from "@/hooks/contracts/useReadContract";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -83,6 +85,20 @@ interface EvidenceRequest {
 export default function AgentControlRoomPage() {
   const params = useParams<{ paymentId: string }>();
   const paymentId = params?.paymentId ?? "";
+
+  // Safe bigint conversion for the on-chain payment state read — only pure
+  // numeric payment IDs are accepted (hyphen/space-formatted IDs are not).
+  const numericPaymentId = useMemo(() => {
+    if (!paymentId) return undefined;
+    if (!/^\d+$/.test(paymentId)) return undefined;
+    try {
+      return BigInt(paymentId);
+    } catch {
+      return undefined;
+    }
+  }, [paymentId]);
+
+  const { data: escrowPayment } = usePayment(numericPaymentId);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -258,6 +274,14 @@ export default function AgentControlRoomPage() {
               expiresAt={publicView.expiresAt}
               funderAddress={publicView.funderAddress}
               onRenewed={() => load()}
+            />
+
+            <AgentRunCard
+              agentId={publicView.id}
+              escrowPaymentId={publicView.identity.escrowPaymentId}
+              status={publicView.status}
+              paymentState={escrowPayment?.state ?? null}
+              onRan={() => load()}
             />
           </div>
         </div>

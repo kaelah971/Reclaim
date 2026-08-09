@@ -16,7 +16,7 @@ export default function CaseHeader({
   disputeId,
   paymentRef,
   amount,
-  asset = "cUSD",
+  asset = "USDC",
   status,
   statusVariant = "pending",
   reviewDeadline,

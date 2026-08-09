@@ -18,7 +18,7 @@ const lifecycleSteps = [
   },
   {
     step: "03",
-    title: "Deposit cUSD",
+    title: "Deposit USDC",
     description:
       "Once terms are clear, the client deposits the full payment amount into escrow on Celo. The funds are protected under the exact terms both sides reviewed. The client cannot withdraw unilaterally while the agreement is active.",
   },
@@ -118,7 +118,7 @@ export default function HowItWorksPage() {
                 </h3>
                 <ul className="mt-4 space-y-3 text-[15px] leading-relaxed text-ink">
                   <li>Define the deliverable, deadline, release rule, and evidence expectation clearly.</li>
-                  <li>Deposit cUSD into escrow under the agreed terms.</li>
+                  <li>Deposit USDC into escrow under the agreed terms.</li>
                   <li>Review delivery evidence against the terms.</li>
                   <li>Approve release or open a dispute within the dispute window.</li>
                 </ul>

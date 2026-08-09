@@ -14,7 +14,7 @@ export default function ForClientsPage() {
               Hold my funds safely until I receive what was agreed.
             </h1>
             <p className="mt-5 max-w-xl text-lg leading-relaxed text-muted">
-              Paying a remote worker should not mean hoping for the best. Reclaim protects your cUSD until the work is delivered and approved.
+              Paying a remote worker should not mean hoping for the best. Reclaim protects your USDC until the work is delivered and approved.
             </p>
           </div>
         </div>
@@ -41,12 +41,12 @@ export default function ForClientsPage() {
               {
                 title: "Define clear deliverables",
                 description:
-                  "Before any cUSD is deposited, you specify the exact deliverable, deadline, release rule, and the evidence you expect to receive. The worker sees every term and must accept before the agreement is locked.",
+                  "Before any USDC is deposited, you specify the exact deliverable, deadline, release rule, and the evidence you expect to receive. The worker sees every term and must accept before the agreement is locked.",
               },
               {
                 title: "Protect your funds",
                 description:
-                  "Your cUSD is held in escrow under the terms both sides reviewed. You cannot be debited twice. The worker cannot withdraw the funds without your approval or a reviewed settlement.",
+                  "Your USDC is held in escrow under the terms both sides reviewed. You cannot be debited twice. The worker cannot withdraw the funds without your approval or a reviewed settlement.",
               },
               {
                 title: "Review evidence against the terms",

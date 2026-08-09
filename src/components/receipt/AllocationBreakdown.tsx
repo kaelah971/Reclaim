@@ -10,7 +10,7 @@ interface AllocationBreakdownProps {
 
 export default function AllocationBreakdown({
   protectedAmount,
-  asset = "cUSD",
+  asset = "USDC",
   clientAllocation,
   workerAllocation,
   platformFee,
