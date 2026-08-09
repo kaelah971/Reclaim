@@ -289,3 +289,115 @@ integrationDescribe("SupabaseResolutionAgentStore — integration", () => {
     await expect(store.updateAgent(updated2, 1)).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// RA1R.7E regression — case-identity lookup binds to the CANONICAL escrow
+// identity regardless of chain-id format
+// ---------------------------------------------------------------------------
+
+describe("getAgentByCaseIdentity — canonical CAIP-2 chain binding (RA1R.7E)", () => {
+  const ROW = {
+    id: "0e8cd60c-cca5-4018-8db4-e8bbca44e0f0",
+    escrow_chain_id: "eip155:11142220",
+    escrow_contract_address: "0x1a1ca38d6ac538d491a5c0db2ed7fddc3aec709f",
+    escrow_payment_id: "1",
+    agent_id: "agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235",
+    goal: "Prepare this payment case for fair human review.",
+    status: "active",
+    case_wallet_address: "0x22bf4271a3f8f3c6885c0d2c825f06f9c9d7f72a",
+    encrypted_wallet_secret: {
+      iv: "iv_iv_iv_iv_iv",
+      version: 1,
+      algorithm: "AES-256-GCM",
+      ciphertext: "ciphertext",
+      authenticationTag: "tag_tag_tag_tag_tag",
+    },
+    funder_address: "0x76d7a718ccdc1c132c52d4c05ea0c2fa8e657486",
+    allowed_tools: ["evidence-quality-check", "case-refresh", "reclaim-dispute-brief-v1"],
+    approved_budget_atomic: 40000,
+    spent_budget_atomic: 0,
+    reserved_budget_atomic: 0,
+    current_plan: null,
+    observations: {
+      observedAt: 1,
+      escrowState: "delivered",
+      evidenceCount: 1,
+      evidenceVersionHash: "0xhash",
+      caseVersionHash: "0xhash",
+      unresolvedGaps: [],
+      hasMeaningfulChange: true,
+    },
+    evidence_version_hash: "0xhash",
+    case_version_hash: "0xhash",
+    expires_at: "2026-08-08T03:57:20.000Z",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    activated_at: new Date().toISOString(),
+    funded_at: null,
+    paused_at: null,
+    closed_at: null,
+    version: 8,
+    lease_owner: null,
+    lease_expires_at: null,
+    current_running_tool_id: null,
+  };
+
+  function makeLookupClient() {
+    const eqFilters: [string, string][] = [];
+    const builder = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn((key: string, value: string) => {
+        eqFilters.push([key, String(value)]);
+        return builder;
+      }),
+      maybeSingle: vi.fn().mockResolvedValue({ data: ROW, error: null }),
+    };
+    const client = {
+      from: vi.fn().mockReturnValue(builder),
+    };
+    return { client, eqFilters };
+  }
+
+  it("numeric chain id filter resolves the agent persisted with eip155:11142220", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const { client, eqFilters } = makeLookupClient();
+    const store = new SupabaseResolutionAgentStore(client as never);
+
+    // Exactly the filter the GET /api/resolution-agents?paymentId=1 endpoint
+    // generates: String(CANONICAL_ESCROW_CHAIN_ID) = "11142220".
+    const agent = await store.getAgentByCaseIdentity(
+      "11142220",
+      "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+      "1",
+    );
+
+    expect(agent).not.toBeNull();
+    expect(agent!.id).toBe("agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235");
+    expect(agent!.caseWalletAddress).toBe("0x22bf4271a3f8f3c6885c0d2c825f06f9c9d7f72a");
+    expect(agent!.policy.funderAddress).toBe("0x76d7a718ccdc1c132c52d4c05ea0c2fa8e657486");
+    expect(agent!.policy.approvedBudgetAtomic).toBe(40000n);
+    expect(agent!.budget.spentAtomic).toBe(0n);
+    expect(agent!.budget.reservedAtomic).toBe(0n);
+
+    // The chain filter must be normalized to the persisted CAIP-2 form.
+    const chainFilter = eqFilters.find(([k]) => k === "escrow_chain_id");
+    expect(chainFilter).toBeDefined();
+    expect(chainFilter![1]).toBe("eip155:11142220");
+  });
+
+  it("CAIP-2 chain id input passes through unchanged", async () => {
+    const { SupabaseResolutionAgentStore } = await import("../supabase");
+    const { client, eqFilters } = makeLookupClient();
+    const store = new SupabaseResolutionAgentStore(client as never);
+
+    const agent = await store.getAgentByCaseIdentity(
+      "eip155:11142220",
+      "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+      "1",
+    );
+
+    expect(agent).not.toBeNull();
+    const chainFilter = eqFilters.find(([k]) => k === "escrow_chain_id");
+    expect(chainFilter![1]).toBe("eip155:11142220");
+  });
+});

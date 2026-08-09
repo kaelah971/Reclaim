@@ -105,10 +105,17 @@ export class SupabaseResolutionAgentStore {
     contractAddress: string,
     paymentId: string,
   ): Promise<ResolutionAgent | null> {
+    // Agents are persisted with CAIP-2 chain ids ("eip155:11142220").
+    // Normalize a numeric input ("11142220") to the same canonical form so
+    // lookups always match the persisted binding regardless of caller format.
+    const normalizedChainId = chainId.startsWith("eip155:")
+      ? chainId
+      : `eip155:${chainId}`;
+
     const { data, error } = await this.client
       .from(TABLE_AGENTS)
       .select("*")
-      .eq("escrow_chain_id", chainId)
+      .eq("escrow_chain_id", normalizedChainId)
       .eq("escrow_contract_address", contractAddress.toLowerCase())
       .eq("escrow_payment_id", paymentId)
       .maybeSingle();
