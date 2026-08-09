@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useAccount,
   usePublicClient,
@@ -81,7 +81,7 @@ interface EscrowWriteCore {
 function useEscrowWriteCore(): EscrowWriteCore {
   const contract = getEscrowContractConfig();
   const publicClient = usePublicClient();
-  const { address: account, connector, isReconnecting } = useAccount();
+  const { address: account, chainId, connector, isReconnecting } = useAccount();
 
   const {
     writeContract,
@@ -96,6 +96,32 @@ function useEscrowWriteCore(): EscrowWriteCore {
 
   const [localError, setLocalError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
+
+  /**
+   * Reconcile stale chain errors with the LIVE connector chain. Once the
+   * wallet is confirmed to be on the escrow chain, a previous
+   * "Switch to Celo Sepolia" error is stale and must not remain rendered.
+   * Re-runs whenever the wagmi connection chainId changes (e.g. the user
+   * switches networks in the wallet).
+   */
+  useEffect(() => {
+    if (!connector || !account) return;
+    let cancelled = false;
+    connector
+      .getChainId()
+      .then((liveChainId) => {
+        if (cancelled) return;
+        if (liveChainId === getEscrowChainId()) {
+          setLocalError((prev) => (prev === ESCROW_SWITCH_CHAIN_ERROR ? null : prev));
+        }
+      })
+      .catch(() => {
+        // Unable to validate the live chain — leave any error in place.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connector, account, chainId]);
 
   /** Shared gates; returns the account when the write may proceed. */
   const passesGates = useCallback((): `0x${string}` | undefined => {
@@ -136,6 +162,9 @@ function useEscrowWriteCore(): EscrowWriteCore {
         setLocalError(ESCROW_SWITCH_CHAIN_ERROR);
         return false;
       }
+      // Live chain confirmed — clear any stale chain error from a previous
+      // attempt so it is never presented as current truth.
+      setLocalError((prev) => (prev === ESCROW_SWITCH_CHAIN_ERROR ? null : prev));
       return true;
     } catch {
       setLocalError("Network client unavailable. Please try again.");
@@ -150,6 +179,9 @@ function useEscrowWriteCore(): EscrowWriteCore {
 
   const executeSimple = useCallback(
     (functionName: SimpleEscrowFunction, paymentId: bigint) => {
+      // A new attempt clears old transient errors before fresh validation.
+      setLocalError(null);
+
       const gatedAccount = passesGates();
       if (!gatedAccount || !publicClient) return;
 
@@ -205,6 +237,9 @@ function useEscrowWriteCore(): EscrowWriteCore {
       paymentId: bigint,
       reference: `0x${string}`,
     ) => {
+      // A new attempt clears old transient errors before fresh validation.
+      setLocalError(null);
+
       const gatedAccount = passesGates();
       if (!gatedAccount || !publicClient) return;
 

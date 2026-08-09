@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, useEffect } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { getEscrowContractConfig } from "@/lib/contracts/config";
 
@@ -99,12 +99,15 @@ function setupWagmiMocks(
 }
 
 let latestApi: ReturnType<typeof useSubmitEvidenceHash> | null = null;
+let refresh: (() => void) | null = null;
 let root: Root | null = null;
 
 function Harness() {
   const api = useSubmitEvidenceHash();
+  const [, force] = useState(0);
   useEffect(() => {
     latestApi = api;
+    refresh = () => force((v) => v + 1);
   }, [api]);
   return null;
 }
@@ -116,10 +119,12 @@ async function mountHarness() {
   await act(async () => {
     root!.render(<Harness />);
   });
+  await act(async () => {});
 }
 
 beforeEach(() => {
   latestApi = null;
+  refresh = null;
   vi.clearAllMocks();
 });
 
@@ -215,5 +220,136 @@ describe("useSubmitEvidenceHash — live-chain hardening", () => {
       functionName: "submitEvidenceHash",
       args: [PAYMENT_ID, REFERENCE],
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stale-error lifecycle regression tests
+// ---------------------------------------------------------------------------
+
+describe("useSubmitEvidenceHash — stale chain error lifecycle", () => {
+  function setLiveChain(connector: { getChainId: ReturnType<typeof vi.fn> }, liveChainId: number, storeChainId: number) {
+    connector.getChainId.mockImplementation(() => Promise.resolve(liveChainId));
+    wagmiMocks.useAccount.mockReturnValue({
+      address: ACCOUNT,
+      chainId: storeChainId,
+      connector,
+      isReconnecting: false,
+      isConnected: true,
+      isConnecting: false,
+      isDisconnected: false,
+      status: "connected",
+    });
+  }
+
+  it("clears a previous mismatch error once live connector validation confirms 11142220", async () => {
+    const { connector, simulateContract, writeContract } = setupWagmiMocks({
+      storeChainId: CELO_MAINNET_ID,
+      isReconnecting: false,
+      liveChainId: CELO_MAINNET_ID,
+    });
+    await mountHarness();
+
+    // First attempt while the LIVE chain is 42220 — blocked with chain error.
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+    expect(latestApi!.error).toBe(ESCROW_SWITCH_CHAIN_ERROR);
+    expect(writeContract).not.toHaveBeenCalled();
+
+    // Wallet switches to Celo Sepolia: live connector + wagmi chainId update.
+    setLiveChain(connector, CELO_SEPOLIA_ID, CELO_SEPOLIA_ID);
+    await act(async () => {
+      refresh!();
+    });
+    await act(async () => {});
+
+    // The stale chain error must no longer be rendered.
+    expect(latestApi!.error).toBeNull();
+    expect(simulateContract).not.toHaveBeenCalled();
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  it("keeps the error and blocks the write when the LIVE chain is still 42220", async () => {
+    const { connector, simulateContract, writeContract } = setupWagmiMocks({
+      storeChainId: CELO_SEPOLIA_ID,
+      isReconnecting: false,
+      liveChainId: CELO_MAINNET_ID,
+    });
+    await mountHarness();
+
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+
+    // Reconciliation watcher re-runs but the live chain is still mainnet.
+    setLiveChain(connector, CELO_MAINNET_ID, CELO_MAINNET_ID);
+    await act(async () => {
+      refresh!();
+    });
+    await act(async () => {});
+
+    expect(latestApi!.error).toBe(ESCROW_SWITCH_CHAIN_ERROR);
+    expect(simulateContract).not.toHaveBeenCalled();
+    expect(writeContract).not.toHaveBeenCalled();
+
+    // A fresh attempt must still be blocked.
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+    expect(latestApi!.error).toBe(ESCROW_SWITCH_CHAIN_ERROR);
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  it("proceeds to the wallet write path when the LIVE chain is 11142220", async () => {
+    const { simulateContract, writeContract } = setupWagmiMocks({
+      storeChainId: CELO_SEPOLIA_ID,
+      isReconnecting: false,
+      liveChainId: CELO_SEPOLIA_ID,
+    });
+    await mountHarness();
+
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+    await act(async () => {});
+
+    expect(latestApi!.error).toBeNull();
+    expect(simulateContract).toHaveBeenCalledTimes(1);
+    expect(writeContract).toHaveBeenCalledTimes(1);
+    expect(writeContract.mock.calls[0][0]).toMatchObject({
+      chainId: CELO_SEPOLIA_ID,
+      functionName: "submitEvidenceHash",
+      args: [PAYMENT_ID, REFERENCE],
+    });
+  });
+
+  it("clears a prior transient error when a new submission attempt starts", async () => {
+    const { connector, simulateContract, writeContract } = setupWagmiMocks({
+      storeChainId: CELO_SEPOLIA_ID,
+      isReconnecting: false,
+      liveChainId: CELO_MAINNET_ID,
+    });
+    await mountHarness();
+
+    // Attempt 1 fails on live chain.
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+    expect(latestApi!.error).toBe(ESCROW_SWITCH_CHAIN_ERROR);
+
+    // Chain becomes correct; attempt 2 must start clean and reach the wallet.
+    setLiveChain(connector, CELO_SEPOLIA_ID, CELO_SEPOLIA_ID);
+    await act(async () => {
+      refresh!();
+    });
+    await act(async () => {
+      latestApi!.action(PAYMENT_ID, REFERENCE);
+    });
+    await act(async () => {});
+
+    expect(latestApi!.error).toBeNull();
+    expect(simulateContract).toHaveBeenCalledTimes(1);
+    expect(writeContract).toHaveBeenCalledTimes(1);
   });
 });
