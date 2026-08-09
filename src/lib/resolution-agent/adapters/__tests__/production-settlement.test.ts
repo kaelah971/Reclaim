@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 process.env.X402_SETTLEMENT_MODE = "celo-facilitator";
+process.env.X402_API_KEY = "x402_test_key_do_not_use";
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
@@ -180,16 +181,56 @@ describe("createProductionSettlementClient().settleEvidenceQualityCheck", () => 
     expect(result.error).toContain("rejected");
   });
 
-  it("fails safe when the settlement provider throws (no secret leakage)", async () => {
-    settlePaymentMock.mockRejectedValue(new Error("raw upstream detail: secret-abc"));
+  it("fails safe when the settlement provider throws — sanitized detail preserved, no secrets", async () => {
+    settlePaymentMock.mockRejectedValue(
+      new Error("Celo facilitator /settle failed: Facilitator settle failed (401): invalid api key"),
+    );
 
     const client = await loadProductionClient();
     const result = await client.settleEvidenceQualityCheck(baseParams());
 
     expect(result.success).toBe(false);
     expect(result.ambiguous).toBe(true);
-    expect(result.error).toBe("Facilitator settlement request failed.");
-    expect(result.error).not.toContain("secret-abc");
+    // Endpoint + status + reason must remain visible…
+    expect(result.error).toContain("POST https://api.x402.celo.org/settle");
+    expect(result.error).toContain("401");
+    expect(result.error).toContain("invalid api key");
+    // …while secrets never leak.
+    expect(result.error).not.toContain("x402_test_key");
+    expect(result.error).not.toMatch(/x402_[A-Za-z0-9]+/);
+  });
+
+  it("sanitizes signatures/long hex out of facilitator failure details", async () => {
+    const { sanitizeFacilitatorFailure } = (await import("../production")) as {
+      sanitizeFacilitatorFailure: (err: unknown, endpoint: string) => string;
+    };
+    const fakeSignature = `0x${"ab".repeat(64)}`;
+    const err = new Error(
+      `Facilitator settle failed (422): ${fakeSignature} authorization=${fakeSignature}`,
+    );
+    const safe = sanitizeFacilitatorFailure(err, "POST https://api.x402.celo.org/settle");
+    expect(safe).toContain("422");
+    expect(safe).not.toContain(fakeSignature);
+    expect(safe).not.toMatch(/0x[0-9a-fA-F]{40,}/);
+    expect(safe).not.toContain("authorization=");
+  });
+
+  it("missing X402_API_KEY fails BEFORE signing/settlement with an explicit config error", async () => {
+    const prev = process.env.X402_API_KEY;
+    delete process.env.X402_API_KEY;
+    try {
+      const client = await loadProductionClient();
+      const result = await client.settleEvidenceQualityCheck(baseParams());
+
+      expect(result.success).toBe(false);
+      expect(result.ambiguous).toBe(false);
+      expect(result.error).toContain("X402_API_KEY is not configured");
+      expect(result.error).toContain("/settle");
+      // No settlement request was attempted (fail before any signing).
+      expect(settlePaymentMock).not.toHaveBeenCalled();
+    } finally {
+      process.env.X402_API_KEY = prev;
+    }
   });
 
   it("case-refresh and dispute-brief settlements are not wired yet", async () => {

@@ -198,6 +198,15 @@ export interface EvidenceQualityCheckStore {
     | { kind: "created"; agentId: string; requestHash: string; state: string }
     | { kind: "existing"; agentId: string; requestHash: string; state: string }
   >;
+  releaseUnpaidToolExecution(params: {
+    agentId: string;
+    requestHash: string;
+    expectedAgentVersion: number;
+    now: number;
+  }): Promise<
+    | { kind: "released"; agentId: string; requestHash: string }
+    | { kind: "already_released"; agentId: string; requestHash: string }
+  >;
 }
 
 // ---------------------------------------------------------------------------

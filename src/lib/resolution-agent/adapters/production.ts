@@ -127,6 +127,34 @@ export async function buildAgentEip3009Payment(params: {
 // Settlement client (official Celo x402 facilitator)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Facilitator failure observability (RA1R.7L)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a SANITIZED facilitator failure detail from a thrown error.
+ * The @x402 HTTPFacilitatorClient surfaces the HTTP status and a body
+ * excerpt ("Facilitator settle failed (401): ..."); the provider prefixes
+ * it ("Celo facilitator /settle failed: ..."). We preserve endpoint,
+ * status, and reason while redacting anything that could carry secrets
+ * (API keys, long hex payloads/signatures, authorization blocks).
+ */
+export function sanitizeFacilitatorFailure(
+  err: unknown,
+  endpoint: string,
+): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const safe = raw
+    .replace(/sk-[a-zA-Z0-9_-]+/g, "[REDACTED_KEY]")
+    .replace(/x402_[A-Za-z0-9]+/gi, "[REDACTED_KEY]")
+    .replace(/0x[0-9a-fA-F]{40,}/g, "[REDACTED_HEX]")
+    .replace(/"[^"]*signature[^"]*"\s*:\s*"[^"]*"/gi, '"signature": "[REDACTED]"')
+    .replace(/authorization/g, "[authorization]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${endpoint} | ${safe.substring(0, 240) || "unknown facilitator error"}`;
+}
+
 export function createProductionSettlementClient(): ResolutionAgentX402SettlementClient {
   return {
     async settleEvidenceQualityCheck(params: {
@@ -160,6 +188,18 @@ export function createProductionSettlementClient(): ResolutionAgentX402Settlemen
           success: false,
           ambiguous: false,
           error: "Settlement provider is not the official Celo facilitator.",
+        };
+      }
+
+      // Fail fast with an EXPLICIT configuration error before any signing:
+      // the official facilitator requires X-API-Key on /settle.
+      if (!process.env.X402_API_KEY) {
+        return {
+          success: false,
+          ambiguous: false,
+          error:
+            "X402_API_KEY is not configured. The Celo facilitator requires " +
+            "an API key on POST https://api.x402.celo.org/settle.",
         };
       }
 
@@ -221,11 +261,13 @@ export function createProductionSettlementClient(): ResolutionAgentX402Settlemen
           receipt: settleResult.receipt,
           ambiguous: false,
         };
-      } catch {
+      } catch (err) {
+        // Preserve a sanitized facilitator failure (endpoint, HTTP status,
+        // reason) — never collapse everything into a generic message.
         return {
           success: false,
           ambiguous: true,
-          error: "Facilitator settlement request failed.",
+          error: sanitizeFacilitatorFailure(err, "POST https://api.x402.celo.org/settle"),
         };
       }
     },

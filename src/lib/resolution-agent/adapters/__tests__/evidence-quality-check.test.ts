@@ -282,6 +282,7 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
     appendEvent: mockAppendEvent as unknown as MockStore["appendEvent"],
     getAgentById: mockGetAgentById as unknown as MockStore["getAgentById"],
     reserveToolExecutionAtomically: mockReserveAtomic as unknown as MockStore["reserveToolExecutionAtomically"],
+    releaseUnpaidToolExecution: vi.fn().mockResolvedValue({ kind: "already_released", agentId: "", requestHash: "" }) as unknown as MockStore["releaseUnpaidToolExecution"],
   };
 
   const settlementClient: ResolutionAgentX402SettlementClient = {

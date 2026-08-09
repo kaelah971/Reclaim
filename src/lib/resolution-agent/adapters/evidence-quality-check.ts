@@ -473,6 +473,10 @@ async function createExecution(params: {
       payTo: CANONICAL_PAY_TO,
     });
   } catch {
+    // Settlement threw before any result — attempt to release the unpaid
+    // reservation (the release RPC independently verifies zero settlement
+    // before touching anything; best-effort, never fatal).
+    await releaseUnpaidReservation(store, agent.id, requestHash, currentAgentVersion, now);
     await store.updateToolExecution(agent.id, requestHash, {
       state: "failed_recoverable",
       failure_reason: "Settlement threw an unexpected error",
@@ -615,6 +619,30 @@ async function createExecution(params: {
 // ---------------------------------------------------------------------------
 // Helper: release reservation and mark execution as failed_unpaid
 // ---------------------------------------------------------------------------
+
+/**
+ * Best-effort atomic release of an UNPAID reservation after a settlement
+ * failure. The release RPC independently verifies zero settlement proof
+ * and idempotency before touching any state; never fatal.
+ */
+async function releaseUnpaidReservation(
+  store: EvidenceQualityCheckDependencies["store"],
+  agentId: string,
+  requestHash: string,
+  expectedVersion: number,
+  now: number,
+): Promise<void> {
+  try {
+    await store.releaseUnpaidToolExecution({
+      agentId,
+      requestHash,
+      expectedAgentVersion: expectedVersion,
+      now,
+    });
+  } catch {
+    // Best-effort — recovery can retry later; never fatal.
+  }
+}
 
 async function releaseReservationAndMarkFailed(
   store: EvidenceQualityCheckDependencies["store"],

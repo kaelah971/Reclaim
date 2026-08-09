@@ -166,6 +166,7 @@ function makeMockDependencies(): {
     updateAgent: vi.fn().mockImplementation((a: ResolutionAgent) => Promise.resolve(a)),
     appendEvent: vi.fn().mockResolvedValue(undefined),
     getAgentById: vi.fn().mockResolvedValue(makeAgent({ status: "running_tool", currentRunningToolId: "evidence-quality-check", budget: { approvedAtomic: 100000n, spentAtomic: 0n, reservedAtomic: 10000n } })),
+    releaseUnpaidToolExecution: vi.fn().mockResolvedValue({ kind: 'already_released', agentId: '', requestHash: '' }),
     reserveToolExecutionAtomically: vi.fn().mockResolvedValue({ kind: "created", agentId: "", requestHash: "", state: "reserved" }),
   };
 

@@ -778,6 +778,53 @@ export class SupabaseResolutionAgentStore {
     };
   }
 
+  /**
+   * Atomically release an UNPAID tool-execution reservation (RA1R.7L).
+   *
+   * The RPC release_unpaid_tool_execution verifies server-side that the
+   * execution has NO settlement proof (state != 'settled', no
+   * settlement_tx_hash, no payment_reference) and was not already released
+   * (released_unpaid_at), then releases reserved budget, clears
+   * current_running_tool_id, and returns the agent to 'active'. Settled
+   * executions can NEVER be released this way. Idempotent: a second call
+   * returns { kind: "already_released" } without double-releasing.
+   */
+  async releaseUnpaidToolExecution(params: {
+    agentId: string;
+    requestHash: string;
+    expectedAgentVersion: number;
+    now: number;
+  }): Promise<
+    | { kind: "released"; agentId: string; requestHash: string }
+    | { kind: "already_released"; agentId: string; requestHash: string }
+  > {
+    const { data, error } = await this.client.rpc(
+      "release_unpaid_tool_execution",
+      {
+        p_agent_id: params.agentId,
+        p_request_hash: params.requestHash,
+        p_expected_version: params.expectedAgentVersion,
+        p_now: new Date(params.now).toISOString(),
+      },
+    );
+
+    if (error) {
+      const msg = error.message || "";
+      if (msg.includes("Version conflict")) throw new Error("Version conflict");
+      if (msg.includes("cannot be released")) {
+        throw new Error("Execution has settlement proof — release denied");
+      }
+      throw error;
+    }
+
+    const result = data as { kind: string; agent_id: string; request_hash: string };
+    return {
+      kind: result.kind as "released" | "already_released",
+      agentId: result.agent_id,
+      requestHash: result.request_hash,
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Worker — get latest tool execution
   // -------------------------------------------------------------------------
