@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+/*
+ * Font stacks — self-hosted, no network dependency (RA1R.9A-FONT).
+ * next/font/google is intentionally NOT used; the previous Google Fonts
+ * download repeatedly timed out the webpack dev build.
+ * Variable names are preserved so all existing
+ * font-[family-name:var(--font-*)] utilities keep working.
+ */
+:root {
+  --font-newsreader: Georgia, "Times New Roman", serif;
+  --font-georama: system-ui, Arial, sans-serif;
+  --font-ibm-plex-mono: ui-monospace, Consolas, monospace;
+}
+
 @theme inline {
   --color-primary: #231C15;
   --color-page: #F5EFE4;

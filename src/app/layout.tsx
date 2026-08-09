@@ -1,34 +1,9 @@
 import type { Metadata } from "next";
-import { Newsreader, Georama, IBM_Plex_Mono } from "next/font/google";
 import { cookies } from "next/headers";
 import { cookieToInitialState } from "wagmi";
 import { wagmiConfig } from "@/lib/web3/config";
 import Web3Provider from "@/providers/Web3Provider";
 import "./globals.css";
-
-const newsreader = Newsreader({
-  variable: "--font-newsreader",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  style: ["normal", "italic"],
-  display: "swap",
-});
-
-const georama = Georama({
-  variable: "--font-georama",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  style: ["normal", "italic"],
-  display: "swap",
-});
-
-const ibmPlexMono = IBM_Plex_Mono({
-  variable: "--font-ibm-plex-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  style: ["normal", "italic"],
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "Reclaim — Pay with proof",
@@ -45,10 +20,7 @@ export default async function RootLayout({
   const initialState = cookieToInitialState(wagmiConfig, cookieHeader);
 
   return (
-    <html
-      lang="en"
-      className={`${newsreader.variable} ${georama.variable} ${ibmPlexMono.variable} antialiased`}
-    >
+    <html lang="en" className="antialiased">
       <body className="min-h-screen bg-page text-ink font-[family-name:var(--font-georama)]">
         <Web3Provider initialState={initialState}>{children}</Web3Provider>
       </body>
