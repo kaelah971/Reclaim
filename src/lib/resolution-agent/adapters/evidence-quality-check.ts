@@ -28,7 +28,7 @@ import {
   computeEvidenceCheckHash,
   EVIDENCE_CHECK_SERVICE_IDENTIFIER,
 } from "../../x402/requestHash";
-import { applySpend, releaseReservation } from "../budget";
+import { applySpend } from "../budget";
 import { transitionAgentStatus } from "../state-machine";
 import {
   EVIDENCE_QUALITY_CHECK_PRICE_ATOMIC,
@@ -500,7 +500,7 @@ async function createExecution(params: {
     // Settlement threw before any result — attempt to release the unpaid
     // reservation (the release RPC independently verifies zero settlement
     // before touching anything; best-effort, never fatal).
-    await releaseUnpaidReservation(store, agent.id, requestHash, currentAgentVersion, now);
+    await releaseUnpaidReservation(store, agent.id, requestHash, now);
     await store.updateToolExecution(agent.id, requestHash, {
       state: "failed_recoverable",
       failure_reason: "Settlement threw an unexpected error",
@@ -647,20 +647,23 @@ async function createExecution(params: {
 /**
  * Best-effort atomic release of an UNPAID reservation after a settlement
  * failure. The release RPC independently verifies zero settlement proof
- * and idempotency before touching any state; never fatal.
+ * and idempotency before touching any state; never fatal. The expected
+ * agent version is READ FRESH at release time — the reserve RPC bumps the
+ * version, so a stale pre-reservation version would fail with a Version
+ * conflict and strand the reservation.
  */
 async function releaseUnpaidReservation(
   store: EvidenceQualityCheckDependencies["store"],
   agentId: string,
   requestHash: string,
-  expectedVersion: number,
   now: number,
 ): Promise<void> {
   try {
+    const expectedAgentVersion = await store.getAgentVersion(agentId);
     await store.releaseUnpaidToolExecution({
       agentId,
       requestHash,
-      expectedAgentVersion: expectedVersion,
+      expectedAgentVersion,
       now,
     });
   } catch {
@@ -671,20 +674,22 @@ async function releaseUnpaidReservation(
 async function releaseReservationAndMarkFailed(
   store: EvidenceQualityCheckDependencies["store"],
   originalAgent: ResolutionAgent,
-  runningAgent: ResolutionAgent,
+  _runningAgent: ResolutionAgent,
   requestHash: string,
   now: number,
-  currentVersion: number,
+  _currentVersion: number,
   reason: string,
 ): Promise<void> {
-  const releasedAgent: ResolutionAgent = {
-    ...runningAgent,
-    budget: releaseReservation(runningAgent.budget, CANONICAL_PRICE),
-    currentRunningToolId: null,
-  };
-  const activeAgent = transitionAgentStatus(releasedAgent, "active", { now });
+  // Use the ATOMIC unpaid-release path with a FRESH version read: the
+  // reserve RPC already bumped the agent version, so the stale
+  // pre-reservation version would fail with a Version conflict.
+  await releaseUnpaidReservation(store, originalAgent.id, requestHash, now);
 
-  await store.updateAgent(activeAgent, currentVersion).catch(() => { /* best effort */ });
+  // Re-read the released agent state for the audit transition (best-effort).
+  const released = await store.getAgentById(originalAgent.id).catch(() => null);
+  if (released && released.status === "active") {
+    // No further state mutation needed — the RPC already restored active.
+  }
 
   // Mark execution as failed_unpaid
   await store.updateToolExecution(originalAgent.id, requestHash, {

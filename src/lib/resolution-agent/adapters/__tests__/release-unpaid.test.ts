@@ -208,4 +208,30 @@ describe("adapter — release on settlement throw", () => {
       expect(updated.budget.spentAtomic).toBe(0n);
     }
   });
+
+  it("release reads the agent version FRESH (reserve bumps it), never the stale pre-reservation version", async () => {
+    // The reserve RPC increments the agent version; a release using the
+    // pre-reservation version would hit Version conflict and strand the
+    // reservation. The adapter must re-read the version at release time.
+    const deps = makeDeps(new Error("Facilitator settle failed (401): invalid api key"));
+    const agent = makeAgent();
+    // Pre-reservation read returns 12 (stale); release-time read returns 13.
+    (deps.store.getAgentVersion as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(12) // before reserve
+      .mockResolvedValue(13); // fresh read at release
+
+    const result = await executeEvidenceQualityCheck({
+      agent,
+      plan: agent.plan!,
+      action,
+      leaseContext: lease,
+      now: Date.now(),
+      dependencies: deps,
+    });
+
+    expect(result.kind).toBe("failed_recoverable");
+    expect(deps.store.releaseUnpaidToolExecution).toHaveBeenCalledTimes(1);
+    const releaseCall = (deps.store.releaseUnpaidToolExecution as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(releaseCall.expectedAgentVersion).toBe(13); // fresh, not 12
+  });
 });

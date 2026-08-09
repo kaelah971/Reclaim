@@ -210,7 +210,9 @@ export function createProductionSettlementClient(): ResolutionAgentX402Settlemen
         payTo,
         amount: expectedPriceAtomic.toString(),
         maxTimeoutSeconds: 3600,
-        extra: {},
+        // The official facilitator requires the token's EIP-712 metadata in
+        // extra (same shape as buildEvidenceCheckPaymentRequirements).
+        extra: { name: "USDC", version: "2" },
       };
 
       try {

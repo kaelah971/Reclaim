@@ -163,6 +163,9 @@ describe("createProductionSettlementClient().settleEvidenceQualityCheck", () => 
         amount: "10000",
       }),
     );
+    // The official facilitator requires the token's EIP-712 metadata in
+    // the requirement extra — missing it caused /verify invalid_format.
+    expect(requirement.extra).toEqual({ name: "USDC", version: "2" });
     expect(requirement).toEqual(
       expect.objectContaining({ scheme: "exact", amount: "10000" }),
     );
