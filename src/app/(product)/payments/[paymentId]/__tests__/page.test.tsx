@@ -61,4 +61,19 @@ describe("Payment Room — DeliverySubmitted worker evidence navigation", () => 
     // The availability check is a read-only GET (best-effort).
     expect(source).toContain(`/api/payments/\${paymentIdStr}/review-packet`);
   });
+
+  it("renders 'View receipt' for the Released state", () => {
+    const source = readPageSource();
+
+    // The receipt action only appears in the Released block…
+    const releasedBlock = source.slice(source.indexOf('payment.state === "Released"'));
+    expect(releasedBlock).toContain("View receipt");
+    // …and links to the existing settlement-receipt route with the payment id.
+    expect(releasedBlock).toContain(`/receipts/\${paymentIdStr}`);
+  });
+
+  it("keeps the receipt as the final accord step", () => {
+    const source = readPageSource();
+    expect(source).toContain("Receipt");
+  });
 });

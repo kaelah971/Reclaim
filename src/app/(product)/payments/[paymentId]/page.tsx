@@ -480,11 +480,18 @@ export default function PaymentRoomPage() {
 
   if (payment.state === "Released") {
     primaryActionContent = (
-      <Notice variant="success">
-        <p className="text-[14px] leading-relaxed">
-          Payment released. Funds have been transferred to the worker.
-        </p>
-      </Notice>
+      <div className="space-y-4">
+        <Notice variant="success">
+          <p className="text-[14px] leading-relaxed">
+            Payment released. Funds have been transferred to the worker.
+          </p>
+        </Notice>
+        <Link href={`/receipts/${paymentIdStr}`}>
+          <Button variant="primary" size="lg" className="w-full">
+            View receipt
+          </Button>
+        </Link>
+      </div>
     );
   } else if (payment.state === "Cancelled") {
     primaryActionContent = (

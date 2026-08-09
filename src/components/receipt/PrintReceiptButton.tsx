@@ -84,7 +84,7 @@ export default function PrintReceiptButton({
         primaryLabel="Got it"
         onPrimary={() => setShareOpen(false)}
       >
-        <p>Receipt sharing will be enabled when real receipt records are connected.</p>
+        <p>This receipt is a public settlement record. Share the receipt link or print it for your records.</p>
       </Dialog>
     </div>
   );
