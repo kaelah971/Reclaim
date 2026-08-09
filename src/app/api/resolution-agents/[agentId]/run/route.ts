@@ -35,6 +35,12 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAuth } from "@/lib/resolution-agent/api/auth";
+
+// Serverless execution budget: one worker iteration may run up to
+// DEFAULT_MAX_ITERATION_MS (45s) plus store/observer overhead. 60s keeps a
+// single request-triggered iteration inside the function budget without any
+// background work — there is no cron, no loop, and no scheduled execution.
+export const maxDuration = 60;
 import {
   createStore,
   runResolutionAgentIteration,

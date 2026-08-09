@@ -1,0 +1,5 @@
+# Dev/session/probe scripts — never deployed, never executed on the server.
+scripts/
+
+# Local env example — not needed at build/runtime on Vercel.
+.env.example
