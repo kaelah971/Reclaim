@@ -71,12 +71,12 @@ export default function Dialog({
 
       <div
         ref={dialogRef}
-        className="relative z-10 w-full max-w-lg rounded-[--radius-card] bg-surface shadow-[--shadow-modal] mx-4 mb-4 sm:mb-0 sm:mx-0"
+        className="document-card relative z-10 mx-4 mb-4 w-full max-w-lg rounded-[--radius-card] bg-surface shadow-[--shadow-modal] sm:mx-0 sm:mb-0"
       >
         <div className="px-6 pt-6 pb-4">
           <h2
             id="dialog-title"
-            className="text-xl font-[family-name:var(--font-georama)] font-semibold text-ink"
+            className="text-[26px] font-[family-name:var(--font-newsreader)] font-medium leading-[1.15] tracking-[-0.02em] text-ink"
           >
             {title}
           </h2>

@@ -19,8 +19,9 @@ const variantStyles: Record<BadgeVariant, string> = {
 export default function StatusBadge({ variant, label, className = "" }: StatusBadgeProps) {
   return (
     <span
-      className={`inline-flex items-center rounded-[--radius-pill] px-3 py-1 text-[13px] font-medium leading-none ${variantStyles[variant]} ${className}`}
+      className={`inline-flex items-center gap-1.5 rounded-[--radius-pill] border border-current/10 px-2.5 py-1 font-[family-name:var(--font-ibm-plex-mono)] text-[12px] font-medium leading-none tabular-nums shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] ${variantStyles[variant]} ${className}`}
     >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
       {label}
     </span>
   );

@@ -81,6 +81,7 @@ export const shadows = {
 export const navigation = {
   marketing: [
     { label: "How it works", href: "/how-it-works" },
+    { label: "Docs", href: "/docs" },
     { label: "For clients", href: "/for-clients" },
     { label: "For workers", href: "/for-workers" },
     { label: "Developers", href: "/developers" },

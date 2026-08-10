@@ -16,8 +16,9 @@ export default function SignInPage() {
   };
 
   return (
-    <section className="mx-auto max-w-[1440px] px-4 py-16 md:px-6 md:py-24">
-      <div className="mx-auto max-w-lg text-center">
+    <section className="ledger-field">
+      <div className="ledger-content mx-auto grid max-w-[1440px] gap-10 px-4 py-16 md:px-6 md:py-24 lg:grid-cols-[0.85fr_1.15fr] lg:items-start">
+        <div className="max-w-lg lg:pt-8">
         <span className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
           Sign in
         </span>
@@ -94,8 +95,10 @@ export default function SignInPage() {
             </div>
           )}
         </div>
+        </div>
 
-        <div className="mt-10 space-y-6 text-left">
+        <div className="paper-stack relative">
+          <div className="relative z-10 space-y-6 text-left">
           <div className="rounded-[--radius-card] border border-border bg-surface p-6">
             <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
               How wallet access works
@@ -139,6 +142,7 @@ export default function SignInPage() {
               your key to your Payment Rooms. Keep your wallet recovery phrase safe; it
               is the only way to restore access.
             </p>
+          </div>
           </div>
         </div>
       </div>

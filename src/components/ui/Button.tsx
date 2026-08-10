@@ -10,19 +10,19 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-primary text-page hover:bg-utility focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
+    "border border-primary bg-primary text-page shadow-[0_6px_16px_rgba(35,28,21,0.16)] hover:bg-utility focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
   secondary:
-    "bg-page text-ink border border-border hover:bg-input focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
+    "border border-border bg-surface text-ink hover:bg-input focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
   destructive:
     "bg-red-700 text-white hover:bg-red-800 focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2",
   ghost:
-    "text-ink hover:bg-input focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
+    "border border-transparent text-ink hover:border-border hover:bg-surface focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  md: "h-12 px-5 text-[15px]",
+  md: "h-11 px-5 text-[14px]",
   sm: "h-9 px-4 text-[13px]",
-  lg: "h-14 px-7 text-base",
+  lg: "h-12 px-6 text-[15px]",
 };
 
 const Button = forwardRef<HTMLButtonElement, ButtonProps>(

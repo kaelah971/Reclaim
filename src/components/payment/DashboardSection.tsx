@@ -33,7 +33,7 @@ export default function DashboardSection({
       </div>
       <div className="mt-4">
         {empty ? (
-          <div className="rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-10 text-center">
+          <div className="document-card rounded-[--radius-card] border-dashed px-6 py-10 text-center">
             {emptyTitle && (
               <p className="text-[15px] font-medium text-ink">{emptyTitle}</p>
             )}

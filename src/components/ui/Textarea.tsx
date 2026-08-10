@@ -34,7 +34,7 @@ const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
           id={inputId}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
-          className={`min-h-[120px] rounded-[--radius-input] border bg-input px-4 py-3 text-[15px] text-ink placeholder:text-muted transition-colors focus:outline-none resize-vertical ${borderColor} disabled:cursor-not-allowed disabled:opacity-60 ${className}`}
+          className={`min-h-[120px] rounded-[--radius-input] border bg-input/80 px-4 py-3 text-[15px] text-ink shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] placeholder:text-muted transition-colors focus:bg-surface focus:outline-none resize-vertical ${borderColor} disabled:cursor-not-allowed disabled:opacity-60 ${className}`}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={
             error

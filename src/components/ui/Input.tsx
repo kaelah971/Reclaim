@@ -34,7 +34,7 @@ const Input = forwardRef<HTMLInputElement, InputProps>(
           id={inputId}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
-          className={`h-12 rounded-[--radius-input] border bg-input px-4 text-[15px] text-ink placeholder:text-muted transition-colors focus:outline-none ${borderColor} disabled:cursor-not-allowed disabled:opacity-60 ${className}`}
+          className={`h-11 rounded-[--radius-input] border bg-input/80 px-4 text-[15px] text-ink shadow-[inset_0_1px_0_rgba(255,255,255,0.65)] placeholder:text-muted transition-colors focus:bg-surface focus:outline-none ${borderColor} disabled:cursor-not-allowed disabled:opacity-60 ${className}`}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={
             error

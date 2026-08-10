@@ -9,10 +9,13 @@ interface NoticeProps {
 }
 
 const variantStyles: Record<NoticeVariant, string> = {
-  info: "bg-input text-ink border-border",
-  success: "bg-status-protected-bg text-status-protected-text border-success/30",
-  warning: "bg-status-disputed-bg text-status-disputed-text border-status-disputed-text/20",
-  protected: "bg-status-protected-bg text-status-protected-text border-success/30",
+  info: "bg-surface text-ink border-border",
+  success:
+    "bg-status-protected-bg text-status-protected-text border-success/30",
+  warning:
+    "bg-status-disputed-bg text-status-disputed-text border-status-disputed-text/20",
+  protected:
+    "bg-status-protected-bg text-status-protected-text border-success/30",
 };
 
 export default function Notice({
@@ -22,7 +25,7 @@ export default function Notice({
 }: NoticeProps) {
   return (
     <div
-      className={`rounded-[--radius-card] border px-5 py-4 text-[15px] leading-relaxed ${variantStyles[variant]} ${className}`}
+      className={`rounded-[--radius-card] border px-5 py-4 text-[15px] leading-relaxed shadow-[0_8px_24px_rgba(35,28,21,0.07)] ${variantStyles[variant]} ${className}`}
     >
       {children}
     </div>

@@ -58,17 +58,17 @@ export default function MobileNavigation({
       aria-label="Navigation menu"
     >
       <div
-        className="absolute inset-0 bg-ink/30"
+        className="absolute inset-0 bg-ink/45 backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden="true"
       />
 
       <div
         ref={panelRef}
-        className="absolute right-0 top-0 h-full w-[300px] max-w-[85vw] bg-surface shadow-[--shadow-modal]"
+        className="paper-stack absolute right-0 top-0 h-full w-[320px] max-w-[88vw] overflow-y-auto border-l border-border bg-page shadow-[--shadow-modal]"
       >
-        <div className="flex items-center justify-between border-b border-border px-4 h-16">
-          <span className="text-lg font-[family-name:var(--font-newsreader)] font-medium text-ink">
+        <div className="relative z-10 flex h-16 items-center justify-between border-b border-border bg-surface px-4">
+          <span className="text-xl font-[family-name:var(--font-newsreader)] font-medium tracking-[-0.02em] text-ink">
             Menu
           </span>
           <button
@@ -94,12 +94,15 @@ export default function MobileNavigation({
           </button>
         </div>
 
-        <nav className="flex flex-col p-4 gap-1" aria-label="Mobile navigation">
+        <nav
+          className="relative z-10 flex flex-col gap-1 bg-page p-4"
+          aria-label="Mobile navigation"
+        >
           {items.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className="rounded-[--radius-button] px-4 py-3 text-[15px] font-medium text-ink hover:bg-input transition-colors"
+              className="rounded-[--radius-button] border border-transparent px-4 py-3 text-[15px] font-medium text-ink transition-colors hover:border-border hover:bg-surface"
               onClick={onClose}
             >
               {item.label}
@@ -107,7 +110,7 @@ export default function MobileNavigation({
           ))}
         </nav>
 
-        <div className="border-t border-border p-4 flex flex-col gap-3">
+        <div className="relative z-10 flex flex-col gap-3 border-t border-border bg-surface p-4">
           {showWallet && <WalletButton />}
           {ctaLabel && ctaHref && (
             <Link

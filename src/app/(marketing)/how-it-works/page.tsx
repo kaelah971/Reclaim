@@ -66,15 +66,38 @@ const afterSettlementStages: AccordStage[] = [
 export default function HowItWorksPage() {
   return (
     <>
-      <section className="bg-hero">
-        <div className="mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
-          <div className="mx-auto max-w-3xl text-center">
+      <section className="ledger-field">
+        <div className="ledger-content mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
+          <div className="grid items-center gap-10 lg:grid-cols-[0.95fr_1.05fr]">
+            <div className="max-w-3xl">
             <h1 className="text-[42px] leading-[1.05] tracking-[-0.025em] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[64px]">
               How Reclaim protects a payment
             </h1>
             <p className="mt-5 text-lg leading-relaxed text-muted">
               Every protected payment follows the same lifecycle: from defining what the work is, through delivery and evidence, to settlement and a readable receipt.
             </p>
+            </div>
+
+            <div className="paper-stack relative hidden min-h-[340px] lg:block">
+              <div className="lifecycle-record-float ml-auto mt-12 max-w-[520px]">
+                <div className="document-card relative z-10 rounded-[--radius-card] p-6">
+                  <p className="text-[13px] font-semibold uppercase tracking-[0.15em] text-muted">
+                    Lifecycle record
+                  </p>
+                  <div className="mt-5 space-y-3">
+                    {["Terms", "Funds", "Delivery", "Evidence", "Resolution", "Receipt"].map((item, index) => (
+                      <div key={item} className="flex items-center gap-3">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-input font-[family-name:var(--font-ibm-plex-mono)] text-[11px] text-gold">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="text-[14px] font-medium text-ink">{item}</span>
+                        <span className="ml-auto h-px flex-1 bg-border" aria-hidden="true" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>

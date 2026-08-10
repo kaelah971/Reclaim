@@ -57,3 +57,16 @@ describe("landing page hero demo entry point", () => {
     expect(text).toContain("end-to-end");
   });
 });
+
+describe("landing page supporting content", () => {
+  it("keeps the detailed documentation sections off the landing page", async () => {
+    await mountPage();
+
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain("How it works");
+    expect(text).not.toContain("One shared Payment Room");
+    expect(text).not.toContain(
+      "AI prepares the case. People decide. The contract settles.",
+    );
+  });
+});

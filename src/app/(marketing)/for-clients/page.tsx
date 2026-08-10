@@ -4,9 +4,10 @@ import Button from "@/components/ui/Button";
 export default function ForClientsPage() {
   return (
     <>
-      <section className="bg-hero">
-        <div className="mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
-          <div className="mx-auto max-w-3xl">
+      <section className="ledger-field">
+        <div className="ledger-content mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
+          <div className="grid items-center gap-10 lg:grid-cols-[0.95fr_1.05fr]">
+            <div className="max-w-3xl">
             <span className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
               For clients
             </span>
@@ -16,6 +17,37 @@ export default function ForClientsPage() {
             <p className="mt-5 max-w-xl text-lg leading-relaxed text-muted">
               Paying a remote worker should not mean hoping for the best. Reclaim protects your USDC until the work is delivered and approved.
             </p>
+            </div>
+
+            <div className="paper-stack relative hidden min-h-[340px] lg:block">
+              <div className="document-card relative z-10 ml-auto mt-12 max-w-[520px] rounded-[--radius-card] p-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-[13px] font-semibold uppercase tracking-[0.15em] text-muted">
+                      Client terms
+                    </p>
+                    <h2 className="mt-2 font-[family-name:var(--font-newsreader)] text-[26px] font-medium text-ink">
+                      Funds protected until approval
+                    </h2>
+                  </div>
+                  <span className="rounded-[--radius-pill] bg-status-protected-bg px-3 py-1 text-[12px] font-medium text-status-protected-text">
+                    Protected
+                  </span>
+                </div>
+                <div className="mt-6 grid gap-3 text-[13px]">
+                  {[
+                    ["Amount", "100.00 USDC"],
+                    ["Deliverable", "Mobile-ready landing page"],
+                    ["Release", "Approve or dispute within 48h"],
+                  ].map(([label, value]) => (
+                    <div key={label} className="flex items-center justify-between border-b border-border pb-2">
+                      <span className="text-muted">{label}</span>
+                      <span className="max-w-[240px] text-right font-medium text-ink">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>

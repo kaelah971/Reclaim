@@ -22,7 +22,7 @@ export default function EmptyState({
 }: EmptyStateProps) {
   return (
     <div
-      className={`flex flex-col items-center justify-center rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-16 text-center ${className}`}
+      className={`document-card flex flex-col items-center justify-center rounded-[--radius-card] px-6 py-14 text-center ${className}`}
     >
       {icon && (
         <div className="mb-5 text-muted/60" aria-hidden="true">
@@ -41,7 +41,7 @@ export default function EmptyState({
         (actionHref ? (
           <a
             href={actionHref}
-            className="mt-6 inline-flex h-11 items-center rounded-[--radius-button] bg-primary px-5 text-[15px] font-semibold text-page transition-colors hover:bg-utility"
+            className="mt-6 inline-flex h-11 items-center rounded-[--radius-button] border border-primary bg-primary px-5 text-[15px] font-semibold text-page shadow-[0_6px_16px_rgba(35,28,21,0.16)] transition-colors hover:bg-utility"
           >
             {actionLabel}
           </a>

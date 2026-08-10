@@ -41,9 +41,10 @@ const integrationSurfaces = [
 export default function DevelopersPage() {
   return (
     <>
-      <section className="bg-hero">
-        <div className="mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
-          <div className="mx-auto max-w-3xl">
+      <section className="ledger-field">
+        <div className="ledger-content mx-auto max-w-[1440px] px-4 pb-16 pt-14 md:px-6 md:pb-24 md:pt-20">
+          <div className="grid items-center gap-10 lg:grid-cols-[0.95fr_1.05fr]">
+            <div className="max-w-3xl">
             <span className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
               Developers
             </span>
@@ -53,6 +54,35 @@ export default function DevelopersPage() {
             <p className="mt-5 max-w-xl text-lg leading-relaxed text-muted">
               Reclaim is designed as a plug-and-play protection layer for Celo apps, marketplaces, and agentic commerce. Integrate protected payments without building escrow, disputes, or settlement from scratch.
             </p>
+            </div>
+
+            <div className="paper-stack relative hidden min-h-[340px] lg:block">
+              <div className="document-card relative z-10 ml-auto mt-12 max-w-[520px] rounded-[--radius-card] p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <p className="text-[13px] font-semibold uppercase tracking-[0.15em] text-muted">
+                    API preview
+                  </p>
+                  <span className="font-[family-name:var(--font-ibm-plex-mono)] text-[12px] text-gold">
+                    POST /protected-payments
+                  </span>
+                </div>
+                <pre className="mt-5 overflow-hidden rounded-[--radius-input] border border-border bg-primary p-4 text-[12px] leading-relaxed text-page">
+{`{
+  "amount": "100.00",
+  "asset": "USDC",
+  "releaseRule": "approval_or_48h",
+  "evidence": "final_files"
+}`}
+                </pre>
+                <div className="mt-4 grid grid-cols-2 gap-2 text-[12px] text-muted">
+                  {["Payment links", "Escrow lifecycle", "x402 checks", "Receipts"].map((item) => (
+                    <span key={item} className="rounded-[--radius-button] border border-border bg-input px-3 py-2">
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
