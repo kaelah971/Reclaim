@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import type { ReactNode } from "react";
 
 export type ReceiptFilterValue = "all" | "released" | "client-outcome" | "worker-outcome" | "split" | "recent";
 
-const filters: { value: ReceiptFilterValue; label: string }[] = [
+export const RECEIPT_FILTERS: { value: ReceiptFilterValue; label: string }[] = [
   { value: "all", label: "All" },
   { value: "released", label: "Released" },
   { value: "client-outcome", label: "Client outcome" },
@@ -41,25 +41,33 @@ const emptyStateMessages: Record<ReceiptFilterValue, { title: string; descriptio
 };
 
 interface ReceiptFiltersProps {
+  value: ReceiptFilterValue;
+  onChange: (value: ReceiptFilterValue) => void;
   className?: string;
+  /** Render the receipt list when there are eligible receipts. */
+  children?: ReactNode;
 }
 
-export default function ReceiptFilters({ className = "" }: ReceiptFiltersProps) {
-  const [active, setActive] = useState<ReceiptFilterValue>("all");
-  const msg = emptyStateMessages[active];
+export default function ReceiptFilters({
+  value,
+  onChange,
+  className = "",
+  children,
+}: ReceiptFiltersProps) {
+  const msg = emptyStateMessages[value];
 
   return (
     <div className={className}>
       <div className="flex overflow-x-auto gap-1 pb-2" role="tablist" aria-label="Receipt filters">
-        {filters.map((f) => (
+        {RECEIPT_FILTERS.map((f) => (
           <button
             key={f.value}
             type="button"
             role="tab"
-            aria-selected={active === f.value}
-            onClick={() => setActive(f.value)}
+            aria-selected={value === f.value}
+            onClick={() => onChange(f.value)}
             className={`shrink-0 rounded-[--radius-pill] px-4 py-2 text-[14px] font-medium transition-colors ${
-              active === f.value
+              value === f.value
                 ? "bg-primary text-page"
                 : "text-muted hover:text-ink hover:bg-input"
             }`}
@@ -69,17 +77,18 @@ export default function ReceiptFilters({ className = "" }: ReceiptFiltersProps) 
         ))}
       </div>
 
-      <div className="mt-6 rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-14 text-center">
-        <h3 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
-          {msg.title}
-        </h3>
-        <p className="mt-2 max-w-md mx-auto text-[15px] leading-relaxed text-muted">
-          {msg.description}
-        </p>
+      <div className="mt-6">
+        {children ?? (
+          <div className="rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-14 text-center">
+            <h3 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
+              {msg.title}
+            </h3>
+            <p className="mt-2 max-w-md mx-auto text-[15px] leading-relaxed text-muted">
+              {msg.description}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-
-
-

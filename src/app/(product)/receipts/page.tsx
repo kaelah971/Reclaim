@@ -1,8 +1,239 @@
-import EmptyState from "@/components/ui/EmptyState";
-import ReceiptFilters from "@/components/receipt/ReceiptFilters";
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Button from "@/components/ui/Button";
+import ReceiptFilters, {
+  type ReceiptFilterValue,
+} from "@/components/receipt/ReceiptFilters";
+import StatusBadge from "@/components/ui/StatusBadge";
 import Notice from "@/components/ui/Notice";
+import { useWalletState } from "@/hooks/wallet/useWalletState";
+import {
+  useClientPaymentIds,
+  useWorkerPaymentIds,
+} from "@/hooks/contracts";
+import type { ReceiptData } from "@/lib/receipt/types";
+
+// ---------------------------------------------------------------------------
+// /receipts — settlement receipt index (read-only discovery)
+//
+// Discovers completed canonical receipts for the connected wallet (client or
+// worker) using the SAME read model as /receipts/[receiptId]:
+//   GET /api/payments/[paymentId]/receipt
+// Candidate payment IDs come from read-only contract calls
+// (getClientPaymentIds / getWorkerPaymentIds). A candidate is listed only
+// when the canonical receipt endpoint returns found:true with a Released
+// final state — nothing is fabricated, nothing is mutated.
+// ---------------------------------------------------------------------------
+
+interface EligibleReceipt {
+  paymentId: string;
+  data: ReceiptData;
+}
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Completed receipts are canonical receipts in the Released final state. */
+function isCompletedReceipt(data: ReceiptData): boolean {
+  return data.found === true && data.receipt?.protectedPayment?.finalState === "Released";
+}
+
+function receiptMatchesFilter(
+  data: ReceiptData,
+  filter: ReceiptFilterValue,
+): boolean {
+  const finalState = data.receipt?.protectedPayment?.finalState;
+  const outcome = data.receipt?.humanDecision?.outcome;
+  switch (filter) {
+    case "all":
+      return true;
+    case "released":
+      return finalState === "Released";
+    case "client-outcome":
+      return outcome === "Client";
+    case "worker-outcome":
+      return outcome === "Worker";
+    case "split":
+      return outcome === "Split";
+    case "recent": {
+      const releasedAt = data.receipt?.protectedPayment?.releasedAt;
+      if (!releasedAt) return false;
+      return Date.now() - new Date(releasedAt).getTime() <= THIRTY_DAYS_MS;
+    }
+  }
+}
+
+function formatReceiptDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function ReceiptRowSkeleton() {
+  return (
+    <div className="rounded-[--radius-card] border border-border bg-surface px-6 py-5 animate-pulse">
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="h-5 w-16 rounded bg-input" />
+          <div className="h-4 w-24 rounded bg-input" />
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="h-5 w-20 rounded-[--radius-pill] bg-input" />
+          <div className="h-4 w-16 rounded bg-input" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReceiptCard({
+  paymentId,
+  data,
+  userAddress,
+}: {
+  paymentId: string;
+  data: ReceiptData;
+  userAddress: string;
+}) {
+  const pp = data.receipt?.protectedPayment;
+  const isClient =
+    !!pp?.client && pp.client.toLowerCase() === userAddress.toLowerCase();
+  const role = isClient ? "Client" : "Worker";
+
+  return (
+    <Link
+      href={`/receipts/${paymentId}`}
+      className="block rounded-[--radius-card] border border-border bg-surface px-6 py-5 transition-colors hover:border-primary/30 hover:bg-input/50"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-4">
+          <span className="font-[family-name:var(--font-ibm-plex-mono)] text-[14px] tabular-nums text-ink">
+            Payment #{paymentId}
+          </span>
+          <span className="font-[family-name:var(--font-georama)] text-[15px] font-semibold text-ink">
+            {pp?.amountHuman ?? "— USDC"}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <StatusBadge variant="settled" label="Released" />
+          <div className="flex flex-col items-end gap-0.5">
+            <span className="text-[13px] text-muted">{role}</span>
+            <span className="text-[13px] text-muted">
+              {formatReceiptDate(pp?.releasedAt)}
+            </span>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
 
 export default function ReceiptsPage() {
+  const { address, isConnected } = useWalletState();
+  const [activeFilter, setActiveFilter] = useState<ReceiptFilterValue>("all");
+  const [eligible, setEligible] = useState<EligibleReceipt[]>([]);
+  const [loadingReceipts, setLoadingReceipts] = useState(false);
+
+  const {
+    data: clientIds,
+    isLoading: clientLoading,
+    isError: clientError,
+    refetch: refetchClient,
+  } = useClientPaymentIds(isConnected ? address : undefined);
+
+  const {
+    data: workerIds,
+    isLoading: workerLoading,
+    isError: workerError,
+    refetch: refetchWorker,
+  } = useWorkerPaymentIds(isConnected ? address : undefined);
+
+  const allPaymentIds = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const list of [clientIds, workerIds]) {
+      if (!list) continue;
+      for (const id of list) {
+        const key = id.toString();
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(key);
+        }
+      }
+    }
+    return merged;
+  }, [clientIds, workerIds]);
+
+  // Load the canonical receipt for every candidate payment ID (read-only).
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      // Yield first so no state is set synchronously within the effect.
+      await Promise.resolve();
+      if (cancelled) return;
+      if (!isConnected || allPaymentIds.length === 0) {
+        setEligible([]);
+        setLoadingReceipts(false);
+        return;
+      }
+      setLoadingReceipts(true);
+      const results = await Promise.allSettled(
+        allPaymentIds.map(async (id) => {
+          const res = await fetch(`/api/payments/${id}/receipt`);
+          if (!res.ok) throw new Error(`Failed to load receipt (HTTP ${res.status})`);
+          const json = (await res.json()) as ReceiptData;
+          return { paymentId: id, data: json } as EligibleReceipt;
+        }),
+      );
+      if (cancelled) return;
+      const found: EligibleReceipt[] = [];
+      for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+        const candidate = result.value;
+        if (isCompletedReceipt(candidate.data)) found.push(candidate);
+      }
+      // Newest releases first (null-safe; stable order for equal dates).
+      found.sort((a, b) => {
+        const aAt = a.data.receipt?.protectedPayment?.releasedAt ?? "";
+        const bAt = b.data.receipt?.protectedPayment?.releasedAt ?? "";
+        return bAt.localeCompare(aAt);
+      });
+      setEligible(found);
+      setLoadingReceipts(false);
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [isConnected, allPaymentIds]);
+
+  const idsLoading = clientLoading || workerLoading;
+  const idsError = clientError || workerError;
+
+  const handleRetryAll = useCallback(() => {
+    refetchClient();
+    refetchWorker();
+  }, [refetchClient, refetchWorker]);
+
+  const filtered = useMemo(
+    () => eligible.filter((r) => receiptMatchesFilter(r.data, activeFilter)),
+    [eligible, activeFilter],
+  );
+
   return (
     <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
       <div>
@@ -15,13 +246,59 @@ export default function ReceiptsPage() {
       </div>
 
       <div className="mt-8">
-        <EmptyState
-          title="No settlement receipts yet."
-          description="Receipts appear after a protected payment is released or resolved."
-        />
-      </div>
+        {!isConnected && (
+          <div className="rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-14 text-center">
+            <h3 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
+              Connect your wallet to view receipts.
+            </h3>
+            <p className="mt-2 max-w-md mx-auto text-[15px] leading-relaxed text-muted">
+              Connect your Celo wallet to see settlement receipts for payments
+              you were a client or worker on.
+            </p>
+          </div>
+        )}
 
-      <ReceiptFilters className="mt-10" />
+        {isConnected && (idsLoading || loadingReceipts) && (
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <ReceiptRowSkeleton key={i} />
+            ))}
+          </div>
+        )}
+
+        {isConnected && !idsLoading && !idsError && (
+          <ReceiptFilters value={activeFilter} onChange={setActiveFilter}>
+            {filtered.length > 0 ? (
+              <div className="space-y-3 text-left">
+                {filtered.map((r) => (
+                  <ReceiptCard
+                    key={r.paymentId}
+                    paymentId={r.paymentId}
+                    data={r.data}
+                    userAddress={address!}
+                  />
+                ))}
+              </div>
+            ) : undefined}
+          </ReceiptFilters>
+        )}
+
+        {isConnected && !idsLoading && idsError && (
+          <div className="rounded-[--radius-card] border border-dashed border-border bg-page px-6 py-14 text-center">
+            <h3 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
+              Could not load receipts.
+            </h3>
+            <p className="mt-2 max-w-md mx-auto text-[15px] leading-relaxed text-muted">
+              Please try again.
+            </p>
+            <div className="mt-4">
+              <Button variant="secondary" size="sm" onClick={handleRetryAll}>
+                Retry
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="mt-10 rounded-[--radius-card] border border-border bg-surface p-6">
         <h2 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
@@ -62,9 +339,9 @@ export default function ReceiptsPage() {
 
         <Notice variant="info" className="mt-6 !border-border">
           <p className="text-[14px] leading-relaxed">
-            <strong>Receipts are free to view.</strong> No x402 payment or paid action is required
-            to view, print, share, or verify your own settlement receipt. A receipt is a trust
-            feature, not an upsell.
+            <strong>Receipts are free to view.</strong> No x402 payment or paid
+            action is required to view, print, share, or verify your own
+            settlement receipt. A receipt is a trust feature, not an upsell.
           </p>
         </Notice>
       </div>

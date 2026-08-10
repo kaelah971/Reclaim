@@ -17,6 +17,7 @@ import TransactionReference from "@/components/receipt/TransactionReference";
 import type { TransactionRef } from "@/components/receipt/TransactionReference";
 import VerificationSummary from "@/components/receipt/VerificationSummary";
 import PrintReceiptButton from "@/components/receipt/PrintReceiptButton";
+import type { ReceiptData } from "@/lib/receipt/types";
 
 // ---------------------------------------------------------------------------
 // /receipts/[receiptId] — FINAL SETTLEMENT RECEIPT (read-only, durable)
@@ -29,100 +30,6 @@ import PrintReceiptButton from "@/components/receipt/PrintReceiptButton";
 // READ-ONLY BY DESIGN: no wallet connection, no signing, no mutation.
 // Missing sources render as "Pending" — nothing is fabricated.
 // ---------------------------------------------------------------------------
-
-interface ReceiptData {
-  found: boolean;
-  paymentId?: string;
-  agentId?: string | null;
-  packetEventId?: string | null;
-  receiptCreatedAt?: string | null;
-  receipt?: {
-    schemaVersion?: string;
-    productModel?: string;
-    protectedPayment?: {
-      paymentId?: string;
-      amountAtomic?: string;
-      amountHuman?: string;
-      asset?: string;
-      client?: string;
-      worker?: string;
-      escrowContractAddress?: string;
-      chainId?: string;
-      network?: string;
-      finalState?: string;
-      releasedAt?: string | null;
-    };
-    agreement?: {
-      deliverable?: string | null;
-      deliveryFormat?: string | null;
-      releaseRule?: string | null;
-      evidenceExpectation?: string | null;
-      deadline?: string | null;
-      autoReleaseSeconds?: string | null;
-      disputeWindowSeconds?: string | null;
-    };
-    evidence?: {
-      title?: string | null;
-      claim?: string | null;
-      date?: string | null;
-      pastedText?: string | null;
-      evidenceReference?: string | null;
-      availability?: string | null;
-      evidenceType?: string | null;
-      submittedAt?: string | null;
-      submitter?: string | null;
-      submissionTxHash?: string | null;
-    };
-    resolutionAgent?: {
-      agentId?: string | null;
-      objective?: string | null;
-      statement?: string;
-      caseVersionHash?: string | null;
-      evidenceVersionHash?: string | null;
-    };
-    qualityCheck?: {
-      toolId?: string;
-      priceHuman?: string | null;
-      network?: string | null;
-      facilitatorUrl?: string | null;
-      executionRequestHash?: string | null;
-      readiness?: string | null;
-      reviewerQuestions?: string[];
-      ambiguities?: string[];
-      recommendedImprovements?: string[];
-      settlementTxHash?: string | null;
-      paymentReference?: string | null;
-      resultReference?: string | null;
-      inconsistencies?: string[];
-    };
-    humanDecision?: {
-      decision?: string;
-      authority?: string;
-      txHash?: string | null;
-      sender?: string | null;
-      blockNumber?: string | null;
-      blockTime?: string | null;
-      status?: string | null;
-      finalRecipient?: string;
-      outcome?: string;
-    };
-    audit?: {
-      explorerLinks?: {
-        escrowContract?: string;
-        client?: string;
-        worker?: string;
-        releaseTransaction?: string | null;
-        evidenceSubmissionTransaction?: string | null;
-        x402SettlementTransaction?: string | null;
-      };
-      timestamps?: {
-        evidenceSubmittedAt?: string | null;
-        releaseAt?: string | null;
-        qcSettlementAt?: string | null;
-      };
-    };
-  };
-}
 
 const accordStages: AccordStage[] = [
   { label: "Terms", state: "completed" },
