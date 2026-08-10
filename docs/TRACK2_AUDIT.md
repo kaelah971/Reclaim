@@ -1,6 +1,49 @@
 # Track 2 Settlement Audit Record
 
-Generated: 2026-07-29
+Generated: 2026-07-29 · **Corrected: 2026-08-09 (RA1R.10A — verified on-chain)**
+
+> ## CORRECTION (2026-08-09) — READ FIRST
+>
+> During the submission package audit (RA1R.10A), the two transaction hashes
+> previously recorded below as "Settlement #1 (Canonical)" and "Settlement #2
+> (Accidental Duplicate)" were checked against **both** Celo Mainnet and Celo
+> Sepolia. **Neither hash exists on either network.**
+>
+> - `0x2e8a3459ac4566397def48606670cd2a4e48d8f3dfbeda166f1bf1b82951ab5d` → not found
+> - `0xecf044fd2af5cc518d7841446b886b246c5ad8d156e21e10e68ed5e755f6f706` → not found
+>
+> They were never broadcast (or the audit record was written from unverified
+> expectations). The sections below are retained for history but are
+> **superseded by the single verified settlement in "Settlement Record
+> (Verified, 2026-08-09)"** below.
+>
+> ## Settlement Record (Verified, 2026-08-09) — the ONLY real mainnet settlement
+>
+> | Field | Value |
+> |-------|-------|
+> | Transaction Hash | `0x5f28527fff51fbb8961f6651b1646e3abcb829a4925dcdccf21d948d86dae351` |
+> | Block | `74360582` |
+> | Timestamp | 2026-08-09T07:42:20Z |
+> | Amount | 0.01 USDC (10000 atomic) |
+> | Payer | `0x22bf4271a3f8f3c6885c0d2c825f06f9c9d7f72a` (agent case wallet) |
+> | PayTo | `0x85522bdE267d05bf8CE8813F97c75417b7894A33` |
+> | Token | `0xcebA9300f2b948710d2653dD7B07f33A8B32118C` (USDC mainnet) |
+> | Network | Celo Mainnet (42220) |
+> | Broadcast by | Official facilitator signer `0x0d74D5Cefd2e7F24E623330ebE3d8D4cB45fFB48` (EIP-3009 `transferWithAuthorization`) |
+> | Status | `success` |
+> | Track 2 Eligible | Yes (official Celo x402 facilitator settlement to registered payTo) |
+> | Attribution tag in calldata | **No** — the EIP-3009 calldata carries no `celo_b7de8bf7e64e` suffix (see "Attribution Note" below) |
+>
+> ## Attribution Note (2026-08-09)
+>
+> The verified settlement calldata is a standard EIP-3009
+> `transferWithAuthorization` with no extra bytes — the registered attribution
+> tag `celo_b7de8bf7e64e` is **not** present in the transaction.
+> Attribution therefore depends on whether the Dune leaderboard keys on the
+> payTo/agent wallet (`0x85522bdE267d05bf8CE8813F97c75417b7894A33`, the
+> submitted `agentWalletAddress`) or strictly on the ERC-8021 tag. **This must
+> be confirmed on the leaderboard before final publish** — see
+> `SUBMISSION.md` "Publish checklist".
 
 ## Registration
 
@@ -27,7 +70,7 @@ Generated: 2026-07-29
 | USDC | `0xcebA9300f2b948710d2653dD7B07f33A8B32118C` |
 | Facilitator Signer | `0x0d74D5Cefd2e7F24E623330ebE3d8D4cB45fFB48` |
 
-## Settlement #1 (Canonical)
+## Settlement #1 (Canonical) — SUPERSEDED (see correction at top)
 
 | Field | Value |
 |-------|-------|
@@ -42,7 +85,7 @@ Generated: 2026-07-29
 | Facilitator Settlement | Yes |
 | Track 2 Eligible | Yes |
 
-## Settlement #2 (Accidental Duplicate)
+## Settlement #2 (Accidental Duplicate) — SUPERSEDED (see correction at top)
 
 | Field | Value |
 |-------|-------|

@@ -1,437 +1,227 @@
 # Reclaim — Pay with proof.
 
-Protected payments on Celo with clear terms, delivery evidence, autonomous resolution preparation, fair human review, and on-chain settlement.
+**Reclaim** is a protected-payment platform on Celo. A client's payment is held in
+on-chain escrow with clear terms; the worker delivers work and submits evidence;
+a **Resolution Agent** autonomously prepares the case for **fair human review**;
+and the contract settles — release to the worker or refund to the client —
+with a durable, verifiable final receipt.
 
-## Getting Started
+> Submission: **Celo Agentic Payments & DeFAI Hackathon — Track 2 (Most x402 Payments)**
+> Live demo: https://reclaim-kaelah-s-projects.vercel.app
+> Repo: https://github.com/kaelah971/Reclaim
+
+---
+
+## Problem
+
+Freelance and service payments fail on trust. Paying first risks never receiving
+the work; holding funds creates opaque, unaccountable disputes. When something
+goes wrong there is no neutral path: evidence is scattered, no one prepares the
+case, and the person deciding has nothing reliable to read.
+
+## Solution
+
+Reclaim turns a payment into a **case with proof**:
+
+1. The client creates a payment with locked terms and funds it into an on-chain escrow.
+2. The worker delivers and submits evidence tied to an on-chain evidence reference.
+3. The **Resolution Agent** reads the agreement and escrow state, examines the
+   evidence, pays a real x402 service to quality-check the evidence, and prepares
+   a durable, neutral **review packet** for a human.
+4. A person reviews and decides. The contract executes: release or refund.
+5. Both sides get a **final receipt** composed only from verified sources —
+   no fabricated fields.
+
+## The Resolution Agent
+
+> Objective: **"Prepare this payment case for fair human review."**
+
+> Principle: **The contract protects the payment. The agent prepares the resolution. People make the final decision.**
+
+The agent runs per-case with a dedicated case wallet:
+
+- **Observes** the on-chain escrow state and the verified evidence metadata.
+- **Plans** the next action and **executes** paid tools within budget.
+- **Pays** for services through the official Celo x402 facilitator (real,
+  on-chain settlement — see below).
+- **Prepares** a durable review packet: evidence inventory, quality-check
+  result, reviewer questions, ambiguities, and recommended improvements.
+- **Stops before judgment.** The agent never releases, refunds, or votes.
+
+## Protected payment lifecycle
+
+```
+Terms → Funds in escrow → Accepted → Delivery + evidence → Release requested
+→ Agent-prepared human review → Released / Refunded → Final receipt
+```
+
+- Funds never leave the escrow contract except by release (to the worker) or
+  refund (to the client), decided by a human.
+- Evidence is committed on-chain (hash) and stored durably off-chain.
+- The review packet is durable and includes the quality-check result plus any
+  recorded inconsistencies — nothing is hidden from the reviewer.
+
+## Celo integration
+
+Reclaim integrates Celo in two clearly separated layers:
+
+| Layer | Network | Purpose |
+|-------|---------|---------|
+| **Escrow** (`ProtectedPaymentEscrow`) | **Celo Sepolia** (testnet, `eip155:11142220`) | Product demo: protects the payment, records evidence references, executes release/refund |
+| **x402 paid services** | **Celo Mainnet** (`eip155:42220`) | Real payments: the agent pays the official Celo facilitator, which settles USDC on-chain |
+
+- **Escrow token:** USDC on Celo Sepolia (`0x01C5C0122039549AD1493B8220cABEdD739BC44E`).
+- **x402 token:** USDC on Celo Mainnet (`0xcebA9300f2b948710d2653dD7B07f33A8B32118C`).
+- **Registered Track 2 payTo / agent wallet:** `0x85522bdE267d05bf8CE8813F97c75417b7894A33`.
+- **Attribution tag:** `celo_b7de8bf7e64e`.
+
+### Celo Sepolia escrow vs Celo Mainnet x402 — the distinction
+
+The demo escrow lives on the **testnet** so the full product flow (create →
+fund → evidence → review → release → receipt) can be exercised safely. The
+x402 settlements happen on **mainnet** because Track 2 counts real on-chain
+x402 payments during the hackathon window. The escrow and the x402 fee are
+deliberately separate: escrow holds the protected payment; x402 micro-fees pay
+for agent services.
+
+## Official Celo facilitator usage
+
+The agent's paid tool (`evidence-quality-check`) is settled through the official
+Celo x402 facilitator:
+
+- **API:** `https://api.x402.celo.org` (production client URL; also known as `https://x402.celo.org`)
+- **Protocol:** x402 v2, scheme `exact`, EIP-3009 `TransferWithAuthorization` signed by the agent's case wallet.
+- **Flow:** `/verify` first, then `/settle` — settlement is accepted **only** with the facilitator's on-chain settlement proof (`txHash` + `settlementSuccess`). A successful HTTP call alone is never treated as proof.
+- **Failure behavior:** no silent fallback to local settlement; a facilitator failure fails safely and becomes visible.
+
+## Real Payment #1 — end-to-end proof (live demo case)
+
+The live demo is a **completed, real, on-chain case** — not a simulation:
+
+| Item | Value |
+|------|-------|
+| Escrow contract (V2, canonical) | `0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F` on Celo Sepolia |
+| Payment #1 final state | `released` (state 5), 0.01 USDC (`10000` atomic) |
+| Client | `0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486` |
+| Worker (payTo wallet) | `0x85522bdE267d05bf8CE8813F97c75417b7894A33` |
+| Evidence reference (on-chain) | `0x1bb11c9d819f4a69fc88c2eccb8fcf4343f07d965b1c87f7e3d3d7e5f94abb99` |
+| Evidence submission tx | [`0xaee6b1de391c39daab71015c8d3d4326ec4b40ff577deca0c7471b9f2b677958`](https://celo-sepolia.blockscout.com/tx/0xaee6b1de391c39daab71015c8d3d4326ec4b40ff577deca0c7471b9f2b677958) |
+| Release tx (human approved) | [`0x271d62cd50a1f9d1d2d1495f74be568050cf5a55e98690940840b2d5ec687298`](https://celo-sepolia.blockscout.com/tx/0x271d62cd50a1f9d1d2d1495f74be568050cf5a55e98690940840b2d5ec687298) |
+| Released at | 2026-08-09T11:49:09Z |
+
+All on-chain reads are read-only; the escrow state is verified directly via `getPayment(1)`.
+
+## Real x402 settlement proof
+
+The agent's evidence-quality-check was settled on **Celo Mainnet** through the
+official facilitator:
+
+| Item | Value |
+|------|-------|
+| Settlement tx | [`0x5f28527fff51fbb8961f6651b1646e3abcb829a4925dcdccf21d948d86dae351`](https://celoscan.io/tx/0x5f28527fff51fbb8961f6651b1646e3abcb829a4925dcdccf21d948d86dae351) |
+| Status | `success` (block 74360582, 2026-08-09T07:42:20Z) |
+| Amount | 0.01 USDC (10000 atomic) |
+| Payer | agent case wallet `0x22bf4271a3f8f3c6885c0d2c825f06f9c9d7f72a` |
+| PayTo | `0x85522bdE267d05bf8CE8813F97c75417b7894A33` |
+| Broadcast by | official facilitator signer `0x0d74D5Cefd2e7F24E623330ebE3d8D4cB45fFB48` (EIP-3009 `transferWithAuthorization` on USDC `0xcebA9300f2b948710d2653dD7B07f33A8B32118C`) |
+
+## Final receipt
+
+`GET /api/payments/1/receipt` (public, read-only) composes the receipt from
+verified sources only: live escrow state, on-chain release/evidence proofs,
+verified evidence metadata, and the agent's durable review packet. It covers
+the protected payment, the agreement, the evidence, the resolution agent, the
+paid quality check (including recorded inconsistencies), the human decision,
+and explorer audit links for every transaction.
+
+Live receipt: https://reclaim-kaelah-s-projects.vercel.app/receipts/1
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph SEPOLIA["TESTNET — Celo Sepolia (product demo)"]
+        C[Client] -->|creates payment, funds USDC escrow| E[ProtectedPaymentEscrow<br/>0x1A1CA38D...]
+        W[Worker] -->|delivers work + submits evidence| E
+        E -->|escrow state, evidence reference| R[Resolution Agent<br/>per-case wallet<br/>objective: prepare case for fair human review]
+    end
+
+    subgraph MAINNET["MAINNET — Celo (real x402 payments)"]
+        R -->|pays $0.01 USDC x402| S[Evidence-quality service<br/>evidence-quality-check]
+        S -->|x402 v2 /verify + /settle| F[Official Celo x402 facilitator<br/>api.x402.celo.org]
+        F -->|EIP-3009 settlement| M[USDC settles to payTo<br/>0x85522bdE...]
+        M -->|quality result + settlement proof| P[Review packet inputs]
+    end
+
+    P --> K[Durable review packet<br/>evidence, QC, reviewer questions, inconsistencies]
+    K --> H[Human review]
+    H -->|approve| REL[Release on escrow]
+    H -->|dispute| RES[Human resolution / refund]
+    REL --> REC[Final receipt]
+    RES --> REC
+```
+
+**Testnet escrow and mainnet x402 are clearly separated**: escrow protects the
+payment and settles by human decision on Celo Sepolia; x402 micro-payments for
+agent services settle for real on Celo Mainnet through the official facilitator.
+
+## Live demo
+
+- Homepage: https://reclaim-kaelah-s-projects.vercel.app
+- Payment #1 room (released): https://reclaim-kaelah-s-projects.vercel.app/payments/1
+- Agent Control Room: https://reclaim-kaelah-s-projects.vercel.app/payments/1/agent
+- Human review page: https://reclaim-kaelah-s-projects.vercel.app/payments/1/review
+- Final receipt: https://reclaim-kaelah-s-projects.vercel.app/receipts/1
+
+## Repository & deployment
+
+- GitHub: https://github.com/kaelah971/Reclaim (public)
+- Vercel project: `reclaim` → https://reclaim-kaelah-s-projects.vercel.app
+- Stack: Next.js 16 (App Router), TypeScript (strict), Tailwind CSS v4, wagmi + viem, Supabase (durable evidence + agent store), Foundry (escrow contract)
+
+### Local development
 
 ```bash
 npm install
+cp .env.example .env.local   # configure per instructions in the file
 npm run dev
 ```
-
-Open [http://localhost:3000](http://localhost:3000).
-
-## Environment Variables
-
-Copy `.env.example` to `.env.local` and configure:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NEXT_PUBLIC_CELO_RPC_URL` | Forno Sepolia | Custom Celo RPC URL (optional) |
-| `NEXT_PUBLIC_CELO_EXPLORER_URL` | Blockscout Sepolia | Block explorer base URL (optional) |
-| `NEXT_PUBLIC_PAYMENT_TOKEN_ADDRESS` | USDC on Sepolia | Payment token contract |
-| `NEXT_PUBLIC_PAYMENT_TOKEN_SYMBOL` | `USDC` | On-chain token symbol (product copy uses "cUSD") |
-| `NEXT_PUBLIC_PAYMENT_TOKEN_DECIMALS` | `6` | Token decimals |
-| `NEXT_PUBLIC_PROTECTED_PAYMENT_ESCROW_ADDRESS` | — | Deployed ProtectedPaymentEscrow contract address |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | — | Optional: WalletConnect project ID |
-
-The network itself is fixed in code to **Celo Sepolia** (chain ID `11142220`) in
-`src/lib/web3/chains.ts`. There is no chain-ID environment override.
-
-## Network
-
-Reclaim currently uses **Celo Sepolia Testnet** (Chain ID `11142220`) for development.
-This replaced Alfajores (chain ID `44787`) following the Celo Sepolia launch.
-Testnet tokens have no real-world value.
-
-### Faucet
-
-- [Google Cloud Faucet](https://cloud.google.com/application/web3/faucet/celo/sepolia)
-- [Celo Faucet](https://faucet.celo.org/celo-sepolia)
-
-### Adding Celo Sepolia to your wallet
-
-| Field | Value |
-|-------|-------|
-| Network Name | Celo Sepolia |
-| Chain ID | 11142220 |
-| Currency Symbol | CELO |
-| RPC URL | https://forno.celo-sepolia.celo-testnet.org |
-| Explorer | https://celo-sepolia.blockscout.com |
-
-## Payment Token
-
-The escrow token for protected payments is **USDC** (Circle USD Coin) on Celo Sepolia.
-
-| Field | Value |
-|-------|-------|
-| Address | `0x01C5C0122039549AD1493B8220cABEdD739BC44E` |
-| Symbol | USDC |
-| Decimals | 6 |
-| Source | Circle (faucet.circle.com — Celo Sepolia testnet USDC) |
-
-### Product vs transaction naming
-
-- **Product copy**: Uses "cUSD" / "dollar stablecoin on Celo"
-- **Wallet transactions**: Show the on-chain symbol "USDC" to avoid misleading users
-
-### Historical note
-
-The previous token configuration used Mento Dollar (USDm, 18 decimals, `0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b`).
-This was replaced in I2 with Circle USDC to match the Circle faucet token held by the deployer.
-
-## Deployed Contract
-
-The `ProtectedPaymentEscrow` contract is **already deployed** on Celo Sepolia.
-No new deployment is required for normal frontend development.
-
-| Field | Value |
-|-------|-------|
-| Contract | `0x0fA826256a58F19Ad24Fc9384d81D313f2266F79` |
-| Network | Celo Sepolia (chain ID 11142220) |
-| Escrow Token | USDC `0x01C5C0122039549AD1493B8220cABEdD739BC44E` (6 decimals) |
-| Deployment TX | `0xa452b3d39fa00356f4c13bb4f46988c2de281640800d0856e6e67b3bc5924312` |
-| Source Verified | Blockscout |
-| Explorer | https://celo-sepolia.blockscout.com/address/0x0fA826256a58F19Ad24Fc9384d81D313f2266F79 |
-
-### contracts/.env
-
-`contracts/.env` is **not required** for normal frontend use. It is only needed for:
-- Future deployment-owner operations
-- Contract source verification
-- Pause / admin actions
-- Deployment scripting
-
-No new deployment should be made without an explicit migration decision.
-
-## Celo Agentic Payments & DeFi Hackathon
-
-Reclaim is registered for **Track 2 — Most x402 Payments** in the
-[Celo Agentic Payments & DeFi Hackathon](https://celobuilders.xyz).
-
-| Field | Value |
-|-------|-------|
-| Hackathon | Celo Agentic Payments & DeFi Hackathon |
-| Track | Most x402 Payments (Track 2) |
-| Registration ID | `629aafee-b989-4ec6-929c-a4acdf2caebd` |
-| Registered payTo | `0x85522bdE267d05bf8CE8813F97c75417b7894A33` |
-| Attribution Tag | `celo_b7de8bf7e64e` |
-| Official Facilitator | `https://x402.celo.org` |
-| Leaderboard | https://dune.com/celo/agentic-payments-defai-hackathon |
-
-### Settlement Modes
-
-| Mode | Network | Track 2 | Description |
-|------|---------|---------|-------------|
-| `celo-facilitator` | Celo mainnet (`eip155:42220`) | Yes | Official facilitator verifies and settles; facilitator broadcasts settlement tx. No relayer key. |
-| `local` (default) | Celo Sepolia (`eip155:11142220`) | No | Self-settled via Permit2 + relayer wallet. Development only. |
-
-**Critical**: `celo-facilitator` mode never silently falls back to local settlement.
-A facilitator failure must fail safely. A successful-looking payment that bypasses
-the facilitator is unacceptable in Track 2 mode.
-
-Configure via `X402_SETTLEMENT_MODE=celo-facilitator` in `.env.local`.
-
-## x402 Paid Service: Dispute Preparation Brief
-
-Reclaim implements the **x402 v2** payment protocol for one paid service: automated
-dispute brief preparation. The brief is generated deterministically from on-chain
-payment data and user-submitted dispute details — no AI/LLM is called.
-
-### Protocol Details
-
-| Field | Value |
-|-------|-------|
-| x402 Protocol Version | v2 |
-| Facilitator URL | `https://x402.celo.org` |
-| CAIP-2 Network Identifier | `eip155:11142220` (Celo Sepolia) |
-| Payment Scheme | `exact` (Permit2-style EVM signature) |
-| Payment Token | USDC (`0x01C5C0122039549AD1493B8220cABEdD739BC44E`, 6 decimals) |
-| Service Price | `$0.01` USDC (configurable via `X402_DISPUTE_BRIEF_PRICE`) |
-
-### API Endpoint
-
-```
-POST /api/x402/dispute-brief
-```
-
-**Request flow:**
-
-1. Client sends a POST without a `PAYMENT-SIGNATURE` header → server returns
-   HTTP 402 with a `PAYMENT-REQUIRED` header containing payment requirements
-   (network, price, payTo address, token contract).
-2. Client pays the USDC fee and retries the request with a `PAYMENT-SIGNATURE`
-   header containing the base64-encoded payment payload.
-3. Server verifies the payment payload, reads on-chain escrow data, generates a
-   structured dispute brief, and returns it with a `PAYMENT-RESPONSE` header.
-
-**Request body fields:** See `src/lib/x402/validation.ts` for the full Zod schema.
-
-### Configuring the payTo Address
-
-The `payTo` address in the x402 payment requirement is the **Reclaim service-revenue
-wallet** — it is NOT the escrow contract. Set it via environment variables:
-
-| Variable | Scope | Purpose |
-|----------|-------|---------|
-| `X402_PAY_TO_ADDRESS` | Server-only | Address that receives x402 service fees |
-| `NEXT_PUBLIC_X402_PAY_TO_ADDRESS` | Client-safe | Fallback if server variable is unset; used by pay button UI |
-
-### x402 Fees vs Escrow Funds
-
-The x402 fee is **completely separate** from the funds held in the
-`ProtectedPaymentEscrow` contract:
-
-- **Escrow funds:** Held on-chain in the escrow contract; released to the worker
-  or refunded to the client according to the agreement terms and dispute resolution.
-- **x402 service fee:** A micro-payment sent to the Reclaim service wallet
-  for the dispute brief preparation service. This fee is independent of the
-  escrow lifecycle.
-
-### Security Considerations
-
-- `contracts/.env` is **not needed** for x402 operation — the facilitator and
-  settlement logic are self-contained in the Next.js API route.
-- The `PAYMENT-SIGNATURE` header must contain a valid Permit2-style signature
-  authorizing a USDC transfer from the buyer to the service wallet.
-- All requests include a `correlationId` for tracing.
-- Server-side config (`config.ts`) is never exposed to the browser — use
-  `config.public.ts` for client-safe values.
-- The dispute brief generator is purely deterministic — no AI/LLM is called,
-  so no prompt injection or hallucination risk exists.
-
-### Manual API Test
-
-Run the PowerShell integration test script against a local dev server:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/test-x402-dispute-brief.ps1
-```
-
-This sends an unpaid request to the API and validates the HTTP 402 response,
-`PAYMENT-REQUIRED` header format, and payment requirement fields.
-
-## Wallet Support
-
-- **Injected browser wallets** (MetaMask, etc.) — fully supported
-- **WalletConnect** — optional and currently unavailable. The connector is only
-  created when `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` is set, and connecting
-  additionally requires the optional peer dependency
-  `@walletconnect/ethereum-provider` (not currently installed):
-  `npm install @walletconnect/ethereum-provider`. When the project ID is absent,
-  WalletConnect is not initialized and is not shown in the wallet dialog;
-  injected wallets keep working.
-
-A single wallet dialog is owned by `WalletGateProvider`
-(`src/providers/WalletGateProvider.tsx`). Pages and buttons trigger it through
-`useRequireWallet()` — no page owns its own wallet dialog.
-
-### How to test
-
-1. Install MetaMask or another Celo-compatible browser wallet.
-2. Add Celo Sepolia network using the values in the table above.
-3. Click "Connect wallet" in the Reclaim UI.
-4. Approve the connection in your wallet.
-
-### Testing wrong-network behavior
-
-1. Connect your wallet while on a non-Celo network (e.g. Ethereum mainnet).
-2. Click any wallet-required action (create payment, evidence, dispute,
-   reviewer submission, refund scan).
-3. The switch-network dialog should appear immediately, showing your current
-   chain ID and the required network (Celo Sepolia, 11142220).
-4. Rejecting the switch shows "The network switch was cancelled." and your
-   entered form data is preserved.
-5. Approving the switch continues to the existing frontend integration notice.
-   No transaction is ever sent.
-
-### Testing no-provider behavior
-
-1. Open Reclaim in a browser with no wallet extension installed.
-2. Click "Connect wallet". The dialog should say
-   "No compatible browser wallet was found." and explain that a Celo-compatible
-   EVM wallet is required, with Retry and Close.
-
-### Manual verification checklist (no test framework installed)
-
-- Address shortening: connected header button shows `0x1234…abcd` format.
-- Supported-network helper: green dot when on Celo Sepolia, amber otherwise.
-- Explorer links: account menu / receipt references point at Blockscout Sepolia.
-- Connection rejected: cancel in wallet → "The connection request was cancelled." + Retry.
-- Wrong-network gate: see "Testing wrong-network behavior" above.
-- Ready gate: on Celo Sepolia, wallet-required actions open the existing
-  frontend-only integration notices; no transaction or approval is requested.
-- WalletConnect hidden: with no project ID configured, the dialog lists only
-  "Browser wallet".
-
-## Commands
 
 | Command | Description |
 |---------|-------------|
 | `npm run dev` | Start dev server (port 3000) |
-| `npm run build` | Production build (normal TypeScript validation, no extra memory flags required) |
+| `npm run build` | Production build |
 | `npm run lint` | ESLint |
 | `npm run typecheck` | TypeScript type-check |
-| `npm run test` | Run unit tests (vitest) |
-| `npm run test:watch` | Run tests in watch mode |
+| `npm run test` | Unit tests (vitest) |
 
-## x402 Architecture
+The escrow network is fixed in code to **Celo Sepolia** (chain ID `11142220`).
+`X402_SETTLEMENT_MODE=celo-facilitator` routes agent payments through the
+official Celo mainnet facilitator (Track 2 mode); `local` is development-only
+testnet settlement.
 
-The x402 payment protocol is implemented as a self-contained module at
-`src/lib/x402/` and a Next.js API route at `src/app/api/x402/dispute-brief/`.
+## Track 2 — Most x402 Payments
 
-### Module Structure
+Reclaim targets **Track 2** (`most-x402-payments`) by:
 
-```
-src/lib/x402/
-├── types.ts          # Core x402 v2 protocol types (PaymentRequirements, PaymentPayload, etc.)
-├── config.ts         # Server-side configuration (secrets, derived values)
-├── config.public.ts  # Browser-safe configuration (NEXT_PUBLIC_ variables only)
-├── shared.ts         # Shared helpers: header encoding/decoding, payment verification
-├── validation.ts     # Zod schema for dispute brief request body
-├── disputeBrief.ts   # Deterministic brief generator (no AI)
-└── __tests__/
-    ├── disputeBrief.test.ts  # Unit tests for brief generation & validation
-    └── x402.test.ts          # Unit tests for shared helpers & protocol types
-```
+- routing every agent-paid service through the **official Celo x402 facilitator** on **Celo Mainnet**;
+- settling **0.01 USDC** per evidence-quality-check (`evidence-quality-check` tool, price `10000` atomic);
+- using the **registered payTo wallet** `0x85522bdE267d05bf8CE8813F97c75417b7894A33` for all settlements (enforced in code and tests);
+- proving each settlement on-chain (`settlement_tx_hash`) and persisting it durably in the review packet and receipt.
 
-### Server-Side Config (No Browser Exposure)
+Real on-chain settlement this window: `0x5f28527fff...dae351` (0.01 USDC, mainnet, 2026-08-09).
 
-`config.ts` is marked **SERVER-ONLY** — it imports escrow and token config from
-`@/lib/web3/tokens` and reads `X402_PAY_TO_ADDRESS` from the server environment.
-It is never imported by client components. Client-safe values are exposed
-separately through `config.public.ts`.
-
-### HTTP 402 Flow
-
-```
-Client                          Server (Next.js API Route)
-  │                                   │
-  │  POST /api/x402/dispute-brief     │
-  │  (no PAYMENT-SIGNATURE header)    │
-  │ ─────────────────────────────────>│
-  │                                   │ builds PaymentRequirements
-  │  402 + PAYMENT-REQUIRED header    │
-  │ <─────────────────────────────────│ base64-encoded JSON:
-  │                                   │   { accepts: [{ scheme, price,
-  │                                   │     network, payTo, asset }],
-  │                                   │     description, mimeType }
-  │                                   │
-  │  Client pays USDC fee             │
-  │  (Permit2 signature)              │
-  │                                   │
-  │  POST /api/x402/dispute-brief     │
-  │  + PAYMENT-SIGNATURE header       │
-  │ ─────────────────────────────────>│
-  │                                   │ decodes & verifies payload
-  │                                   │ validates request body
-  │                                   │ reads on-chain payment data
-  │                                   │ generates dispute brief
-  │  200 + PAYMENT-RESPONSE header    │
-  │ <─────────────────────────────────│ settlement confirmation
-  │                                   │
-```
-
-### Header Formats
-
-**PAYMENT-REQUIRED** (server → client, HTTP 402):
-Base64-encoded JSON of a `PaymentRequirements` object:
-```json
-{
-  "accepts": [
-    {
-      "scheme": "exact",
-      "price": "$0.01",
-      "network": "eip155:11142220",
-      "payTo": "0x...",
-      "asset": "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
-      "assetDecimals": 6
-    }
-  ],
-  "description": "Reclaim dispute preparation brief",
-  "mimeType": "application/json"
-}
-```
-
-**PAYMENT-SIGNATURE** (client → server, retry request):
-Base64-encoded JSON of a `PaymentPayload` object containing the EIP-712
-Permit2-style signature authorizing a USDC transfer.
-
-**PAYMENT-RESPONSE** (server → client, HTTP 200):
-Base64-encoded JSON of settlement confirmation including success status,
-correlation ID, and an optional transaction hash.
-
-### Settlement Lifecycle
-
-1. **Verification:** Server validates the payment payload structure (scheme,
-   network, addresses, token, amount, signature format). Full Permit2 signature
-   verification with EIP-712 typed data recovery is planned for a future iteration.
-2. **On-chain read:** Server reads the escrow payment's current state and terms
-   from the `ProtectedPaymentEscrow` contract via viem's public client.
-3. **Brief generation:** The deterministic `generateDisputeBrief()` function
-   combines on-chain data with user-submitted dispute details to produce a
-   structured, human-readable brief.
-4. **Settlement recording:** The server records the payment as verified. Full
-   on-chain settlement (executing the Permit2 transfer) will be added when the
-   buyer-side signing flow is implemented.
-
-### Distinction: Escrow vs x402 Service Revenue
-
-| Aspect | Escrow Contract | x402 Service |
-|--------|----------------|--------------|
-| **Funds source** | Client deposits for the protected payment | Client pays a micro-fee for the brief |
-| **Funds destination** | Worker (on release) or client (on refund) | Reclaim service-revenue wallet |
-| **Contract** | `ProtectedPaymentEscrow` | No separate contract — settled via Permit2 |
-| **Lifecycle** | Created → Funded → ... → Released/Cancelled | Pay → Verify → Brief delivered |
-| **Disputes** | Handled by human reviewers | The brief aids reviewers but does not decide |
-
-## Tech Stack
-
-- **Framework:** Next.js 16 (App Router)
-- **Language:** TypeScript 5 (strict mode)
-- **Styling:** Tailwind CSS v4
-- **Fonts:** Newsreader (display), Georama (UI), IBM Plex Mono (data)
-- **Wallet:** wagmi + viem + @tanstack/react-query
-- **Network:** Celo Sepolia Testnet (Chain ID: 11142220)
+Leaderboard: https://dune.com/celo/agentic-payments-defai-hackathon
 
 ## What is intentionally unimplemented
 
-- Supabase / authentication / database profiles
-- Reviewer voting / settlement execution
-- Receipt / attribution-tag transaction generation
-- CSV transaction analysis / recovery package generation
-- WalletConnect connections (optional; requires project ID + optional peer dependency)
-- x402 AI/LLM-powered briefs (template-based deterministic brief is implemented instead)
+- Reviewer rewards / reputation (planned after launch; reviews are free today).
+- A paid dispute-brief tool in production (the agent's production path settles only `evidence-quality-check`; dispute-brief settlement is not wired).
+- WalletConnect connector (optional; requires a project ID).
+- Mutual security bonds (future scope, explicitly not in the MVP).
 
-## What is implemented and deployed
+## Notes on proof discipline
 
-- ProtectedPaymentEscrow contract (deployed, verified, canonical)
-- Payment lifecycle: create, fund, accept, evidence, release, dispute, cancel
-- Frontend contract config, typed read/write hooks, ABI export
-- Payment creation, dashboard, payment room, evidence submission, dispute UI
-- Token config (USDC, 6 decimals, Celo Sepolia)
-- Wallet connection, network detection, error handling
-- **x402 v2 paid service:** Dispute preparation brief API endpoint
-  (`POST /api/x402/dispute-brief`) with HTTP 402 payment-gated flow,
-  deterministic brief generation, and Permit2-style payment verification
-
-## Future Roadmap
-
-### Resolution Agent
-
-Reclaim is building an autonomous resolution agent that operates per-payment-case
-server-side. The agent reads the agreement and escrow state, examines evidence,
-creates a resolution plan, purchases allowlisted x402 services within a fixed
-per-case budget, requests missing evidence, and prepares a neutral reviewer-ready
-brief — all without browser interaction. It stops before final human judgment.
-The escrow model is unchanged: the client funds escrow, the worker contributes
-delivery and evidence, the agent prepares the case, people decide, and the
-contract settles.
-
-### Mutual Security Bonds (Future Scope)
-
-Reclaim may later support optional mutual security bonds for higher-risk
-agreements.
-
-In that future model:
-
-- the client deposits the protected payment amount;
-- one or both parties may also deposit a separate security bond;
-- bond rules are agreed before work starts;
-- bonds remain separate from the service payment;
-- bond distribution follows explicit contract rules after resolution;
-- the feature is optional and must not make ordinary workers fund every job.
-
-This is NOT part of the current hackathon MVP. Currently, the client funds the
-escrow payment and the worker contributes delivery and evidence — neither party
-deposits a security bond.
+- All on-chain proofs in this README were verified read-only against the live networks (Celo Sepolia and Celo Mainnet).
+- The receipt API never fabricates fields — missing sources produce `null`.
+- No secrets, keys, or API keys are referenced in this repository's documentation.
