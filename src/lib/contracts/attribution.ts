@@ -1,57 +1,63 @@
 /**
  * Celo transaction attribution helper.
  *
- * Celo Builders assign each project an attribution tag that is appended to
- * transaction calldata as a raw data suffix. The suffix is ignored by the
- * EVM during execution, so decoded contract arguments are never affected.
+ * Celo Builders assign each project an attribution code that is encoded as an
+ * ERC-8021 data suffix. The official SDK owns the wire format and validation;
+ * this module only loads the configured code and appends the resulting suffix
+ * to calldata when attribution is enabled.
  *
- * No tag is fabricated here: when NEXT_PUBLIC_CELO_ATTRIBUTION_TAG is unset
- * (or malformed) every helper degrades to a safe no-op and transactions are
- * simply sent without attribution.
+ * When NEXT_PUBLIC_CELO_ATTRIBUTION_TAG is unset (or invalid), every helper
+ * degrades to a safe no-op and transactions are sent without attribution.
  */
 
-import { toHex } from "viem";
+import { fromDataSuffix, toDataSuffix } from "@celo/attribution-tags";
+import { concat } from "viem";
 
 const RAW_TAG = process.env.NEXT_PUBLIC_CELO_ATTRIBUTION_TAG;
 
-const HEX_TAG_PATTERN = /^0x[0-9a-fA-F]+$/;
-
 /**
- * Normalize a raw attribution tag into `0x`-prefixed hex data.
+ * Normalize an attribution code into an ERC-8021 data suffix.
  *
- * Values that are already valid `0x`-prefixed hex (even length) are preserved
- * (lowercased) and never re-encoded. Any other non-empty value is treated as
- * ASCII/UTF-8 text and encoded byte-by-byte to hex — this is how Celo Builders
- * project tags (e.g. `celo_b7de8bf7e64e`) are expected to be sent. Fails closed
- * (returns undefined) for empty/whitespace input, malformed `0x`-prefixed hex,
- * and odd-length `0x`-prefixed hex.
+ * The SDK deliberately validates text codes. In particular, raw hex is not
+ * accepted as a fallback because doing so would bypass ERC-8021 validation.
+ * The round-trip check also ensures that the value we return is decodable as a
+ * valid Schema 0 attribution suffix.
  */
 export function normalizeTag(raw: string | undefined): `0x${string}` | undefined {
-  if (!raw) return undefined;
+  if (typeof raw !== "string") return undefined;
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
-  if (trimmed.startsWith("0x")) {
-    // Already explicitly hex — validate strictly and preserve it.
-    if (!HEX_TAG_PATTERN.test(trimmed)) return undefined;
-    if (trimmed.length % 2 !== 0) return undefined;
-    return trimmed.toLowerCase() as `0x${string}`;
+
+  try {
+    const suffix = toDataSuffix(trimmed);
+    const decoded = fromDataSuffix(suffix);
+
+    if (
+      !decoded ||
+      decoded.schemaId !== 0 ||
+      decoded.codes.length !== 1 ||
+      decoded.codes[0] !== trimmed
+    ) {
+      return undefined;
+    }
+
+    return suffix;
+  } catch {
+    // Invalid SDK input must never produce an attribution suffix.
+    return undefined;
   }
-  // Plain text tag (e.g. a Celo Builders project tag) — encode its UTF-8
-  // bytes to hex; every byte produces exactly 2 hex chars, so the result
-  // is always valid even-length data.
-  return toHex(trimmed);
 }
 
 const NORMALIZED_TAG = normalizeTag(RAW_TAG);
 
-/** The configured attribution tag as 0x-prefixed hex, or undefined. */
+/** The configured attribution code as an encoded ERC-8021 suffix. */
 export function getAttributionTag(): `0x${string}` | undefined {
   return NORMALIZED_TAG;
 }
 
 /**
  * Data suffix for viem/wagmi write calls (`dataSuffix` parameter).
- * Returns undefined when no valid tag is configured so writes proceed
+ * Returns undefined when no valid code is configured so writes proceed
  * without attribution.
  */
 export function getAttributionDataSuffix(): `0x${string}` | undefined {
@@ -59,13 +65,13 @@ export function getAttributionDataSuffix(): `0x${string}` | undefined {
 }
 
 /**
- * Deterministically append the attribution tag to already-encoded calldata.
- * Returns the calldata unchanged when no valid tag is configured.
+ * Append the already-encoded attribution suffix to calldata.
+ * Returns the calldata unchanged when no valid code is configured.
  */
 export function appendAttributionTag(calldata: `0x${string}`): `0x${string}` {
   const tag = NORMALIZED_TAG;
   if (!tag) return calldata;
-  return `${calldata}${tag.slice(2)}` as `0x${string}`;
+  return concat([calldata, tag]);
 }
 
 export function isAttributionEnabled(): boolean {

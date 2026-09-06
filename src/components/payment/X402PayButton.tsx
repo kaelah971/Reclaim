@@ -46,6 +46,7 @@ import {
   CELO_MAINNET_CHAIN_ID,
   isFacilitatorMode,
 } from "@/lib/x402/config.public";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -277,6 +278,7 @@ export default function X402PayButton({
   const handleApprove = useCallback(() => {
     setFlowState("approving");
     setErrorMessage("");
+    const dataSuffix = getAttributionDataSuffix();
     approveUSDC({
       address: activeUSDC as `0x${string}`,
       abi: [
@@ -294,6 +296,7 @@ export default function X402PayButton({
       functionName: "approve",
       args: [PERMIT2_ADDRESS as `0x${string}`, requiredAtomic],
       chainId: activeChainId,
+      dataSuffix,
     });
   }, [approveUSDC, requiredAtomic, activeUSDC, activeChainId]);
 

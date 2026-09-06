@@ -15,7 +15,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { toDataSuffix } from "@celo/attribution-tags";
 import { getEscrowContractConfig } from "@/lib/contracts/config";
+
+vi.hoisted(() => {
+  vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", "celo_b7de8bf7e64e");
+});
 
 const wagmiMocks = vi.hoisted(() => ({
   useAccount: vi.fn(),
@@ -44,6 +49,7 @@ const PAYMENT_ID = 1n;
 
 const CELO_SEPOLIA_ID = 11142220;
 const CELO_MAINNET_ID = 42220;
+const ATTRIBUTION_SUFFIX = toDataSuffix("celo_b7de8bf7e64e");
 
 interface WagmiHarnessMocks {
   connector: { getChainId: ReturnType<typeof vi.fn> };
@@ -129,6 +135,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await act(async () => {
     root?.unmount();
   });
@@ -213,13 +220,18 @@ describe("useSubmitEvidenceHash — live-chain hardening", () => {
       address: expected.address,
       functionName: "submitEvidenceHash",
       args: [PAYMENT_ID, REFERENCE],
+      dataSuffix: ATTRIBUTION_SUFFIX,
     });
     expect(writeContract.mock.calls[0][0]).toMatchObject({
       chainId: CELO_SEPOLIA_ID,
       address: expected.address,
       functionName: "submitEvidenceHash",
       args: [PAYMENT_ID, REFERENCE],
+      dataSuffix: ATTRIBUTION_SUFFIX,
     });
+    expect(simulateContract.mock.calls[0][0].dataSuffix).toBe(
+      writeContract.mock.calls[0][0].dataSuffix,
+    );
   });
 });
 

@@ -12,6 +12,7 @@ import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { getEscrowContractAddress, getEscrowChainId } from "@/lib/contracts/config";
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 import { translateContractError } from "@/lib/contracts/errorTranslation";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
 // useTokenApproval
@@ -130,6 +131,9 @@ export function useTokenApproval(): UseTokenApprovalReturn {
       }
 
       inFlightRef.current = true;
+      // Capture once so simulation and the submitted transaction use the same
+      // optional attribution suffix.
+      const dataSuffix = getAttributionDataSuffix();
 
       publicClient
         .simulateContract({
@@ -138,6 +142,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
           functionName: "approve",
           args: [escrowAddress, amount],
           account,
+          dataSuffix,
         })
         .then(() => {
           writeContract(
@@ -146,6 +151,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
               abi: erc20Abi,
               functionName: "approve",
               args: [escrowAddress, amount],
+              dataSuffix,
             },
             {
               onSettled: () => {

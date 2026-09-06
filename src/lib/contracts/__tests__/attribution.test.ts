@@ -3,7 +3,11 @@
 // ---------------------------------------------------------------------------
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fromDataSuffix, toDataSuffix } from "@celo/attribution-tags";
 import { normalizeTag } from "@/lib/contracts/attribution";
+
+const ASSIGNED_CODE = "celo_b7de8bf7e64e";
+const EXPECTED_SUFFIX = toDataSuffix(ASSIGNED_CODE);
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -11,62 +15,60 @@ afterEach(() => {
 });
 
 describe("normalizeTag", () => {
-  it("encodes a plain Celo project tag (text) to its UTF-8 hex bytes", () => {
-    expect(normalizeTag("celo_b7de8bf7e64e")).toBe(
-      "0x63656c6f5f623764653862663765363465",
-    );
+  it("encodes the assigned text code with the official SDK", () => {
+    expect(normalizeTag(ASSIGNED_CODE)).toBe(EXPECTED_SUFFIX);
   });
 
-  it("encodes arbitrary text to hex", () => {
-    expect(normalizeTag("hello")).toBe("0x68656c6c6f");
+  it("round-trips through the SDK decoder", () => {
+    expect(fromDataSuffix(normalizeTag(ASSIGNED_CODE)!)).toEqual({
+      codes: [ASSIGNED_CODE],
+      schemaId: 0,
+    });
   });
 
-  it("preserves valid 0x-prefixed hex without double-encoding", () => {
-    expect(normalizeTag("0x1234")).toBe("0x1234");
+  it("uses the SDK for raw-looking text instead of preserving it as hex", () => {
+    const normalized = normalizeTag("0x1234");
+    expect(normalized).not.toBe("0x1234");
+    expect(fromDataSuffix(normalized!)).toEqual({
+      codes: ["0x1234"],
+      schemaId: 0,
+    });
   });
 
-  it("lowercases valid 0x-prefixed hex while preserving it", () => {
-    expect(normalizeTag("0xABC123")).toBe("0xabc123");
+  it("rejects invalid codes", () => {
+    expect(normalizeTag("Celo_B7DE8BF7E64E")).toBeUndefined();
+    expect(normalizeTag("invalid code")).toBeUndefined();
   });
 
-  it("rejects empty 0x-prefixed hex", () => {
-    expect(normalizeTag("0x")).toBeUndefined();
-  });
-
-  it("rejects odd-length 0x-prefixed hex", () => {
-    expect(normalizeTag("0x123")).toBeUndefined();
-  });
-
-  it("rejects 0x-prefixed values with non-hex characters", () => {
-    expect(normalizeTag("0xZZ")).toBeUndefined();
-  });
-
-  it("fails closed on empty/undefined/whitespace-only input", () => {
+  it("fails closed on empty, undefined, and whitespace-only input", () => {
     expect(normalizeTag(undefined)).toBeUndefined();
     expect(normalizeTag("")).toBeUndefined();
     expect(normalizeTag("   ")).toBeUndefined();
   });
 
-  it("trims surrounding whitespace from the env value", () => {
-    expect(normalizeTag("  0x1234  ")).toBe("0x1234");
+  it("trims surrounding whitespace before SDK validation", () => {
+    expect(normalizeTag(`  ${ASSIGNED_CODE}  `)).toBe(EXPECTED_SUFFIX);
   });
 });
 
 describe("env integration (module-level const)", () => {
-  it("normalizes NEXT_PUBLIC_CELO_ATTRIBUTION_TAG as text when set", async () => {
-    vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", "celo_b7de8bf7e64e");
+  it("uses the assigned code and appends the encoded suffix", async () => {
+    vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", ASSIGNED_CODE);
     const attribution = await import("@/lib/contracts/attribution");
 
-    const expected = "0x63656c6f5f623764653862663765363465";
-    expect(attribution.getAttributionTag()).toBe(expected);
-    expect(attribution.getAttributionDataSuffix()).toBe(expected);
+    expect(attribution.getAttributionTag()).toBe(EXPECTED_SUFFIX);
+    expect(attribution.getAttributionDataSuffix()).toBe(EXPECTED_SUFFIX);
     expect(attribution.isAttributionEnabled()).toBe(true);
-    expect(attribution.appendAttributionTag("0xdeadbeef")).toBe(
-      "0xdeadbeef63656c6f5f623764653862663765363465",
-    );
+    const calldata = "0xdeadbeef" as const;
+    const appended = attribution.appendAttributionTag(calldata);
+    expect(appended).toBe(`${calldata}${EXPECTED_SUFFIX.slice(2)}`);
+    expect(fromDataSuffix(appended)).toEqual({
+      codes: [ASSIGNED_CODE],
+      schemaId: 0,
+    });
   });
 
-  it("fails closed when NEXT_PUBLIC_CELO_ATTRIBUTION_TAG is unset", async () => {
+  it("fails closed when the configuration is empty", async () => {
     vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", "");
     const attribution = await import("@/lib/contracts/attribution");
 
@@ -76,13 +78,13 @@ describe("env integration (module-level const)", () => {
     expect(attribution.appendAttributionTag("0xdeadbeef")).toBe("0xdeadbeef");
   });
 
-  it("preserves a raw hex env value without double-encoding", async () => {
-    vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", "0x1234");
+  it("fails closed when the configured code is invalid", async () => {
+    vi.stubEnv("NEXT_PUBLIC_CELO_ATTRIBUTION_TAG", "INVALID CODE");
     const attribution = await import("@/lib/contracts/attribution");
 
-    expect(attribution.getAttributionTag()).toBe("0x1234");
-    expect(attribution.appendAttributionTag("0xdeadbeef")).toBe(
-      "0xdeadbeef1234",
-    );
+    expect(attribution.getAttributionTag()).toBeUndefined();
+    expect(attribution.getAttributionDataSuffix()).toBeUndefined();
+    expect(attribution.isAttributionEnabled()).toBe(false);
+    expect(attribution.appendAttributionTag("0xdeadbeef")).toBe("0xdeadbeef");
   });
 });

@@ -5,6 +5,7 @@
 import { createPublicClient, createWalletClient, http } from "viem";
 import { celoSepolia } from "viem/chains";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 import { parsePaymentData } from "@/lib/contracts/types";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { privateKeyToAccount } from "viem/accounts";
@@ -154,14 +155,15 @@ export async function executeDisputeResolution(paymentId: string, decisionId: st
   try {
     const pc = getPublicClient();
     const escrowAddr = getContractAddress();
+    const dataSuffix = getAttributionDataSuffix();
 
     const { request } = await pc.simulateContract({
       address: escrowAddr, abi: protectedPaymentEscrowABI, functionName: "resolveDispute",
-      args: [BigInt(escrowId), BigInt(clientAmt)], account,
+      args: [BigInt(escrowId), BigInt(clientAmt)], account, dataSuffix,
     });
 
     const wc = createWalletClient({ chain: celoSepolia, transport: http(getRpcUrl()), account });
-    const txHash = await wc.writeContract(request);
+    const txHash = await wc.writeContract({ ...request, dataSuffix });
 
     await sb.from("review_executions").update({ status: "submitted", transaction_hash: txHash, submitted_at: new Date().toISOString() }).eq("id", execId);
 

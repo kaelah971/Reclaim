@@ -45,6 +45,7 @@ import {
   validatePayToAddress,
 } from "./config";
 import type { PaymentDetails, SettlementReceipt } from "./types";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -217,6 +218,7 @@ export async function settlePayment(
 
   let txHash: `0x${string}`;
   let receipt: TransactionReceipt;
+  const dataSuffix = getAttributionDataSuffix();
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -228,6 +230,7 @@ export async function settlePayment(
       chain: celoSepolia,
       // Gas estimation will be automatic; add a buffer for safety
       gas: undefined as unknown as bigint,
+      dataSuffix,
     });
 
     console.log(

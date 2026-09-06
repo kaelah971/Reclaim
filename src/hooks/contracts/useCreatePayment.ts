@@ -147,6 +147,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
       ] as const;
 
       inFlightRef.current = true;
+      const dataSuffix = getAttributionDataSuffix();
 
       publicClient
         .simulateContract({
@@ -154,6 +155,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
           functionName: "createPayment",
           args,
           account,
+          dataSuffix,
         })
         .then(() => {
           writeContract(
@@ -161,7 +163,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
               ...contract,
               functionName: "createPayment",
               args,
-              dataSuffix: getAttributionDataSuffix(),
+              dataSuffix,
             },
             {
               onSettled: () => {

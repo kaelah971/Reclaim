@@ -34,6 +34,7 @@ import {
   CELO_MAINNET_CHAIN_ID,
   isFacilitatorMode,
 } from "@/lib/x402/config.public";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
 // Static x402 constants — defined at module scope for stable references
@@ -850,6 +851,7 @@ export default function EvidencePage() {
                 size="sm"
                 onClick={() => {
                   setCheckError(null);
+                  const dataSuffix = getAttributionDataSuffix();
                   approveUSDC({
                     address: activeUSDC as `0x${string}`,
                     abi: [
@@ -867,6 +869,7 @@ export default function EvidencePage() {
                     functionName: "approve",
                     args: [PERMIT2_ADDRESS as `0x${string}`, requiredAtomic],
                     chainId: activeChainId,
+                    dataSuffix,
                   });
                 }}
                 disabled={isApprovalPending}

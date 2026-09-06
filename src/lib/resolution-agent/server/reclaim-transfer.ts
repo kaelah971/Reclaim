@@ -18,6 +18,7 @@ import {
 import { celo } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import type { ReclaimTransferClient } from "../api/service";
+import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
 // Canonical Celo Mainnet constants
@@ -143,6 +144,7 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
       functionName: "transfer",
       args: [toAddr, transferAmount],
     });
+    const dataSuffix = getAttributionDataSuffix();
 
     const nonce = storedNonce ?? (await publicClient.getTransactionCount({
       address: fromAddr,
@@ -165,6 +167,7 @@ export class CeloReclaimTransferClient implements ReclaimTransferClient {
       nonce,
       feeCurrency: USDC_FEE_CURRENCY_ADAPTER as any, // eslint-disable-line @typescript-eslint/no-explicit-any
       chain: celo,
+      dataSuffix,
     } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
 
     return { txHash: txHash as string, nonce, transferAmount };

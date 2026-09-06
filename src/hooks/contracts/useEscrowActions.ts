@@ -186,6 +186,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
       if (!gatedAccount || !publicClient) return;
 
       inFlightRef.current = true;
+      const dataSuffix = getAttributionDataSuffix();
 
       assertLiveEscrowChain()
         .then((onLiveChain) => {
@@ -199,6 +200,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
               functionName,
               args: [paymentId] as const,
               account: gatedAccount,
+              dataSuffix,
             })
             .then(() => {
               writeContract(
@@ -206,7 +208,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
                   ...contract,
                   functionName,
                   args: [paymentId] as const,
-                  dataSuffix: getAttributionDataSuffix(),
+                  dataSuffix,
                 },
                 {
                   onSettled: () => {
@@ -244,6 +246,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
       if (!gatedAccount || !publicClient) return;
 
       inFlightRef.current = true;
+      const dataSuffix = getAttributionDataSuffix();
 
       assertLiveEscrowChain()
         .then((onLiveChain) => {
@@ -257,6 +260,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
               functionName,
               args: [paymentId, reference] as const,
               account: gatedAccount,
+              dataSuffix,
             })
             .then(() => {
               writeContract(
@@ -264,7 +268,7 @@ function useEscrowWriteCore(): EscrowWriteCore {
                   ...contract,
                   functionName,
                   args: [paymentId, reference] as const,
-                  dataSuffix: getAttributionDataSuffix(),
+                  dataSuffix,
                 },
                 {
                   onSettled: () => {
