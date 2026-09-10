@@ -6,6 +6,25 @@ import {ProtectedPaymentEscrow} from "../src/ProtectedPaymentEscrow.sol";
 import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+/// @dev Test-only token that delivers 90% of a requested transfer amount.
+contract FeeOnTransferMock is ERC20Mock {
+    function transfer(address to, uint256 value) public override returns (bool) {
+        uint256 fee = value / 10;
+        _burn(msg.sender, fee);
+        _transfer(msg.sender, to, value - fee);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public override returns (bool) {
+        _spendAllowance(from, msg.sender, value);
+
+        uint256 fee = value / 10;
+        _burn(from, fee);
+        _transfer(from, to, value - fee);
+        return true;
+    }
+}
+
 /// @title ProtectedPaymentEscrow Unit Tests
 /// @notice Comprehensive tests covering all functions, state transitions,
 ///         access control, edge cases, pausing, and emergency rescue.
@@ -132,6 +151,23 @@ contract ProtectedPaymentEscrowTest is Test {
 
         vm.prank(_client);
         escrow.openDispute(paymentId, DISPUTE_REF);
+    }
+
+    /// @dev Create a payment without funding it.
+    function _createUnfunded(address _client, address _worker) internal returns (uint256 paymentId) {
+        vm.prank(_client);
+        paymentId = escrow.createPayment(
+            _worker,
+            PAYMENT_AMOUNT,
+            AGREEMENT_LABEL,
+            DELIVERABLE_SUMMARY,
+            DELIVERY_FORMAT,
+            uint64(block.timestamp + 7 days),
+            RELEASE_RULE,
+            0,
+            3 days,
+            EVIDENCE_EXPECTATION
+        );
     }
 
     // =========================================================================
@@ -1593,5 +1629,190 @@ contract ProtectedPaymentEscrowTest is Test {
 
         // Invariant: sum of balance deltas equals total payment amount
         assertEq(clientDelta + workerDelta, PAYMENT_AMOUNT);
+    }
+
+    // =========================================================================
+    // 21. P1 REGRESSION TESTS
+    // =========================================================================
+
+    function testResolvedPaymentCannotBeDisputed() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.openDispute(paymentId, DISPUTE_REF);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Resolved));
+    }
+
+    function testResolvedPaymentRejectsAllPostResolutionActions() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, 0);
+
+        uint256 clientBalanceAfterFirstResolution = token.balanceOf(client);
+        uint256 workerBalanceAfterFirstResolution = token.balanceOf(worker);
+
+        vm.prank(worker);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.acceptPayment(paymentId);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.approveRelease(paymentId);
+
+        vm.prank(worker);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.requestRelease(paymentId);
+
+        vm.prank(worker);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.submitEvidenceHash(paymentId, EVIDENCE_HASH);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.fundPayment(paymentId);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.cancelUnfunded(paymentId);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.openDispute(paymentId, DISPUTE_REF);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.resolveDispute(paymentId, 0);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Resolved));
+        assertEq(token.balanceOf(client), clientBalanceAfterFirstResolution);
+        assertEq(token.balanceOf(worker), workerBalanceAfterFirstResolution);
+    }
+
+    function testReleasedPaymentRejectsReopeningAndRepeatRelease() public {
+        uint256 paymentId = _createFundAcceptDeliver(client, worker);
+
+        vm.prank(client);
+        escrow.approveRelease(paymentId);
+
+        uint256 workerBalanceAfterRelease = token.balanceOf(worker);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.openDispute(paymentId, DISPUTE_REF);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.approveRelease(paymentId);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Released));
+        assertEq(token.balanceOf(worker), workerBalanceAfterRelease);
+    }
+
+    function testCancelledPaymentRejectsReopeningAndRepeatCancelOrFunding() public {
+        uint256 paymentId = _createUnfunded(client, worker);
+
+        vm.prank(client);
+        escrow.cancelUnfunded(paymentId);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.openDispute(paymentId, DISPUTE_REF);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.cancelUnfunded(paymentId);
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.fundPayment(paymentId);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Cancelled));
+    }
+
+    function testDisputeThenResolveExactlyOnce() public {
+        uint256 paymentId = _createAndDispute(client, worker);
+        uint256 clientAmount = 300e6;
+        uint256 workerAmount = PAYMENT_AMOUNT - clientAmount;
+        uint256 clientBalanceBefore = token.balanceOf(client);
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(owner);
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        assertEq(token.balanceOf(client) - clientBalanceBefore, clientAmount);
+        assertEq(token.balanceOf(worker) - workerBalanceBefore, workerAmount);
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Resolved));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.InvalidState.selector));
+        escrow.resolveDispute(paymentId, clientAmount);
+
+        assertEq(token.balanceOf(client) - clientBalanceBefore, clientAmount);
+        assertEq(token.balanceOf(worker) - workerBalanceBefore, workerAmount);
+    }
+
+    function testNormalRelease() public {
+        uint256 paymentId = _createFundAcceptDeliver(client, worker);
+
+        vm.prank(worker);
+        escrow.requestRelease(paymentId);
+
+        uint256 workerBalanceBefore = token.balanceOf(worker);
+
+        vm.prank(client);
+        escrow.approveRelease(paymentId);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Released));
+        assertEq(token.balanceOf(worker) - workerBalanceBefore, PAYMENT_AMOUNT);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    function testFundPaymentAcceptsExactReceivedAmount() public {
+        uint256 paymentId = _createUnfunded(client, worker);
+        uint256 escrowBalanceBefore = token.balanceOf(address(escrow));
+        uint256 clientBalanceBefore = token.balanceOf(client);
+
+        vm.prank(client);
+        escrow.fundPayment(paymentId);
+
+        assertEq(uint256(escrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Funded));
+        assertEq(token.balanceOf(address(escrow)) - escrowBalanceBefore, PAYMENT_AMOUNT);
+        assertEq(clientBalanceBefore - token.balanceOf(client), PAYMENT_AMOUNT);
+    }
+
+    function testFundPaymentRevertsWhenReceivedAmountDiffers() public {
+        FeeOnTransferMock feeToken = new FeeOnTransferMock();
+        ProtectedPaymentEscrow feeEscrow = new ProtectedPaymentEscrow(address(feeToken));
+
+        feeToken.mint(client, PAYMENT_AMOUNT);
+        vm.prank(client);
+        feeToken.approve(address(feeEscrow), type(uint256).max);
+
+        vm.prank(client);
+        uint256 paymentId = feeEscrow.createPayment(
+            worker,
+            PAYMENT_AMOUNT,
+            AGREEMENT_LABEL,
+            DELIVERABLE_SUMMARY,
+            DELIVERY_FORMAT,
+            uint64(block.timestamp + 7 days),
+            RELEASE_RULE,
+            0,
+            3 days,
+            EVIDENCE_EXPECTATION
+        );
+
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(ProtectedPaymentEscrow.TransferAmountMismatch.selector));
+        feeEscrow.fundPayment(paymentId);
+
+        assertEq(uint256(feeEscrow.getPayment(paymentId).state), uint256(ProtectedPaymentEscrow.State.Created));
+        assertEq(feeToken.balanceOf(address(feeEscrow)), 0);
     }
 }

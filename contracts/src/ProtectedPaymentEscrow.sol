@@ -266,7 +266,12 @@ contract ProtectedPaymentEscrow is ReentrancyGuard, Ownable {
         p.state = State.Funded;
         p.fundedAt = uint64(block.timestamp);
 
+        uint256 balanceBefore = escrowToken.balanceOf(address(this));
         escrowToken.safeTransferFrom(msg.sender, address(this), p.amount);
+        uint256 balanceAfter = escrowToken.balanceOf(address(this));
+        if (balanceAfter < balanceBefore || balanceAfter - balanceBefore != p.amount) {
+            revert TransferAmountMismatch();
+        }
 
         emit PaymentFunded(paymentId, msg.sender, p.amount);
     }
@@ -356,8 +361,8 @@ contract ProtectedPaymentEscrow is ReentrancyGuard, Ownable {
         }
         // Allowed states: Funded, Accepted, DeliverySubmitted, ReleaseRequested
         if (
-            p.state == State.Created || p.state == State.Released || p.state == State.Cancelled
-                || p.state == State.Disputed
+            p.state != State.Funded && p.state != State.Accepted && p.state != State.DeliverySubmitted
+                && p.state != State.ReleaseRequested
         ) {
             revert InvalidState();
         }

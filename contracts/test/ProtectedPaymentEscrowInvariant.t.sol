@@ -184,9 +184,10 @@ contract EscrowHandler is Test {
         uint256 pid = paymentIds[idx];
         try escrow.getPayment(pid) returns (ProtectedPaymentEscrow.Payment memory p) {
             if (
-                p.state != ProtectedPaymentEscrow.State.Created && p.state != ProtectedPaymentEscrow.State.Released
-                    && p.state != ProtectedPaymentEscrow.State.Cancelled
-                    && p.state != ProtectedPaymentEscrow.State.Disputed
+                p.state == ProtectedPaymentEscrow.State.Funded
+                    || p.state == ProtectedPaymentEscrow.State.Accepted
+                    || p.state == ProtectedPaymentEscrow.State.DeliverySubmitted
+                    || p.state == ProtectedPaymentEscrow.State.ReleaseRequested
             ) {
                 address disputer = actors[actorSeed % numActors];
                 if (disputer == p.client || disputer == p.worker) {
@@ -276,7 +277,7 @@ contract ProtectedPaymentEscrowInvariant is StdInvariant, Test {
 
     // =========================================================================
     // INVARIANT 2: Terminal States Never Change
-    // Once a payment reaches Released(5) or Cancelled(7), its state must
+    // Once a payment reaches Released(5), Cancelled(7), or Resolved(8), its state must
     // never change because no function transitions out of these states.
     // We check by comparing current state against a checkpoint stored each
     // time we detect a terminal state.
@@ -288,8 +289,8 @@ contract ProtectedPaymentEscrowInvariant is StdInvariant, Test {
         for (uint256 i = 1; i <= count; i++) {
             try escrow.getPayment(i) returns (ProtectedPaymentEscrow.Payment memory p) {
                 uint256 s = uint256(p.state);
-                // Released(5) and Cancelled(7) are terminal
-                if (s == 5 || s == 7) {
+                // Released(5), Cancelled(7), and Resolved(8) are terminal
+                if (s == 5 || s == 7 || s == 8) {
                     // Re-fetch to verify it hasn't changed (we snapshot above)
                     // Since the handler only calls valid transitions, this
                     // should remain stable.
