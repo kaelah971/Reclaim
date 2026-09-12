@@ -25,6 +25,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { PaymentDetails } from "./types";
 import {
   X402_USDC_ADDRESS,
+  X402_PAY_TO_ADDRESS,
   requireRelayerPrivateKey,
   getDisputeBriefPriceAtomic,
 } from "./config";
@@ -34,6 +35,8 @@ const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as const;
 
 /** Celo Sepolia chain id. */
 const CHAIN_ID = 11142220;
+const DECIMAL_RE = /^[0-9]+$/;
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 /** Permit2 PermitTransferFrom typed-data definition (must match the client). */
 const PERMIT2_TYPES = {
@@ -64,6 +67,14 @@ export interface LocalVerifyResult {
   payer?: string;
 }
 
+export interface Permit2VerificationTerms {
+  amountAtomic: string;
+  tokenAddress: string;
+  payToAddress: string;
+  /** Chain metadata persisted with the payment requirement. */
+  chainId?: number;
+}
+
 function getRpcUrl(): string {
   return (
     process.env.NEXT_PUBLIC_CELO_RPC_URL ||
@@ -71,9 +82,15 @@ function getRpcUrl(): string {
   );
 }
 
-function getClient(): PublicClient {
+function getClient(chainId = CHAIN_ID): PublicClient {
+  // Local settlement is currently Celo Sepolia, but use the server-owned
+  // chain metadata when a caller supplies it rather than silently signing or
+  // querying against a hardcoded chain id.
+  const chain = chainId === CHAIN_ID
+    ? celoSepolia
+    : { ...celoSepolia, id: chainId };
   return createPublicClient({
-    chain: celoSepolia,
+    chain,
     transport: http(getRpcUrl()),
   }) as unknown as PublicClient;
 }
@@ -88,8 +105,26 @@ function getClient(): PublicClient {
 export async function verifyPermit2SignatureOffline(
   payment: PaymentDetails,
   expectedSpender: `0x${string}`,
+  chainId = CHAIN_ID,
 ): Promise<LocalVerifyResult> {
-  if (!payment.nonce || !payment.deadline || !payment.spender) {
+  if (
+    !payment ||
+    typeof payment.from !== "string" ||
+    !ADDRESS_RE.test(payment.from) ||
+    typeof payment.token !== "string" ||
+    !ADDRESS_RE.test(payment.token) ||
+    typeof payment.signature !== "string" ||
+    !payment.signature ||
+    typeof payment.amount !== "string" ||
+    !DECIMAL_RE.test(payment.amount) ||
+    typeof payment.nonce !== "string" ||
+    !DECIMAL_RE.test(payment.nonce) ||
+    typeof payment.deadline !== "string" ||
+    !DECIMAL_RE.test(payment.deadline) ||
+    typeof payment.spender !== "string" ||
+    !ADDRESS_RE.test(payment.spender) ||
+    !ADDRESS_RE.test(expectedSpender)
+  ) {
     return {
       isValid: false,
       invalidReason:
@@ -97,7 +132,12 @@ export async function verifyPermit2SignatureOffline(
     };
   }
 
-  const deadline = BigInt(payment.deadline);
+  let deadline: bigint;
+  try {
+    deadline = BigInt(payment.deadline);
+  } catch {
+    return { isValid: false, invalidReason: "Invalid Permit2 deadline format." };
+  }
   const nowSec = BigInt(Math.floor(Date.now() / 1000));
   if (deadline < nowSec) {
     return { isValid: false, invalidReason: "Permit2 deadline has expired." };
@@ -117,7 +157,7 @@ export async function verifyPermit2SignatureOffline(
     recovered = await recoverTypedDataAddress({
       domain: {
         name: "Permit2",
-        chainId: CHAIN_ID,
+        chainId,
         verifyingContract: PERMIT2_ADDRESS,
       },
       types: PERMIT2_TYPES,
@@ -157,12 +197,30 @@ export async function verifyPermit2SignatureOffline(
  */
 export async function verifyPermit2FundsOnChain(
   payment: PaymentDetails,
+  expectedToken = X402_USDC_ADDRESS,
+  chainId = CHAIN_ID,
 ): Promise<LocalVerifyResult> {
-  const client = getClient();
+  if (
+    !payment ||
+    typeof payment.from !== "string" ||
+    !ADDRESS_RE.test(payment.from) ||
+    !ADDRESS_RE.test(expectedToken)
+  ) {
+    return { isValid: false, invalidReason: "Invalid buyer or token address." };
+  }
   const buyer = payment.from as `0x${string}`;
-  const usdc = X402_USDC_ADDRESS as `0x${string}`;
-  const amount = BigInt(payment.amount);
-  const nonce = BigInt(payment.nonce ?? "0");
+  const usdc = expectedToken as `0x${string}`;
+  let amount: bigint;
+  let nonce: bigint;
+  try {
+    if (typeof payment.amount !== "string" || !DECIMAL_RE.test(payment.amount)) throw new Error();
+    if (typeof payment.nonce !== "string" || !DECIMAL_RE.test(payment.nonce)) throw new Error();
+    amount = BigInt(payment.amount);
+    nonce = BigInt(payment.nonce);
+  } catch {
+    return { isValid: false, invalidReason: "Invalid Permit2 amount or nonce format." };
+  }
+  const client = getClient(chainId);
 
   const [balance, allowance, bitmap] = await Promise.all([
     client.readContract({
@@ -219,18 +277,63 @@ export async function verifyPermit2FundsOnChain(
  */
 export async function verifyPermit2Authorization(
   payment: PaymentDetails,
+  terms: Permit2VerificationTerms = {
+    amountAtomic: getDisputeBriefPriceAtomic().toString(),
+    tokenAddress: X402_USDC_ADDRESS,
+    payToAddress: X402_PAY_TO_ADDRESS,
+    chainId: CHAIN_ID,
+  },
 ): Promise<LocalVerifyResult> {
-  const required = getDisputeBriefPriceAtomic();
+  let required: bigint;
+  try {
+    if (typeof terms.amountAtomic !== "string" || !DECIMAL_RE.test(terms.amountAtomic)) throw new Error();
+    required = BigInt(terms.amountAtomic);
+  } catch {
+    return { isValid: false, invalidReason: "Invalid configured payment amount." };
+  }
   let amount: bigint;
   try {
+    if (typeof payment.amount !== "string" || !DECIMAL_RE.test(payment.amount)) throw new Error();
     amount = BigInt(payment.amount);
   } catch {
     return { isValid: false, invalidReason: "Invalid payment amount format." };
   }
-  if (amount < required) {
+  if (amount !== required) {
     return {
       isValid: false,
-      invalidReason: `Payment amount ${amount} is below the required ${required}.`,
+      invalidReason: `Payment amount ${amount} does not match exact amount ${required}.`,
+    };
+  }
+
+  if (
+    !payment ||
+    typeof payment.token !== "string" ||
+    !ADDRESS_RE.test(payment.token) ||
+    !ADDRESS_RE.test(terms.tokenAddress) ||
+    !ADDRESS_RE.test(terms.payToAddress)
+  ) {
+    return { isValid: false, invalidReason: "Invalid payment token address." };
+  }
+
+  if (!Number.isInteger(terms.chainId) || (terms.chainId ?? 0) <= 0) {
+    return { isValid: false, invalidReason: "Invalid configured payment chain ID." };
+  }
+  const chainId = terms.chainId as number;
+  if (payment.token.toLowerCase() !== terms.tokenAddress.toLowerCase()) {
+    return {
+      isValid: false,
+      invalidReason: `Payment token ${payment.token} does not match expected ${terms.tokenAddress}.`,
+    };
+  }
+  if (
+    terms.payToAddress &&
+    (typeof payment.to !== "string" ||
+      !/^0x[0-9a-fA-F]{40}$/.test(payment.to) ||
+      payment.to.toLowerCase() !== terms.payToAddress.toLowerCase())
+  ) {
+    return {
+      isValid: false,
+      invalidReason: `Payment recipient ${payment.to} does not match expected ${terms.payToAddress}.`,
     };
   }
 
@@ -239,10 +342,15 @@ export async function verifyPermit2Authorization(
   const sigResult = await verifyPermit2SignatureOffline(
     payment,
     relayer.address,
+    chainId,
   );
   if (!sigResult.isValid) return sigResult;
 
-  const fundsResult = await verifyPermit2FundsOnChain(payment);
+  const fundsResult = await verifyPermit2FundsOnChain(
+    payment,
+    terms.tokenAddress,
+    chainId,
+  );
   if (!fundsResult.isValid) return fundsResult;
 
   return { isValid: true, payer: sigResult.payer };

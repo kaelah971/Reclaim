@@ -19,6 +19,7 @@ import { buildEvidenceManifest, type EvidenceFormData } from "@/lib/evidence/man
 export type EvidenceMetadataPersistStatus =
   | "persisted"
   | "already_existed"
+  | "review_locked"
   | "hash_mismatch"
   | "chain_read_failed"
   | "insert_failed";
@@ -102,6 +103,33 @@ export async function persistVerifiedEvidenceMetadata(params: {
     };
   }
 
+  // Fast-path the database trigger below. The trigger remains the authority
+  // because this read can race a reviewer draft under concurrent requests.
+  const { data: reviewLock, error: reviewLockError } = await store
+    .from("evidence_review_locks")
+    .select("locked_at")
+    .eq("escrow_chain_id", escrowChainId)
+    .eq("escrow_payment_id", paymentId)
+    .maybeSingle();
+
+  if (reviewLockError) {
+    return {
+      status: "insert_failed",
+      evidenceReference: normalizedReference,
+      rowId: null,
+      detail: reviewLockError.message,
+    };
+  }
+
+  if (reviewLock) {
+    return {
+      status: "review_locked",
+      evidenceReference: normalizedReference,
+      rowId: null,
+      detail: "Reviewer review has begun; evidence metadata is immutable.",
+    };
+  }
+
   // 5. Persist the new version
   const fileCount = data.fileHash ? 1 : 0;
   const { data: inserted, error: insertErr } = await store
@@ -124,11 +152,20 @@ export async function persistVerifiedEvidenceMetadata(params: {
     .single();
 
   if (insertErr || !inserted) {
+    const detail = insertErr?.message ?? "insert returned no row";
+    if (detail.includes("immutable after reviewer review begins")) {
+      return {
+        status: "review_locked",
+        evidenceReference: normalizedReference,
+        rowId: null,
+        detail,
+      };
+    }
     return {
       status: "insert_failed",
       evidenceReference: normalizedReference,
       rowId: null,
-      detail: insertErr instanceof Error ? insertErr.message : "insert returned no row",
+      detail,
     };
   }
 
@@ -137,6 +174,8 @@ export async function persistVerifiedEvidenceMetadata(params: {
     .from("evidence_metadata")
     .update({ is_current: false })
     .eq("escrow_payment_id", paymentId)
+    .eq("escrow_chain_id", escrowChainId)
+    .eq("escrow_contract_address", escrowAddress.toLowerCase())
     .neq("id", inserted.id);
 
   return {

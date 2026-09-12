@@ -15,7 +15,10 @@
 import type { ResolutionAgent } from "../types";
 import type { ActionExecutionResult, LeaseContext } from "../worker/types";
 import type { ToolExecutionRow } from "../store/types";
-import type { EvidenceQualityCheckDependencies } from "./types";
+import {
+  validatePersistedSettlementProof,
+  type EvidenceQualityCheckDependencies,
+} from "./types";
 import { normalizeEvidenceQualityResult } from "./evidence-quality-result";
 import {
   buildEvidenceCheckInput,
@@ -46,6 +49,9 @@ export async function recoverPaidEvidenceQualityCheck(params: {
   // currentRunningToolId, keep status active, and ensure spent reflects the
   // settlement. Never touch budget when already spent; never pay again.
   if (execution.state === "settled") {
+    const proofError = validatePersistedSettlementProof(execution);
+    if (proofError) return { kind: "failed_recoverable", reason: proofError };
+
     const alreadySpent = agent.budget.spentAtomic >= CANONICAL_PRICE;
     const alreadyReconciled =
       alreadySpent &&
@@ -113,10 +119,11 @@ export async function recoverPaidEvidenceQualityCheck(params: {
   }
 
   // ---- Step 2: Verify payment proof exists --------------------------------
-  if (!execution.settlement_tx_hash && !execution.payment_reference) {
+  const proofError = validatePersistedSettlementProof(execution);
+  if (proofError) {
     return {
       kind: "failed_recoverable",
-      reason: "No payment proof — cannot recover without proof of payment",
+      reason: proofError,
     };
   }
 

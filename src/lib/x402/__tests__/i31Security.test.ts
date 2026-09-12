@@ -29,7 +29,7 @@ import type { DisputeBrief } from "../disputeBrief";
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const MOCK_RECEIPT: SettlementReceipt = {
+let MOCK_RECEIPT: SettlementReceipt = {
   txHash: "0x392415d5642f5e74327fddbfba6fd1f434b05e7c6d4e084e3f7bcc4fbb9f0d7c",
   blockNumber: BigInt(10000000),
   blockHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -39,6 +39,15 @@ const MOCK_RECEIPT: SettlementReceipt = {
   amount: "10000",
   tokenAddress: "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
 };
+
+// Keep the fixture compatible with the store's global transaction uniqueness
+// invariant without weakening replay protection between real payments.
+beforeEach(() => {
+  MOCK_RECEIPT = {
+    ...MOCK_RECEIPT,
+    txHash: `0x${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`,
+  };
+});
 
 const MOCK_BRIEF: DisputeBrief = {
   briefId: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
@@ -341,10 +350,11 @@ describe("I3.1 wallet authentication", () => {
 // ---------------------------------------------------------------------------
 
 describe("I3.1 paid_pending_brief recovery", () => {
-  const PAYMENT_ID = "pay_recovery_test";
+  let paymentId: string;
 
   beforeEach(() => {
-    recordSettlementReceipt(PAYMENT_ID, MOCK_RECEIPT);
+    paymentId = `pay_recovery_test_${crypto.randomUUID()}`;
+    recordSettlementReceipt(paymentId, MOCK_RECEIPT);
   });
 
   afterEach(() => {
@@ -353,34 +363,34 @@ describe("I3.1 paid_pending_brief recovery", () => {
 
   it("original request hash matches after brief is attached", () => {
     const hash = keccak256(stringToHex("recovery-request"));
-    setRequestHash(PAYMENT_ID, hash);
-    recordBrief(PAYMENT_ID, MOCK_BRIEF);
+    setRequestHash(paymentId, hash);
+    recordBrief(paymentId, MOCK_BRIEF);
 
-    const result = getResult(PAYMENT_ID);
+    const result = getResult(paymentId);
     expect(result).toBeDefined();
     expect(result!.brief!.briefId).toBe(MOCK_BRIEF.briefId);
-    expect(getRequestHash(PAYMENT_ID)).toBe(hash);
+    expect(getRequestHash(paymentId)).toBe(hash);
   });
 
   it("paid_pending_brief retry returns the original brief", () => {
     const hash = keccak256(stringToHex("retry-request"));
-    setRequestHash(PAYMENT_ID, hash);
-    recordBrief(PAYMENT_ID, MOCK_BRIEF);
+    setRequestHash(paymentId, hash);
+    recordBrief(paymentId, MOCK_BRIEF);
 
     // Simulate a retry — the brief should already be there
-    const result = getResult(PAYMENT_ID);
+    const result = getResult(paymentId);
     expect(result).toBeDefined();
     expect(result!.brief).toBeDefined();
     expect(result!.brief!.neutralCaseTitle).toBe("Test Dispute (Payment #1)");
   });
 
   it("request hash mismatch is detectable", () => {
-    const hash = keccak256(stringToHex("original-request"));
-    setRequestHash(PAYMENT_ID, hash);
+    const hash = keccak256(stringToHex("mismatch-original-request"));
+    setRequestHash(paymentId, hash);
 
     const differentHash = keccak256(stringToHex("different-request"));
-    expect(getRequestHash(PAYMENT_ID)).toBe(hash);
-    expect(getRequestHash(PAYMENT_ID)).not.toBe(differentHash);
+    expect(getRequestHash(paymentId)).toBe(hash);
+    expect(getRequestHash(paymentId)).not.toBe(differentHash);
   });
 });
 

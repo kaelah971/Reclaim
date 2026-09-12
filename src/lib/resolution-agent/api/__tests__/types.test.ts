@@ -27,7 +27,7 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 30000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_test_001",
+      escrowPaymentId: "1",
       budgetAtomic: "30000",
     });
     expect(result.success).toBe(true);
@@ -35,7 +35,7 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 40000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_test_002",
+      escrowPaymentId: "2",
       budgetAtomic: "40000",
     });
     expect(result.success).toBe(true);
@@ -43,7 +43,7 @@ describe("createAgentRequestSchema", () => {
 
   it("valid creation request (budget 50000) passes validation", () => {
     const result = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_test_003",
+      escrowPaymentId: "3",
       budgetAtomic: "50000",
     });
     expect(result.success).toBe(true);
@@ -75,7 +75,7 @@ describe("createAgentRequestSchema", () => {
   it("only escrowPaymentId and budgetAtomic are required from client", () => {
     // Verify that the minimal valid request only needs these two fields
     const result = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_minimal",
+      escrowPaymentId: "4",
       budgetAtomic: "30000",
     });
     expect(result.success).toBe(true);
@@ -85,7 +85,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '30000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "30000",
     });
     expect(r.success).toBe(true);
@@ -93,7 +93,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '40000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "40000",
     });
     expect(r.success).toBe(true);
@@ -101,7 +101,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '50000' accepted", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "50000",
     });
     expect(r.success).toBe(true);
@@ -109,7 +109,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget 10000 rejected (below minimum)", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "10000",
     });
     expect(r.success).toBe(false);
@@ -117,7 +117,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget 99999 rejected (not in supported set)", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "99999",
     });
     expect(r.success).toBe(false);
@@ -125,7 +125,7 @@ describe("createAgentRequestSchema", () => {
 
   it("negative budget rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "-1",
     });
     expect(r.success).toBe(false);
@@ -133,7 +133,7 @@ describe("createAgentRequestSchema", () => {
 
   it("non-numeric budget rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "free",
     });
     expect(r.success).toBe(false);
@@ -141,7 +141,7 @@ describe("createAgentRequestSchema", () => {
 
   it("budget '0' rejected", () => {
     const r = createAgentRequestSchema.safeParse({
-      escrowPaymentId: "pay_ok",
+      escrowPaymentId: "5",
       budgetAtomic: "0",
     });
     expect(r.success).toBe(false);

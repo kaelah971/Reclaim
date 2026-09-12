@@ -11,6 +11,8 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    // Vercel's generated server bundle is not application source.
+    ".vercel/**",
     "next-env.d.ts",
     // Upstream library test files (not project code):
     "contracts/lib/**",

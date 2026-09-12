@@ -19,6 +19,10 @@ import type {
   CaseRefreshDependencies,
   X402SettlementResult,
 } from "./types";
+import {
+  validatePersistedSettlementProof,
+  validateX402SettlementResult,
+} from "./types";
 import { buildCaseRefreshInput } from "./case-refresh-input";
 import { normalizeCaseRefreshResult } from "./case-refresh-result";
 import {
@@ -253,10 +257,14 @@ function handleExistingExecution(params: {
 
   switch (existing.state) {
     case "settled": {
+      const proofError = validatePersistedSettlementProof(existing);
+      if (proofError) return { kind: "failed_recoverable", reason: proofError };
       return { kind: "executed" };
     }
 
     case "paid_pending_result": {
+      const proofError = validatePersistedSettlementProof(existing);
+      if (proofError) return { kind: "failed_recoverable", reason: proofError };
       return { kind: "waiting", reason: "paid_pending_result — recovery needed" };
     }
 
@@ -363,11 +371,26 @@ async function createExecution(params: {
 
   // ---- Step 6c: Handle existing execution (idempotent return from RPC) ----
   if (rpcResult.kind === "existing") {
+    const existingExecution = await store.getToolExecutionByRequestHash(
+      agent.id,
+      requestHash,
+    );
+    if (!existingExecution || existingExecution.state !== rpcResult.state) {
+      return {
+        kind: "failed_recoverable",
+        reason: "Existing execution proof could not be reloaded safely",
+      };
+    }
+
     switch (rpcResult.state) {
       case "settled":
-        return { kind: "executed" };
-      case "paid_pending_result":
-        return { kind: "waiting", reason: "paid_pending_result — recovery needed" };
+      case "paid_pending_result": {
+        const proofError = validatePersistedSettlementProof(existingExecution);
+        if (proofError) return { kind: "failed_recoverable", reason: proofError };
+        return rpcResult.state === "settled"
+          ? { kind: "executed" }
+          : { kind: "waiting", reason: "paid_pending_result — recovery needed" };
+      }
       case "settling":
       case "reserved":
       case "pending":
@@ -463,6 +486,18 @@ async function createExecution(params: {
 
   // ---- Step 6h: Handle settlement result ----------------------------------
   if (settlementResult.success) {
+    const settlementProofError = validateX402SettlementResult(settlementResult);
+    if (settlementProofError) {
+      await store.updateToolExecution(agent.id, requestHash, {
+        state: "failed_recoverable",
+        failure_reason: settlementProofError,
+      });
+      return {
+        kind: "failed_recoverable",
+        reason: settlementProofError,
+      };
+    }
+
     const txHash = settlementResult.txHash;
     if (txHash) {
       try {

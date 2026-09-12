@@ -174,6 +174,20 @@ function makeMockDependencies(): {
     settleEvidenceQualityCheck: vi.fn().mockResolvedValue({
       success: true,
       txHash: "0xs-tx-hash",
+      receipt: {
+        facilitatorUrl: "https://api.x402.celo.org",
+        x402Version: 2,
+        scheme: "exact",
+        network: "eip155:42220",
+        payer: "0x0000000000000000000000000000000000000001",
+        payTo: "0x0000000000000000000000000000000000000002",
+        token: "0x0000000000000000000000000000000000000003",
+        amount: "10000",
+        paymentIdentifier: "pay_test",
+        settlementTxHash: "0xs-tx-hash",
+        settlementSuccess: true,
+        settledAt: new Date().toISOString(),
+      },
       ambiguous: false,
     }),
   } as unknown as ResolutionAgentX402SettlementClient;

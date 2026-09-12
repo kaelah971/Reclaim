@@ -94,6 +94,7 @@ export default function AgentRunCard({
         agentId,
         escrowChainId: CANONICAL_ESCROW_CHAIN_ID,
         escrowPaymentId,
+        signerAddress: wallet.address,
       });
 
       const signature = await signMessageAsync({ message: canonicalMessage });

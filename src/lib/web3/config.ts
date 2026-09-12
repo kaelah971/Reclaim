@@ -23,8 +23,14 @@ export const wagmiConfig = createConfig({
   chains: [celoChain, celoMainnetChain],
   connectors: buildConnectors(),
   transports: {
-    [celoChain.id]: http(process.env.NEXT_PUBLIC_CELO_RPC_URL || undefined),
-    [celoMainnetChain.id]: http("https://forno.celo.org"),
+    [celoChain.id]: http(
+      process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+        process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+        undefined,
+    ),
+    [celoMainnetChain.id]: http(
+      process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || undefined,
+    ),
   },
   ssr: true,
   storage: createStorage({

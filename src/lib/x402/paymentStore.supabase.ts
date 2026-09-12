@@ -1,34 +1,29 @@
 // ---------------------------------------------------------------------------
-// SupabasePaymentStore — durable implementation of PaymentStore
-//
-// Uses PostgreSQL via Supabase for:
-//   - Payment lifecycle persistence across Vercel instances
-//   - Atomic state transitions (no read-then-write races)
-//   - Transaction hash uniqueness enforcement
-//   - Consumed-transaction replay protection
-//   - Request hash binding
-//
-// All state mutations use conditional PostgreSQL queries (WHERE clauses on
-// expected current state) to prevent concurrent conflicts across instances.
+// Durable Supabase implementation of the x402 payment store.
 // ---------------------------------------------------------------------------
 
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import type { SettlementReceipt } from "./types";
 import type { DisputeBrief } from "./disputeBrief";
-import type {
-  PaymentStore,
-  PaymentIdentifier,
-  PaymentStatus,
-  PaymentRecord,
-  ConsumedTxRecord,
+import {
+  assertPaymentMetadataPersistable,
+  assertPaymentMetadataMatches,
+  assertSettlementReceiptMatchesMetadata,
+  assertSettlementReceiptPersistable,
+  InMemoryPaymentStore,
+  type ConsumedTxRecord,
+  type PaymentCreateResult,
+  type PaymentIdentifier,
+  type PaymentMetadata,
+  type PaymentRecord,
+  type PaymentState,
+  type PaymentStatus,
+  type PaymentStore,
+  type SettlementClaim,
+  PaymentStoreConflictError,
 } from "./paymentStore";
 
-// ---------------------------------------------------------------------------
-// Row types matching the database schema
-// ---------------------------------------------------------------------------
-
 interface X402PaymentRow {
-  id: string;
   payment_identifier: string;
   service_identifier: string;
   escrow_payment_id: string | null;
@@ -48,38 +43,31 @@ interface X402PaymentRow {
   authorization_nonce: string | null;
   authorization_deadline: string | null;
   authorization_status: string | null;
-  state: string;
+  state: PaymentState;
   transaction_hash: string | null;
-  block_number: number | null;
+  block_number: number | string | null;
   settlement_receipt: SettlementReceipt | null;
   brief: DisputeBrief | null;
-  error_code: string | null;
   error_message: string | null;
-  correlation_id: string | null;
   created_at: string;
-  updated_at: string;
-  settled_at: string | null;
-  delivered_at: string | null;
-  failed_at: string | null;
 }
 
 interface ConsumedTxDbRow {
   transaction_hash: string;
   payment_identifier: string;
-  escrow_payment_id: string | null;
   payer_address: string;
-  pay_to_address: string;
-  token_address: string;
-  amount_atomic: string;
   request_hash: string | null;
   consumed_at: string;
   recovery_type: string;
-  metadata: Record<string, unknown> | null;
 }
 
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
+function throwDbError(operation: string, error: { message: string; code?: string }): never {
+  throw new Error(`[SupabasePaymentStore] ${operation} failed: ${error.message}`);
+}
+
+function isUniqueViolation(error: { code?: string; message?: string }): boolean {
+  return error.code === "23505" || /duplicate key|unique constraint/i.test(error.message ?? "");
+}
 
 export class SupabasePaymentStore implements PaymentStore {
   private getClient() {
@@ -90,301 +78,288 @@ export class SupabasePaymentStore implements PaymentStore {
     return `pay_${crypto.randomUUID()}`;
   }
 
-  // -----------------------------------------------------------------------
-  // recordPending — atomic insert, rejects if payment_identifier exists
-  // -----------------------------------------------------------------------
-
-  async recordPending(paymentId: PaymentIdentifier, payerAddress = "", payToAddress = "", amount = "10000"): Promise<void> {
-    const { error } = await this.getClient()
-      .from("x402_payments")
-      .insert({
-        payment_identifier: paymentId,
-        payer_address: payerAddress || "pending",
-        pay_to_address: payToAddress || "pending",
-        network: "eip155:11142220",
-        chain_id: 11142220,
-        token_address: "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
-        amount_atomic: amount,
-        amount_display: "0.01",
-        state: "pending",
-      });
-
-    if (error && error.code !== "23505") {
-      console.error(`[SupabasePaymentStore] recordPending failed: ${error.message}`);
+  async recordPending(paymentId: PaymentIdentifier, metadata?: PaymentMetadata): Promise<PaymentCreateResult> {
+    if (!metadata) {
+      throw new Error("Durable x402 pending creation requires complete payment metadata.");
     }
+    assertPaymentMetadataPersistable(metadata);
+
+    const { error } = await this.getClient().from("x402_payments").insert({
+      payment_identifier: paymentId,
+      service_identifier: metadata.service,
+      escrow_payment_id: metadata.escrowPaymentId ?? null,
+      payer_address: metadata.payerAddress,
+      pay_to_address: metadata.payToAddress,
+      network: metadata.network,
+      chain_id: metadata.chainId,
+      token_address: metadata.tokenAddress,
+      token_symbol: metadata.tokenSymbol,
+      token_decimals: metadata.tokenDecimals,
+      amount_atomic: metadata.amountAtomic,
+      amount_display: metadata.amountDisplay,
+      request_hash: metadata.requestHash ?? null,
+      dispute_reason: metadata.disputeReason ?? null,
+      requested_outcome: metadata.requestedOutcome ?? null,
+      authorization_nonce: metadata.authorizationNonce ?? null,
+      authorization_deadline: metadata.authorizationDeadline ?? null,
+      authorization_status: "pending",
+      state: "pending",
+    });
+
+    if (!error) {
+      const row = await this.getRowByPaymentId(paymentId);
+      if (!row) throw new Error(`[SupabasePaymentStore] pending payment ${paymentId} was inserted but could not be read.`);
+      return { created: true, paymentId, record: dbRowToPaymentRecord(row) };
+    }
+
+    if (!isUniqueViolation(error)) throwDbError("recordPending", error);
+
+    // PostgreSQL's unique payment_identifier/request_hash constraints decide
+    // the winner. Recover that row rather than attempting another settlement.
+    const existingByPaymentId = await this.getRowByPaymentId(paymentId);
+    const existingByRequestHash = !existingByPaymentId && metadata.requestHash
+      ? await this.getRowByRequestHash(metadata.requestHash)
+      : undefined;
+    const existing = existingByPaymentId ?? existingByRequestHash;
+    if (!existing) throwDbError("recordPending unique-conflict recovery", error);
+    const existingMetadata = dbRowToPaymentRecord(existing).metadata;
+    if (!existingMetadata) {
+      throw new PaymentStoreConflictError(
+        `Request hash is already bound to payment ${existing.payment_identifier}, but its server-owned metadata is unavailable for comparison.`,
+      );
+    }
+    assertPaymentMetadataMatches(existingMetadata, metadata);
+    return {
+      created: false,
+      paymentId: existing.payment_identifier,
+      record: dbRowToPaymentRecord(existing),
+    };
   }
 
-  // -----------------------------------------------------------------------
-  // recordSettled — final settled state with receipt + brief
-  // -----------------------------------------------------------------------
-
-  async recordSettled(
-    paymentId: PaymentIdentifier,
-    receipt: SettlementReceipt,
-    brief: DisputeBrief,
-  ): Promise<void> {
-    const { error } = await this.getClient()
+  async recordAuthorizationVerified(paymentId: PaymentIdentifier): Promise<void> {
+    const { data, error } = await this.getClient()
       .from("x402_payments")
-      .update({
-        state: "settled",
-        transaction_hash: receipt.txHash,
-        block_number: Number(receipt.blockNumber),
-        settlement_receipt: receipt as unknown as Record<string, unknown>,
-        brief: brief as unknown as Record<string, unknown>,
-        settled_at: new Date().toISOString(),
-        delivered_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
+      .update({ state: "authorization_verified", authorization_status: "verified", updated_at: new Date().toISOString() })
       .eq("payment_identifier", paymentId)
-      .in("state", ["pending", "authorization_verified", "settlement_submitted", "paid_pending_brief"]);
+      .eq("state", "pending")
+      .select("*")
+      .maybeSingle();
+    if (error) throwDbError("recordAuthorizationVerified", error);
+    if (data) return;
 
-    if (error) {
-      console.error(`[SupabasePaymentStore] recordSettled failed: ${error.message}`);
-    }
+    const existing = await this.requireRow(paymentId);
+    if (existing.state === "authorization_verified" || existing.state === "settlement_submitted" || existing.state === "paid_pending_brief" || existing.state === "settled") return;
+    throw new PaymentStoreConflictError(`Payment ${paymentId} cannot be authorization-verified from ${existing.state}.`);
   }
 
-  // -----------------------------------------------------------------------
-  // recordFailed
-  // -----------------------------------------------------------------------
+  async claimSettlement(paymentId: PaymentIdentifier, requestHash?: string): Promise<SettlementClaim> {
+    let query = this.getClient()
+      .from("x402_payments")
+      .update({ state: "settlement_submitted", updated_at: new Date().toISOString() })
+      .eq("payment_identifier", paymentId)
+      .in("state", ["pending", "authorization_verified"])
+      .select("*");
+    if (requestHash) query = query.eq("request_hash", requestHash);
+    const { data, error } = await query.maybeSingle();
+    if (error) throwDbError("claimSettlement", error);
+    if (data) return { claimed: true, state: "settlement_submitted" };
+
+    const existing = await this.requireRow(paymentId);
+    if (requestHash && existing.request_hash !== requestHash) {
+      throw new PaymentStoreConflictError(`Payment ${paymentId} is bound to a different request hash.`);
+    }
+    return {
+      claimed: false,
+      state: existing.state,
+      receipt: existing.settlement_receipt ?? undefined,
+      brief: existing.brief ?? undefined,
+    };
+  }
+
+  async getState(paymentId: PaymentIdentifier): Promise<PaymentState | undefined> {
+    const row = await this.getRowByPaymentId(paymentId);
+    return row?.state;
+  }
+
+  async recordSettled(paymentId: PaymentIdentifier, receipt: SettlementReceipt, brief: DisputeBrief): Promise<void> {
+    await this.recordSettlementReceipt(paymentId, receipt);
+    await this.recordBrief(paymentId, brief);
+  }
 
   async recordFailed(paymentId: PaymentIdentifier, errorMessage: string): Promise<void> {
-    const { error } = await this.getClient()
+    const { data, error } = await this.getClient()
       .from("x402_payments")
-      .update({
-        state: "failed",
-        error_message: errorMessage,
-        failed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
+      .update({ state: "failed", error_message: errorMessage, failed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("payment_identifier", paymentId)
-      .in("state", ["pending", "authorization_verified", "settlement_submitted"]);
+      .in("state", ["pending", "authorization_verified"])
+      .select("*")
+      .maybeSingle();
+    if (error) throwDbError("recordFailed", error);
+    if (data) return;
 
-    if (error) {
-      console.error(`[SupabasePaymentStore] recordFailed failed: ${error.message}`);
-    }
+    const existing = await this.requireRow(paymentId);
+    if (existing.state === "failed" || existing.state === "paid_pending_brief" || existing.state === "settled") return;
+    if (existing.state === "settlement_submitted") return;
+    throw new PaymentStoreConflictError(`Payment ${paymentId} cannot be marked failed from ${existing.state}.`);
   }
 
-  // -----------------------------------------------------------------------
-  // getStatus
-  // -----------------------------------------------------------------------
+  async recordSettlementFailed(paymentId: PaymentIdentifier, errorMessage: string): Promise<void> {
+    const { data, error } = await this.getClient()
+      .from("x402_payments")
+      .update({ state: "failed", error_message: errorMessage, failed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("payment_identifier", paymentId)
+      .eq("state", "settlement_submitted")
+      .select("*")
+      .maybeSingle();
+    if (error) throwDbError("recordSettlementFailed", error);
+    if (data) return;
+
+    const existing = await this.requireRow(paymentId);
+    if (existing.state === "failed" || existing.state === "paid_pending_brief" || existing.state === "settled") return;
+    throw new PaymentStoreConflictError(`Payment ${paymentId} cannot be marked settlement-failed from ${existing.state}.`);
+  }
 
   async getStatus(paymentId: PaymentIdentifier): Promise<PaymentStatus | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("state")
-      .eq("payment_identifier", paymentId)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-    return mapDbStateToPaymentStatus(data.state);
+    const row = await this.getRowByPaymentId(paymentId);
+    return row ? statusForState(row.state) : undefined;
   }
 
-  // -----------------------------------------------------------------------
-  // getResult
-  // -----------------------------------------------------------------------
-
-  async getResult(
-    paymentId: PaymentIdentifier,
-  ): Promise<{ receipt: SettlementReceipt; brief?: DisputeBrief } | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("state, settlement_receipt, brief")
-      .eq("payment_identifier", paymentId)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-
-    const status = mapDbStateToPaymentStatus(data.state);
-    if (
-      (status === "settled" || status === "paid_pending_brief") &&
-      data.settlement_receipt
-    ) {
-      return {
-        receipt: data.settlement_receipt,
-        brief: data.brief ?? undefined,
-      };
-    }
-    return undefined;
+  async getResult(paymentId: PaymentIdentifier): Promise<{ receipt: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    const row = await this.getRowByPaymentId(paymentId);
+    if (!row || !row.settlement_receipt) return undefined;
+    const status = statusForState(row.state);
+    return status === "settled" || status === "paid_pending_brief"
+      ? { receipt: row.settlement_receipt, brief: row.brief ?? undefined }
+      : undefined;
   }
-
-  // -----------------------------------------------------------------------
-  // getError
-  // -----------------------------------------------------------------------
 
   async getError(paymentId: PaymentIdentifier): Promise<string | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("state, error_message")
-      .eq("payment_identifier", paymentId)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-    if (data.state === "failed") return data.error_message ?? undefined;
-    return undefined;
+    const row = await this.getRowByPaymentId(paymentId);
+    return row?.state === "failed" ? row.error_message ?? undefined : undefined;
   }
 
-  // -----------------------------------------------------------------------
-  // recordSettlementReceipt — atomic: only updates if txHash not yet set
-  // -----------------------------------------------------------------------
-
-  async recordSettlementReceipt(
-    paymentId: PaymentIdentifier,
-    receipt: SettlementReceipt,
-  ): Promise<void> {
-    const { error } = await this.getClient()
+  async recordSettlementReceipt(paymentId: PaymentIdentifier, receipt: SettlementReceipt): Promise<void> {
+    // Validate before issuing any mutation. Incomplete or reverted receipts
+    // must never become durable payment records.
+    assertSettlementReceiptPersistable(receipt);
+    const existingBeforeUpdate = await this.requireRow(paymentId);
+    if (existingBeforeUpdate.settlement_receipt) {
+      if (existingBeforeUpdate.settlement_receipt.txHash.toLowerCase() === receipt.txHash.toLowerCase()) return;
+      throw new PaymentStoreConflictError(`Payment ${paymentId} already has a different settlement receipt.`);
+    }
+    assertSettlementReceiptMatchesMetadata(
+      dbRowToPaymentRecord(existingBeforeUpdate).metadata!,
+      receipt,
+    );
+    const { data, error } = await this.getClient()
       .from("x402_payments")
       .update({
         state: "paid_pending_brief",
         transaction_hash: receipt.txHash,
-        block_number: Number(receipt.blockNumber),
+        block_number: receipt.blockNumber.toString(),
         settlement_receipt: receipt as unknown as Record<string, unknown>,
         settled_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("payment_identifier", paymentId)
       .in("state", ["pending", "authorization_verified", "settlement_submitted"])
-      .is("transaction_hash", null);
-
+      .is("transaction_hash", null)
+      .is("settlement_receipt", null)
+      .select("*")
+      .maybeSingle();
     if (error) {
-      console.error(`[SupabasePaymentStore] recordSettlementReceipt failed: ${error.message}`);
+      if (isUniqueViolation(error)) {
+        const owner = await this.findByTxHash(receipt.txHash);
+        if (owner?.paymentId === paymentId && owner.record.receipt?.txHash.toLowerCase() === receipt.txHash.toLowerCase()) {
+          return;
+        }
+        throw new PaymentStoreConflictError(
+          `Settlement transaction ${receipt.txHash} is already bound to another payment.`,
+        );
+      }
+      throwDbError("recordSettlementReceipt", error);
     }
-  }
+    if (data) return;
 
-  // -----------------------------------------------------------------------
-  // recordBrief — atomic: only upgrades paid_pending_brief → settled
-  // -----------------------------------------------------------------------
+    const existing = await this.requireRow(paymentId);
+    if (existing.settlement_receipt) {
+      if (existing.settlement_receipt.txHash.toLowerCase() === receipt.txHash.toLowerCase()) return;
+      throw new PaymentStoreConflictError(`Payment ${paymentId} already has a different settlement receipt.`);
+    }
+    throw new PaymentStoreConflictError(`Payment ${paymentId} is not eligible for settlement receipt persistence from ${existing.state}.`);
+  }
 
   async recordBrief(paymentId: PaymentIdentifier, brief: DisputeBrief): Promise<void> {
-    const briefRecord = brief as unknown as Record<string, unknown>;
-    const generationMode = briefRecord.generationMode || briefRecord.generation_mode;
-    const aiProvider = briefRecord.provider || briefRecord.ai_provider;
-    const aiModel = briefRecord.model || briefRecord.ai_model;
-
-    const updateData: Record<string, unknown> = {
-      state: "settled",
-      brief: brief as unknown as Record<string, unknown>,
-      delivered_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      generation_completed_at: new Date().toISOString(),
-      generation_status: "completed",
-    };
-
-    if (generationMode) updateData.generation_mode = generationMode;
-    if (aiProvider) updateData.ai_provider = aiProvider;
-    if (aiModel) updateData.ai_model = aiModel;
-
-    const { error } = await this.getClient()
+    const { data, error } = await this.getClient()
       .from("x402_payments")
-      .update(updateData)
+      .update({ state: "settled", brief: brief as unknown as Record<string, unknown>, delivered_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("payment_identifier", paymentId)
-      .eq("state", "paid_pending_brief");
+      .eq("state", "paid_pending_brief")
+      .select("*")
+      .maybeSingle();
+    if (error) throwDbError("recordBrief", error);
+    if (data) return;
 
-    if (error) {
-      console.error(`[SupabasePaymentStore] recordBrief failed: ${error.message}`);
-    }
+    const existing = await this.requireRow(paymentId);
+    if (existing.state === "settled" && existing.brief) return;
+    throw new PaymentStoreConflictError(`Payment ${paymentId} cannot record a brief from ${existing.state}.`);
   }
-
-  // -----------------------------------------------------------------------
-  // getAllEntries
-  // -----------------------------------------------------------------------
 
   async getAllEntries(): Promise<ReadonlyMap<PaymentIdentifier, PaymentRecord>> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(200);
-
-    const map = new Map<PaymentIdentifier, PaymentRecord>();
-    if (error || !data) return map;
-
-    for (const row of data as X402PaymentRow[]) {
-      map.set(row.payment_identifier, dbRowToPaymentRecord(row));
-    }
-    return map;
+    const { data, error } = await this.getClient().from("x402_payments").select("*").order("created_at", { ascending: false }).limit(200);
+    if (error) throwDbError("getAllEntries", error);
+    const entries = new Map<PaymentIdentifier, PaymentRecord>();
+    for (const row of (data ?? []) as X402PaymentRow[]) entries.set(row.payment_identifier, dbRowToPaymentRecord(row));
+    return entries;
   }
 
-  // -----------------------------------------------------------------------
-  // findByTxHash
-  // -----------------------------------------------------------------------
-
-  async findByTxHash(
-    txHash: string,
-  ): Promise<{ paymentId: PaymentIdentifier; record: PaymentRecord } | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("*")
-      .eq("transaction_hash", txHash)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-
+  async findByTxHash(txHash: string): Promise<{ paymentId: PaymentIdentifier; record: PaymentRecord } | undefined> {
+    const { data, error } = await this.getClient().from("x402_payments").select("*").ilike("transaction_hash", txHash).maybeSingle();
+    if (error) throwDbError("findByTxHash", error);
+    if (!data) return undefined;
     const row = data as X402PaymentRow;
-    return {
-      paymentId: row.payment_identifier,
-      record: dbRowToPaymentRecord(row),
-    };
+    return { paymentId: row.payment_identifier, record: dbRowToPaymentRecord(row) };
   }
-
-  // -----------------------------------------------------------------------
-  // isTxHashConsumed
-  // -----------------------------------------------------------------------
 
   async isTxHashConsumed(txHash: string): Promise<boolean> {
-    const { count, error } = await this.getClient()
-      .from("x402_consumed_transactions")
-      .select("*", { count: "exact", head: true })
-      .eq("transaction_hash", txHash);
-
-    if (error) return false;
+    const { count, error } = await this.getClient().from("x402_consumed_transactions").select("transaction_hash", { count: "exact", head: true }).ilike("transaction_hash", txHash);
+    if (error) throwDbError("isTxHashConsumed", error);
     return (count ?? 0) > 0;
   }
 
-  // -----------------------------------------------------------------------
-  // consumeTxHash — atomic insert, fails if txHash already consumed
-  // -----------------------------------------------------------------------
-
-  async consumeTxHash(
-    txHash: string,
-    paymentId: PaymentIdentifier,
-    metadata?: Partial<ConsumedTxRecord>,
-  ): Promise<void> {
-    const { error } = await this.getClient()
-      .from("x402_consumed_transactions")
-      .insert({
-        transaction_hash: txHash,
-        payment_identifier: paymentId,
-        payer_address: metadata?.recoveredPayer || "unknown",
-        pay_to_address: "",
-        token_address: "",
-        amount_atomic: "0",
-        request_hash: metadata?.recoveredRequestHash ?? null,
-        recovery_type: metadata?.legacyRecovery ? "legacy_recovered_settlement" : "standard",
-        metadata: metadata as unknown as Record<string, unknown> ?? null,
-      });
-
-    if (error) {
-      if (error.code === "23505") {
-        console.log(`[SupabasePaymentStore] consumeTxHash: txHash ${txHash} already consumed`);
-      } else {
-        console.error(`[SupabasePaymentStore] consumeTxHash failed: ${error.message}`);
+  async consumeTxHash(txHash: string, paymentId: PaymentIdentifier, metadata?: Partial<ConsumedTxRecord>): Promise<void> {
+    const { error } = await this.getClient().from("x402_consumed_transactions").insert({
+      transaction_hash: txHash,
+      payment_identifier: paymentId,
+      payer_address: metadata?.recoveredPayer || "unknown",
+      pay_to_address: "unknown",
+      token_address: "unknown",
+      amount_atomic: "0",
+      request_hash: metadata?.recoveredRequestHash ?? null,
+      recovery_type: metadata?.legacyRecovery ? "legacy_recovered_settlement" : "standard",
+      metadata: metadata as unknown as Record<string, unknown> ?? null,
+    });
+    if (!error) return;
+    if (isUniqueViolation(error)) {
+      const existingByHash = await this.getConsumedTxRowByHash(txHash);
+      if (existingByHash?.payment_identifier === paymentId) return;
+      const existingByPayment = await this.getConsumedTxRowByPaymentId(paymentId);
+      if (existingByPayment) {
+        throw new PaymentStoreConflictError(
+          `Payment ${paymentId} already consumed transaction ${existingByPayment.transaction_hash}.`,
+        );
       }
+      throw new PaymentStoreConflictError(
+        `Transaction ${txHash} is already consumed for another payment.`,
+      );
     }
+    throwDbError("consumeTxHash", error);
   }
 
-  // -----------------------------------------------------------------------
-  // findConsumedTx
-  // -----------------------------------------------------------------------
-
   async findConsumedTx(txHash: string): Promise<ConsumedTxRecord | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_consumed_transactions")
-      .select("*")
-      .eq("transaction_hash", txHash)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-
+    const { data, error } = await this.getClient().from("x402_consumed_transactions").select("*").ilike("transaction_hash", txHash).maybeSingle();
+    if (error) throwDbError("findConsumedTx", error);
+    if (!data) return undefined;
     const row = data as ConsumedTxDbRow;
     return {
       txHash: row.transaction_hash,
@@ -396,143 +371,132 @@ export class SupabasePaymentStore implements PaymentStore {
     };
   }
 
-  // -----------------------------------------------------------------------
-  // setRequestHash — atomic: only sets if no request_hash yet
-  // -----------------------------------------------------------------------
-
   async setRequestHash(paymentId: PaymentIdentifier, requestHash: string): Promise<void> {
-    const { error } = await this.getClient()
+    const { data, error } = await this.getClient()
       .from("x402_payments")
       .update({ request_hash: requestHash, updated_at: new Date().toISOString() })
       .eq("payment_identifier", paymentId)
-      .is("request_hash", null);
-
+      .is("request_hash", null)
+      .select("*")
+      .maybeSingle();
     if (error) {
-      console.error(`[SupabasePaymentStore] setRequestHash failed: ${error.message}`);
+      if (isUniqueViolation(error)) throw new PaymentStoreConflictError(`Request hash is already bound to another payment.`);
+      throwDbError("setRequestHash", error);
     }
-  }
+    if (data) return;
 
-  // -----------------------------------------------------------------------
-  // getRequestHash
-  // -----------------------------------------------------------------------
+    const existing = await this.requireRow(paymentId);
+    if (existing.request_hash === requestHash) return;
+    if (existing.request_hash) throw new PaymentStoreConflictError(`Payment ${paymentId} is bound to a different request hash.`);
+    throw new PaymentStoreConflictError(`Payment ${paymentId} could not bind its request hash.`);
+  }
 
   async getRequestHash(paymentId: PaymentIdentifier): Promise<string | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("request_hash")
-      .eq("payment_identifier", paymentId)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-    return data.request_hash ?? undefined;
+    const row = await this.getRowByPaymentId(paymentId);
+    return row?.request_hash ?? undefined;
   }
-
-  // -----------------------------------------------------------------------
-  // findByRequestHash — lookup a settled or pending payment by canonical hash
-  // -----------------------------------------------------------------------
 
   async findByRequestHash(requestHash: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
-    const { data, error } = await this.getClient()
-      .from("x402_payments")
-      .select("*")
-      .eq("request_hash", requestHash)
-      .in("state", ["settled", "paid_pending_brief", "settlement_submitted", "authorization_verified", "pending"])
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error || !data) return undefined;
-
-    const row = data as X402PaymentRow;
-    return {
-      paymentId: row.payment_identifier,
-      status: mapDbStateToPaymentStatus(row.state) ?? "pending",
-      receipt: row.settlement_receipt ?? undefined,
-      brief: row.brief ?? undefined,
-    };
+    const row = await this.getRowByRequestHash(requestHash);
+    return row ? resultFor(row) : undefined;
   }
 
-  // -----------------------------------------------------------------------
-  // findByDisputeFields — pre-payment recovery lookup by dispute fields
-  // -----------------------------------------------------------------------
+  async findByDisputeFields(escrowPaymentId: string, disputeReason: string, requestedOutcome: string): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+    const { data, error } = await this.getClient().from("x402_payments").select("*").eq("escrow_payment_id", escrowPaymentId).eq("dispute_reason", disputeReason).eq("requested_outcome", requestedOutcome).order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (error) throwDbError("findByDisputeFields", error);
+    return data ? resultFor(data as X402PaymentRow) : undefined;
+  }
 
-  async findByDisputeFields(
-    escrowPaymentId: string,
-    disputeReason: string,
-    requestedOutcome: string,
-  ): Promise<{ paymentId: PaymentIdentifier; status: PaymentStatus; receipt?: SettlementReceipt; brief?: DisputeBrief } | undefined> {
+  private async getRowByPaymentId(paymentId: string): Promise<X402PaymentRow | undefined> {
+    const { data, error } = await this.getClient().from("x402_payments").select("*").eq("payment_identifier", paymentId).maybeSingle();
+    if (error) throwDbError("read payment", error);
+    return data ? data as X402PaymentRow : undefined;
+  }
+
+  private async getRowByRequestHash(requestHash: string): Promise<X402PaymentRow | undefined> {
+    const { data, error } = await this.getClient().from("x402_payments").select("*").eq("request_hash", requestHash).maybeSingle();
+    if (error) throwDbError("read request hash", error);
+    return data ? data as X402PaymentRow : undefined;
+  }
+
+  private async getConsumedTxRowByHash(txHash: string): Promise<ConsumedTxDbRow | undefined> {
     const { data, error } = await this.getClient()
-      .from("x402_payments")
+      .from("x402_consumed_transactions")
       .select("*")
-      .eq("escrow_payment_id", escrowPaymentId)
-      .eq("dispute_reason", disputeReason)
-      .eq("requested_outcome", requestedOutcome)
-      .in("state", ["settled", "paid_pending_brief", "settlement_submitted", "authorization_verified", "pending"])
-      .order("created_at", { ascending: false })
-      .limit(1)
+      .ilike("transaction_hash", txHash)
       .maybeSingle();
+    if (error) throwDbError("read consumed transaction hash", error);
+    return data ? data as ConsumedTxDbRow : undefined;
+  }
 
-    if (error || !data) return undefined;
+  private async getConsumedTxRowByPaymentId(paymentId: string): Promise<ConsumedTxDbRow | undefined> {
+    const { data, error } = await this.getClient()
+      .from("x402_consumed_transactions")
+      .select("*")
+      .eq("payment_identifier", paymentId)
+      .maybeSingle();
+    if (error) throwDbError("read consumed transaction payment", error);
+    return data ? data as ConsumedTxDbRow : undefined;
+  }
 
-    const row = data as X402PaymentRow;
-    return {
-      paymentId: row.payment_identifier,
-      status: mapDbStateToPaymentStatus(row.state) ?? "pending",
-      receipt: row.settlement_receipt ?? undefined,
-      brief: row.brief ?? undefined,
-    };
+  private async requireRow(paymentId: string): Promise<X402PaymentRow> {
+    const row = await this.getRowByPaymentId(paymentId);
+    if (!row) throw new Error(`[SupabasePaymentStore] Payment ${paymentId} does not exist.`);
+    return row;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Factory — selects in-memory or Supabase based on configuration
-// ---------------------------------------------------------------------------
+function statusForState(state: PaymentState): PaymentStatus {
+  if (state === "paid_pending_brief") return "paid_pending_brief";
+  if (state === "settled") return "settled";
+  if (state === "failed") return "failed";
+  return "pending";
+}
 
-import { InMemoryPaymentStore } from "./paymentStore";
+function resultFor(row: X402PaymentRow) {
+  return {
+    paymentId: row.payment_identifier,
+    status: statusForState(row.state),
+    receipt: row.settlement_receipt ?? undefined,
+    brief: row.brief ?? undefined,
+  };
+}
+
+function dbRowToPaymentRecord(row: X402PaymentRow): PaymentRecord {
+  const metadata: PaymentMetadata = {
+    service: row.service_identifier,
+    payerAddress: row.payer_address,
+    payToAddress: row.pay_to_address,
+    network: row.network,
+    chainId: row.chain_id,
+    tokenAddress: row.token_address,
+    tokenSymbol: row.token_symbol === "USDC" ? "USDC" : "USDC",
+    tokenDecimals: row.token_decimals,
+    amountAtomic: row.amount_atomic,
+    amountDisplay: row.amount_display,
+    escrowPaymentId: row.escrow_payment_id ?? undefined,
+    requestHash: row.request_hash ?? undefined,
+    disputeReason: row.dispute_reason ?? undefined,
+    requestedOutcome: row.requested_outcome ?? undefined,
+    authorizationNonce: row.authorization_nonce ?? undefined,
+    authorizationDeadline: row.authorization_deadline ?? undefined,
+  };
+  return {
+    status: statusForState(row.state),
+    state: row.state,
+    receipt: row.settlement_receipt ?? undefined,
+    brief: row.brief ?? undefined,
+    error: row.error_message ?? undefined,
+    createdAt: new Date(row.created_at).getTime(),
+    metadata,
+    requestHash: row.request_hash ?? undefined,
+  };
+}
 
 let cachedStore: PaymentStore | undefined;
 
 export function getPaymentStore(): PaymentStore {
   if (cachedStore) return cachedStore;
-
-  if (isSupabaseConfigured()) {
-    console.log("[x402] Using Supabase durable payment store");
-    cachedStore = new SupabasePaymentStore();
-  } else {
-    console.log("[x402] Supabase not configured — using in-memory payment store");
-    cachedStore = new InMemoryPaymentStore();
-  }
-
+  cachedStore = isSupabaseConfigured() ? new SupabasePaymentStore() : new InMemoryPaymentStore();
   return cachedStore;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function mapDbStateToPaymentStatus(dbState: string): PaymentStatus | undefined {
-  switch (dbState) {
-    case "pending":
-    case "authorization_verified":
-    case "settlement_submitted":
-      return "pending";
-    case "paid_pending_brief":
-      return "paid_pending_brief";
-    case "settled":
-      return "settled";
-    case "failed":
-      return "failed";
-    default:
-      return undefined;
-  }
-}
-
-function dbRowToPaymentRecord(row: X402PaymentRow): PaymentRecord {
-  return {
-    status: mapDbStateToPaymentStatus(row.state) ?? "pending",
-    receipt: row.settlement_receipt ?? undefined,
-    brief: row.brief ?? undefined,
-    error: row.error_message ?? undefined,
-    createdAt: new Date(row.created_at).getTime(),
-  };
 }

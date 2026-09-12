@@ -3,7 +3,10 @@
 import { useCallback, useState } from "react";
 import { useSignMessage } from "wagmi";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
-import { buildRenewPolicyMessage } from "@/lib/resolution-agent/api/auth";
+import {
+  buildRenewPolicyMessage,
+  hashCanonicalJson,
+} from "@/lib/resolution-agent/api/auth";
 import { encodeWalletAuthMessage } from "@/lib/x402/walletAuth";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
@@ -78,6 +81,8 @@ export default function AgentPolicyRenewCard({
         oldExpiresAtMs: expiresAt,
         newExpiresAtMs: newExpiresAt,
         funderAddress,
+        signerAddress: wallet.address,
+        bodyHash: hashCanonicalJson({ expiresAt: String(newExpiresAt) }),
       });
 
       const signature = await signMessageAsync({ message: canonicalMessage });

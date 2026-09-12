@@ -7,13 +7,25 @@
 
 import { NextResponse } from "next/server";
 import { requireReviewer } from "@/lib/reviewer/auth";
-import { getDecisionsForPayment } from "@/lib/reviewer/store";
+import { getDecisionsForPayment, normalizeEscrowPaymentId } from "@/lib/reviewer/store";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
-import { getEscrowAddress as getEscrowContractAddress } from "@/lib/contracts/addresses";
+import { CELO_MAINNET_CHAIN_ID, CELO_SEPOLIA_CHAIN_ID } from "@/lib/web3/chains";
+import { getEscrowChain, getEscrowContractAddress } from "@/lib/contracts/config";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { parsePaymentData } from "@/lib/contracts/types";
+
+function getRpcUrl(chainId: number): string {
+  if (chainId === CELO_MAINNET_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || "https://forno.celo.org";
+  }
+  if (chainId === CELO_SEPOLIA_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+      process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+      "https://forno.celo-sepolia.celo-testnet.org";
+  }
+  throw new Error(`Unsupported escrow chain ${chainId}.`);
+}
 
 export async function GET(
   request: Request,
@@ -40,6 +52,18 @@ export async function GET(
       return NextResponse.json({ error: "Case not found." }, { status: 404 });
     }
 
+    const escrowPaymentId = normalizeEscrowPaymentId(payment.escrow_payment_id);
+    const chainId = typeof payment.chain_id === "number" ? payment.chain_id : Number(payment.chain_id);
+    if (
+      escrowPaymentId === null ||
+      !Number.isSafeInteger(chainId) ||
+      chainId <= 0
+    ) {
+      return NextResponse.json({
+        error: "This reviewer case has no valid numeric escrow_payment_id and cannot be reviewed.",
+      }, { status: 422 });
+    }
+
     const brief = payment.brief as Record<string, unknown> | null;
     const decisions = await getDecisionsForPayment(paymentId);
 
@@ -47,30 +71,43 @@ export async function GET(
     let onchainData = null;
     let isDisputed = false;
     try {
-      const rpcUrl = process.env.NEXT_PUBLIC_CELO_RPC_URL || "https://forno.celo-sepolia.celo-testnet.org";
-      const client = createPublicClient({ chain: celoSepolia, transport: http(rpcUrl) });
-      const escrow = getEscrowContractAddress(11142220);
-      if (escrow && payment.escrow_payment_id) {
-        const raw = await client.readContract({
-          address: escrow,
-          abi: protectedPaymentEscrowABI,
-          functionName: "getPayment",
-          args: [BigInt(payment.escrow_payment_id)],
-        });
-        const pd = parsePaymentData(raw as Parameters<typeof parsePaymentData>[0]);
-        onchainData = {
-          id: pd.id.toString(),
-          client: pd.client,
-          worker: pd.worker,
-          amount: pd.amount.toString(),
-          token: pd.token,
-          state: pd.state,
-          evidenceReference: pd.evidenceReference || null,
-          disputeReference: pd.disputeReference || null,
-        };
-        isDisputed = pd.state === "Disputed";
+      const escrow = getEscrowContractAddress(chainId);
+      const client = createPublicClient({
+        chain: getEscrowChain(chainId),
+        transport: http(getRpcUrl(chainId)),
+      });
+      const raw = await client.readContract({
+        address: escrow,
+        abi: protectedPaymentEscrowABI,
+        functionName: "getPayment",
+        args: [BigInt(escrowPaymentId)],
+      });
+      const pd = parsePaymentData(raw as Parameters<typeof parsePaymentData>[0]);
+      if (pd.id.toString() !== escrowPaymentId) {
+        throw new Error("Live escrow payment ID differs from escrow_payment_id.");
       }
-    } catch {
+      onchainData = {
+        id: pd.id.toString(),
+        chainId,
+        contractAddress: escrow,
+        client: pd.client,
+        worker: pd.worker,
+        amount: pd.amount.toString(),
+        token: pd.token,
+        state: pd.state,
+        evidenceReference: pd.evidenceReference || null,
+        disputeReference: pd.disputeReference || null,
+      };
+      isDisputed = pd.state === "Disputed";
+    } catch (err) {
+      if (err instanceof Error && /not deployed on chain/i.test(err.message)) {
+        return NextResponse.json({
+          error: `Escrow configuration rejected: ${err.message}`,
+        }, { status: 503 });
+      }
+      if (err instanceof Error && /payment ID differs/i.test(err.message)) {
+        return NextResponse.json({ error: err.message }, { status: 409 });
+      }
       // On-chain read failed — use stored data
     }
 
@@ -105,7 +142,7 @@ export async function GET(
         amount_atomic: payment.amount_atomic,
         state: payment.state,
         transaction_hash: payment.transaction_hash,
-        escrow_payment_id: payment.escrow_payment_id,
+        escrow_payment_id: escrowPaymentId,
         generation_mode: payment.generation_mode,
         ai_provider: payment.ai_provider,
         ai_model: payment.ai_model,

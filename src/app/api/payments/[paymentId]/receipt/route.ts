@@ -44,6 +44,47 @@ const PACKET_EVENT_TYPE = "review_packet_prepared";
 const TOOL_ID = "evidence-quality-check";
 const MAINNET_RPC = "https://forno.celo.org";
 
+const EMPTY_EVENT_PROOF = {
+  txHash: null,
+  status: null,
+  sender: null,
+  blockNumber: null,
+  blockTime: null,
+} as const;
+
+function displayEscrowState(stateLabel: string | null, state: string): string {
+  const labels: Record<string, string> = {
+    created: "Created",
+    funded: "Funded",
+    accepted: "Accepted",
+    delivered: "Delivery submitted",
+    release_requested: "Release requested",
+    released: "Released",
+    disputed: "Disputed",
+    cancelled: "Cancelled",
+    resolved: "Resolved",
+  };
+  return labels[stateLabel ?? ""] ?? stateLabel ?? state;
+}
+
+function financialOutcome(
+  stateLabel: string | null,
+  resolution: { clientAmount?: string | null; workerAmount?: string | null },
+): string {
+  if (stateLabel === "released") return "Released to worker";
+  if (stateLabel === "cancelled") return "Cancelled";
+  if (stateLabel === "disputed") return "Disputed — funds remain locked";
+  if (stateLabel === "resolved") {
+    const clientAmount = resolution.clientAmount ?? null;
+    const workerAmount = resolution.workerAmount ?? null;
+    if (clientAmount === null || workerAmount === null) return "Resolved";
+    if (clientAmount === "0") return "Released to worker";
+    if (workerAmount === "0") return "Refunded to client";
+    return "Partially resolved";
+  }
+  return "Pending";
+}
+
 /** Load the latest durable review packet event for an agent (read-only). */
 async function loadLatestReviewPacket(agentId: string) {
   const supabase = getSupabaseClient();
@@ -123,10 +164,29 @@ export async function GET(
       ? (packet.qcInconsistency as string[])
       : [];
 
+    // Older callers/tests may provide a release-only proof bundle. Treat
+    // omitted non-release proofs as absent rather than inferring an outcome.
+    const resolutionProof = proof.resolution ?? {
+      ...EMPTY_EVENT_PROOF,
+      clientAmount: null,
+      workerAmount: null,
+    };
+    const disputeProof = proof.dispute ?? {
+      ...EMPTY_EVENT_PROOF,
+      disputeReference: null,
+    };
+    const cancellationProof = proof.cancellation ?? EMPTY_EVENT_PROOF;
+    const escrowStateLabel = proof.state.stateLabel;
+    const finalState = displayEscrowState(escrowStateLabel, proof.state.state);
+    const outcome = financialOutcome(escrowStateLabel, resolutionProof);
+
     // ---- 4. QC execution (exactly one paid) — real price/provenance --------
     let qcPriceAtomic: bigint | null = null;
     let qcCaseVersionHash: string | null = null;
     let qcEvidenceVersionHash: string | null = null;
+    let qcSettlementTxHash: string | null = null;
+    let qcPaymentReference: string | null = null;
+    let qcResultReference: string | null = null;
     if (agent) {
       const executions = await store.listToolExecutions(agent.id);
       const settledQc = executions.find(
@@ -138,6 +198,12 @@ export async function GET(
           : null;
       qcCaseVersionHash = settledQc?.case_version_hash ?? null;
       qcEvidenceVersionHash = settledQc?.evidence_version_hash ?? null;
+      // Settlement provenance comes from the durable execution row, not from
+      // mutable/generated packet metadata. The adapter only reaches `settled`
+      // after validating the facilitator receipt and tx hash.
+      qcSettlementTxHash = settledQc?.settlement_tx_hash ?? null;
+      qcPaymentReference = settledQc?.payment_reference ?? null;
+      qcResultReference = settledQc?.result_reference ?? null;
     }
 
     // ---- 5. Human decision attribution -------------------------------------
@@ -146,17 +212,9 @@ export async function GET(
       BigInt(proof.state.amount),
       token.decimals,
     );
-    const sender = proof.release.sender ?? null;
-    const authority =
-      sender && sender.toLowerCase() === proof.state.client.toLowerCase()
-        ? "client"
-        : sender
-          ? "wallet"
-          : "unknown";
-
     // ---- 6. x402 QC settlement block time (real, best-effort) --------------
     const qcSettlementAt = await readMainnetBlockTime(
-      (packetQc.settlementTxHash as string | null) ?? null,
+      qcSettlementTxHash,
     );
 
     // ---- 7. Compose the receipt --------------------------------------------
@@ -170,8 +228,11 @@ export async function GET(
       escrowContractAddress: escrowReader.contractAddress,
       chainId: `eip155:${escrowReader.chainId}`,
       network: proofReader.network,
-      finalState: proof.state.stateLabel === "released" ? "Released" : (proof.state.stateLabel ?? proof.state.state),
-      releasedAt: proof.state.releasedAt,
+      finalState,
+      releasedAt: escrowStateLabel === "released" ? proof.state.releasedAt : null,
+      escrowState: proof.state.state,
+      financialOutcome: outcome,
+      resolvedAt: escrowStateLabel === "resolved" ? proof.state.releasedAt : null,
     };
 
     const agreement: ReceiptAgreement = {
@@ -234,23 +295,69 @@ export async function GET(
       recommendedImprovements: Array.isArray(packetQc.recommendedImprovements)
         ? (packetQc.recommendedImprovements as string[])
         : [],
-      settlementTxHash: (packetQc.settlementTxHash as string | null) ?? null,
-      paymentReference: (packetQc.paymentReference as string | null) ?? null,
-      resultReference: (packetQc.resultReference as string | null) ?? null,
+      settlementTxHash: qcSettlementTxHash,
+      paymentReference: qcPaymentReference,
+      resultReference: qcResultReference,
       // Recorded contradictions with verified evidence — never hidden.
       inconsistencies: qcInconsistency,
     };
 
+    const actionProof =
+      escrowStateLabel === "released"
+        ? proof.release
+        : escrowStateLabel === "resolved"
+          ? resolutionProof
+          : escrowStateLabel === "cancelled"
+            ? cancellationProof
+            : null;
+    const actionSender = actionProof?.sender ?? null;
+    const actionAuthority =
+      escrowStateLabel === "released"
+        ? actionSender
+          ? actionSender.toLowerCase() === proof.state.client.toLowerCase()
+            ? "client"
+            : "wallet"
+          : "unknown"
+        : escrowStateLabel === "resolved"
+          ? actionSender
+            ? "escrow_owner"
+            : "unknown"
+          : escrowStateLabel === "cancelled"
+            ? actionSender
+              ? actionSender.toLowerCase() === proof.state.client.toLowerCase()
+                ? "client"
+                : "wallet"
+              : "unknown"
+            : null;
     const humanDecision: ReceiptHumanDecision = {
-      decision: "Approve release",
-      authority,
-      txHash: proof.release.txHash,
-      sender,
-      blockNumber: proof.release.blockNumber,
-      blockTime: proof.release.blockTime,
-      status: proof.release.status,
-      finalRecipient: proof.state.worker,
-      outcome: "Released",
+      decision:
+        escrowStateLabel === "released"
+          ? "Approve release"
+          : escrowStateLabel === "resolved"
+            ? resolutionProof.txHash
+              ? "Resolve dispute"
+              : null
+            : escrowStateLabel === "cancelled"
+              ? cancellationProof.txHash
+                ? "Cancel unfunded payment"
+                : null
+              : null,
+      authority: actionAuthority,
+      txHash: actionProof?.txHash ?? null,
+      sender: actionSender,
+      blockNumber: actionProof?.blockNumber ?? null,
+      blockTime: actionProof?.blockTime ?? null,
+      status: actionProof?.status ?? null,
+      finalRecipient: escrowStateLabel === "released" ? proof.state.worker : null,
+      outcome: finalState,
+      clientAmount: resolutionProof.clientAmount ?? null,
+      workerAmount: resolutionProof.workerAmount ?? null,
+      clientAmountHuman: resolutionProof.clientAmount
+        ? `${fromAtomicUnits(BigInt(resolutionProof.clientAmount), token.decimals)} ${token.symbol}`
+        : null,
+      workerAmountHuman: resolutionProof.workerAmount
+        ? `${fromAtomicUnits(BigInt(resolutionProof.workerAmount), token.decimals)} ${token.symbol}`
+        : null,
     };
 
     const audit: ReceiptAudit = {
@@ -258,7 +365,7 @@ export async function GET(
         escrowContract: getCeloExplorerAddressUrl(escrowReader.contractAddress),
         client: getCeloExplorerAddressUrl(proof.state.client),
         worker: getCeloExplorerAddressUrl(proof.state.worker),
-        releaseTransaction: proof.release.txHash
+        releaseTransaction: escrowStateLabel === "released" && proof.release.txHash
           ? getCeloExplorerTxUrl(proof.release.txHash)
           : null,
         evidenceSubmissionTransaction: proof.evidenceSubmission.txHash
@@ -267,11 +374,23 @@ export async function GET(
         x402SettlementTransaction: qualityCheck.settlementTxHash
           ? getCeloMainnetExplorerTxUrl(qualityCheck.settlementTxHash)
           : null,
+        disputeTransaction: disputeProof.txHash
+          ? getCeloExplorerTxUrl(disputeProof.txHash)
+          : null,
+        resolutionTransaction: resolutionProof.txHash
+          ? getCeloExplorerTxUrl(resolutionProof.txHash)
+          : null,
+        cancellationTransaction: cancellationProof.txHash
+          ? getCeloExplorerTxUrl(cancellationProof.txHash)
+          : null,
       },
       timestamps: {
         evidenceSubmittedAt: evidence.submittedAt,
-        releaseAt: proof.state.releasedAt,
+        releaseAt: escrowStateLabel === "released" ? proof.state.releasedAt : null,
         qcSettlementAt,
+        disputedAt: disputeProof.blockTime,
+        resolvedAt: escrowStateLabel === "resolved" ? resolutionProof.blockTime : null,
+        cancelledAt: cancellationProof.blockTime,
       },
     };
 

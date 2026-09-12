@@ -24,7 +24,7 @@ export type EscrowState =
   | "released"
   | "disputed"
   | "cancelled"
-  | "refunded";
+  | "resolved";
 
 export const ESCROW_STATE_MAP: Record<number, EscrowState> = {
   0: "created",
@@ -35,7 +35,7 @@ export const ESCROW_STATE_MAP: Record<number, EscrowState> = {
   5: "released",
   6: "disputed",
   7: "cancelled",
-  8: "refunded",
+  8: "resolved",
 };
 
 // ---------------------------------------------------------------------------

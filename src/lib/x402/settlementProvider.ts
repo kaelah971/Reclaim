@@ -18,6 +18,7 @@ import type {
   PaymentRequirements,
 } from "@x402/core/types";
 import { X402_SETTLEMENT_MODE } from "./config";
+import type { X402ServicePaymentTerms } from "./config";
 import { CeloFacilitatorSettlementProvider } from "./settlementProvider.facilitator";
 import { LocalSettlementProvider } from "./settlementProvider.local";
 
@@ -128,6 +129,7 @@ export interface X402SettlementProvider {
   verifyPayment(
     payload: PaymentPayload,
     requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<VerifyResult>;
 
   /**
@@ -146,6 +148,7 @@ export interface X402SettlementProvider {
   settlePayment(
     payload: PaymentPayload,
     requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<SettleResult>;
 }
 

@@ -100,7 +100,7 @@ import {
   type X402SettlementProvider,
 } from "../settlementProvider";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { InMemoryPaymentStore } from "../paymentStore";
+import { InMemoryPaymentStore, resetInMemoryPaymentStore } from "../paymentStore";
 import type { SettlementReceipt } from "../types";
 import { verifyPaymentPayload, buildPaymentRequiredHeader } from "../shared";
 import type { PaymentPayloadCustom } from "../types";
@@ -111,6 +111,13 @@ import {
   X402_PAY_TO_ADDRESS_FACILITATOR,
   X402_FACILITATOR_USDC_MAINNET,
 } from "../config";
+
+// The in-memory implementation intentionally uses process-local maps. Reset
+// them between tests so a fixture transaction cannot masquerade as a replay
+// across otherwise independent scenarios.
+beforeEach(() => {
+  resetInMemoryPaymentStore();
+});
 
 // ===========================================================================
 // 5. Test fixtures
@@ -376,7 +383,7 @@ describe("Part B: Payment store persistence", () => {
     const receiptB = buildSettlementReceipt({ txHash: "0x" + "b".repeat(64) });
     await store.recordPending(pidB);
     await store.recordSettlementReceipt(pidB, receiptB);
-    await store.setRequestHash(pidB, hashA);
+    await expect(store.setRequestHash(pidB, hashA)).rejects.toThrow(/already bound/);
 
     const found = await store.findByRequestHash(hashA);
     expect(found).toBeDefined();
@@ -432,7 +439,7 @@ describe("Part C: Validator isolation", () => {
     expect(mockVerifyFn).toHaveBeenCalledTimes(1);
   });
 
-  it("verifyPaymentPayload rejects EIP-3009 shape in local mode (missing from/to/token/signature)", () => {
+  it("verifyPaymentPayload validates the facilitator EIP-3009 shape", () => {
     const eip3009Shaped: PaymentPayloadCustom = {
       scheme: "exact",
       network: "eip155:42220",
@@ -441,6 +448,9 @@ describe("Part C: Validator isolation", () => {
           from: PAYER,
           to: TRACK2_WALLET,
           value: "10000",
+          validAfter: "0",
+          validBefore: String(Math.floor(Date.now() / 1000) + 3600),
+          nonce: "0x" + "ab".repeat(32),
         },
         signature: "0x" + "cd".repeat(65),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -448,8 +458,7 @@ describe("Part C: Validator isolation", () => {
     };
 
     const result = verifyPaymentPayload(eip3009Shaped);
-    expect(result.valid).toBe(false);
-    expect(result.reason).toContain("missing required fields");
+    expect(result.valid).toBe(true);
   });
 });
 
@@ -536,7 +545,7 @@ describe("Part E: Idempotency", () => {
 
     const pid2 = store.createPaymentId();
     await store.recordPending(pid2);
-    await store.setRequestHash(pid2, hash);
+    await expect(store.setRequestHash(pid2, hash)).rejects.toThrow(/already bound/);
 
     const found = await store.findByRequestHash(hash);
     expect(found).toBeDefined();

@@ -30,7 +30,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createAgentRequestSchema } from "@/lib/resolution-agent/api/types";
-import { verifyAuth, buildActivationMessage } from "@/lib/resolution-agent/api/auth";
+import {
+  authorizeWalletRequest,
+  hashCanonicalJson,
+} from "@/lib/resolution-agent/api/auth";
 import { createResolutionAgentForCase, createStore } from "@/lib/resolution-agent/api/service";
 import {
   CeloSepoliaEscrowCaseReader,
@@ -56,6 +59,13 @@ export async function GET(request: NextRequest): Promise<Response> {
     if (!paymentId) {
       return NextResponse.json(
         { error: "Missing paymentId query parameter.", code: "MISSING_PARAM" },
+        { status: 400 },
+      );
+    }
+
+    if (!/^\d+$/.test(paymentId)) {
+      return NextResponse.json(
+        { error: "paymentId must be a numeric escrow identifier.", code: "INVALID_PAYMENT_ID" },
         { status: 400 },
       );
     }
@@ -137,22 +147,44 @@ export async function POST(request: NextRequest): Promise<Response> {
 
     const requestData = parseResult.data;
 
-    // -----------------------------------------------------------------
-    // Step 3: Verify wallet signature cryptographically
-    // -----------------------------------------------------------------
-    const authResult = await verifyAuth({
+    const store = createStore();
+    const budgetAtomic = BigInt(requestData.budgetAtomic);
+    const authResult = await authorizeWalletRequest({
       claimedAddress: walletAddress,
       message: signedMessage,
       signature: walletSignature,
+      expected: {
+        action: "create_resolution_agent",
+        agentId: "none",
+        escrowChainId: `eip155:${CANONICAL_ESCROW_CHAIN_ID}`,
+        escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        escrowPaymentId: requestData.escrowPaymentId,
+        bodyHash: hashCanonicalJson(requestData),
+        signerAddress: walletAddress,
+        fields: {
+          "Approved Budget (atomic USDC)": requestData.budgetAtomic,
+          "Funder Address": walletAddress,
+          "Policy Version": "v1",
+        },
+      },
+      nonceStore: store,
     });
 
     if (!authResult.verified) {
       return NextResponse.json(
         {
-          error: `Wallet signature verification failed: ${authResult.error}`,
-          code: "SIGNATURE_INVALID",
+          error: `Wallet authorization failed: ${authResult.error}`,
+          code: authResult.code,
         },
-        { status: 401 },
+        {
+          status:
+            authResult.code.startsWith("MESSAGE_") &&
+            authResult.code !== "MESSAGE_SIGNER_MISMATCH"
+              ? 400
+              : authResult.code === "MESSAGE_SIGNER_MISMATCH"
+                ? 403
+                : 401,
+        },
       );
     }
 
@@ -162,9 +194,7 @@ export async function POST(request: NextRequest): Promise<Response> {
     //         the client must NOT supply it.
     // -----------------------------------------------------------------
     const escrowReader = new CeloSepoliaEscrowCaseReader();
-    const store = createStore();
     const now = Date.now();
-    const budgetAtomic = BigInt(requestData.budgetAtomic);
 
     const publicView = await createResolutionAgentForCase({
       authenticatedCaller: walletAddress,

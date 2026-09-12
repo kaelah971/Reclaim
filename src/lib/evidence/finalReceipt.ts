@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Final receipt builder (RA1R.8F)
 //
-// Composes the canonical read-only receipt for a RELEASED payment from
+// Composes the canonical read-only receipt for a payment from
 // DURABLE, VERIFIED sources only:
 //   - on-chain escrow state + release transaction proof (live read)
 //   - verified evidence metadata + its on-chain submission proof
@@ -30,6 +30,12 @@ export interface ReceiptProtectedPayment {
   network: string;
   finalState: string;
   releasedAt: string | null;
+  /** Exact chain state, retained separately from the display label. */
+  escrowState?: string;
+  /** Financial outcome for Resolved payments, including full refunds. */
+  financialOutcome?: string | null;
+  /** Resolved timestamp; the contract stores this in releasedAt. */
+  resolvedAt?: string | null;
 }
 
 /** Original agreement terms, straight from the escrow struct (read-only). */
@@ -83,15 +89,20 @@ export interface ReceiptQualityCheck {
 }
 
 export interface ReceiptHumanDecision {
-  decision: string;
-  authority: string;
+  decision: string | null;
+  authority: string | null;
   txHash: string | null;
   sender: string | null;
   blockNumber: string | null;
   blockTime: string | null;
   status: string | null;
-  finalRecipient: string;
-  outcome: string;
+  finalRecipient: string | null;
+  outcome: string | null;
+  /** Allocations emitted by PaymentResolved; null unless the event is proven. */
+  clientAmount?: string | null;
+  workerAmount?: string | null;
+  clientAmountHuman?: string | null;
+  workerAmountHuman?: string | null;
 }
 
 export interface ReceiptAudit {
@@ -102,11 +113,17 @@ export interface ReceiptAudit {
     releaseTransaction: string | null;
     evidenceSubmissionTransaction: string | null;
     x402SettlementTransaction: string | null;
+    disputeTransaction?: string | null;
+    resolutionTransaction?: string | null;
+    cancellationTransaction?: string | null;
   };
   timestamps: {
     evidenceSubmittedAt: string | null;
     releaseAt: string | null;
     qcSettlementAt: string | null;
+    disputedAt?: string | null;
+    resolvedAt?: string | null;
+    cancelledAt?: string | null;
   };
 }
 

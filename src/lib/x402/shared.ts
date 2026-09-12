@@ -27,17 +27,21 @@ import {
   X402_FACILITATOR_USDC_MAINNET,
   X402_PAY_TO_ADDRESS_FACILITATOR,
   X402_NETWORK,
-  X402_USDC_ADDRESS,
   X402_PAY_TO_ADDRESS,
   getDisputeBriefPriceAtomic,
-  X402_EVIDENCE_CHECK_PRICE,
+  getEvidenceCheckPriceAtomic,
+  getCaseRefreshPriceAtomic,
   validatePayToAddress,
+  fromAtomicUnits,
+  type X402ServiceIdentifier,
+  type X402ServicePaymentTerms,
 } from "./config";
 import type {
   PaymentRequirementsLegacy,
   PaymentPayloadCustom,
   PaymentRequirement,
 } from "./types";
+import type { PaymentPayload as CorePaymentPayload, PaymentRequirements as CorePaymentRequirements } from "@x402/core/types";
 
 // ---------------------------------------------------------------------------
 // Supported schemas
@@ -130,9 +134,8 @@ export function buildPaymentRequirements(): PaymentRequirementsLegacy {
   // In celo-facilitator mode this advertises Celo mainnet; in local mode
   // it advertises Celo Sepolia.
   const active = getActiveVerificationConfig();
-  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
-    ? (process.env.X402_DISPUTE_BRIEF_PRICE || "0.01")
-    : getX402ServerConfig().disputeBriefPrice;
+  const terms = getActiveServicePaymentTerms("reclaim-dispute-brief-v1");
+  const price = fromAtomicUnits(BigInt(terms.amountAtomic), terms.tokenDecimals);
 
   // Asset decimals: USDC always has 6 decimals on both networks.
   const assetDecimals = 6;
@@ -146,6 +149,7 @@ export function buildPaymentRequirements(): PaymentRequirementsLegacy {
         payTo: active.payToAddress,
         asset: active.usdcAddress,
         assetDecimals,
+        amount: terms.amountAtomic,
         // EIP-3009 requires the token's EIP-712 domain in extra
         ...(X402_SETTLEMENT_MODE === "celo-facilitator"
           ? { extra: { name: "USDC", version: "2" } }
@@ -176,9 +180,8 @@ export function buildPaymentRequiredHeader(): string {
  */
 export function buildEvidenceCheckPaymentRequirements(): PaymentRequirementsLegacy {
   const active = getActiveVerificationConfig();
-  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
-    ? "0.01"
-    : X402_EVIDENCE_CHECK_PRICE;
+  const terms = getActiveServicePaymentTerms("evidence-quality-check");
+  const price = fromAtomicUnits(BigInt(terms.amountAtomic), terms.tokenDecimals);
 
   // Asset decimals: USDC always has 6 decimals on both networks.
   const assetDecimals = 6;
@@ -192,6 +195,7 @@ export function buildEvidenceCheckPaymentRequirements(): PaymentRequirementsLega
         payTo: active.payToAddress,
         asset: active.usdcAddress,
         assetDecimals,
+        amount: terms.amountAtomic,
         ...(X402_SETTLEMENT_MODE === "celo-facilitator"
           ? { extra: { name: "USDC", version: "2" } }
           : {}),
@@ -242,98 +246,366 @@ export function decodePaymentSignatureCustomHeader(
 /** Regex for validating EVM hex addresses. */
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
+/** Mode-aware terms helper used by the request validator and header builder. */
+export function getActiveServicePaymentTerms(
+  service: X402ServiceIdentifier,
+): X402ServicePaymentTerms {
+  // Keep one server-owned source of truth for all service prices and active
+  // network/token/recipient values.  Routes must never derive a requirement
+  // from a client-supplied amount.  This helper intentionally resolves the
+  // active mode locally so tests and long-lived workers can switch mode
+  // without retaining a stale imported constant.
+  const active = getActiveVerificationConfig();
+  const amount = (() => {
+    switch (service) {
+      case "reclaim-dispute-brief-v1":
+        return getDisputeBriefPriceAtomic();
+      case "evidence-quality-check":
+        return getEvidenceCheckPriceAtomic();
+      case "case-refresh":
+        return getCaseRefreshPriceAtomic();
+    }
+  })();
+  return {
+    service,
+    network: active.network,
+    chainId: active.network === X402_FACILITATOR_NETWORK ? 42220 : 11142220,
+    tokenAddress: active.usdcAddress,
+    tokenSymbol: "USDC",
+    tokenDecimals: 6,
+    payToAddress: active.payToAddress,
+    amountAtomic: amount.toString(),
+    amountDisplay: fromAtomicUnits(amount, 6),
+  };
+}
+
 /**
- * Verify a payment payload from the client against our server configuration.
- *
- * Checks scheme, network, required fields, address formats, token match,
- * recipient match, and minimum amount.
+ * Resolve only the active server-owned terms. Callers may pass the service
+ * snapshot they built for a route, but that snapshot is still untrusted at
+ * this boundary and must equal the current server configuration exactly.
+ */
+export function resolveServerPaymentTerms(
+  supplied?: X402ServicePaymentTerms,
+): { valid: true; terms: X402ServicePaymentTerms } | { valid: false; reason: string } {
+  if (
+    supplied &&
+    supplied.service !== "reclaim-dispute-brief-v1" &&
+    supplied.service !== "evidence-quality-check" &&
+    supplied.service !== "case-refresh"
+  ) {
+    return { valid: false, reason: "Payment terms contain an unsupported service identifier." };
+  }
+  const expected = getActiveServicePaymentTerms(
+    supplied?.service ?? "reclaim-dispute-brief-v1",
+  );
+  if (!supplied) return { valid: true, terms: expected };
+
+  const addressFields: Array<keyof X402ServicePaymentTerms> = [
+    "tokenAddress",
+    "payToAddress",
+  ];
+  const exactFields: Array<keyof X402ServicePaymentTerms> = [
+    "service",
+    "network",
+    "chainId",
+    "tokenSymbol",
+    "tokenDecimals",
+    "amountAtomic",
+    "amountDisplay",
+  ];
+
+  for (const field of exactFields) {
+    if (supplied[field] !== expected[field]) {
+      return { valid: false, reason: "Payment terms are not the active server-configured terms." };
+    }
+  }
+  for (const field of addressFields) {
+    const suppliedValue = supplied[field];
+    const expectedValue = expected[field];
+    if (
+      typeof suppliedValue !== "string" ||
+      typeof expectedValue !== "string" ||
+      suppliedValue.toLowerCase() !== expectedValue.toLowerCase()
+    ) {
+      return { valid: false, reason: "Payment terms are not the active server-configured terms." };
+    }
+  }
+
+  return { valid: true, terms: expected };
+}
+
+/** Build the PAYMENT-REQUIRED payload for the case-refresh service. */
+export function buildCaseRefreshPaymentRequirements(): PaymentRequirementsLegacy {
+  const active = getActiveVerificationConfig();
+  const terms = getActiveServicePaymentTerms("case-refresh");
+
+  return {
+    accepts: [
+      {
+        scheme: SUPPORTED_SCHEME,
+        price: `$${terms.amountDisplay}`,
+        network: active.network,
+        payTo: active.payToAddress,
+        asset: active.usdcAddress,
+        assetDecimals: terms.tokenDecimals,
+        amount: terms.amountAtomic,
+        ...(X402_SETTLEMENT_MODE === "celo-facilitator"
+          ? { extra: { name: "USDC", version: "2" } }
+          : {}),
+      },
+    ],
+    description: "Reclaim case refresh",
+    mimeType: "application/json",
+  };
+}
+
+/** Build the full PAYMENT-REQUIRED header for case refresh. */
+export function buildCaseRefreshHeader(): string {
+  return Buffer.from(JSON.stringify(buildCaseRefreshPaymentRequirements())).toString("base64");
+}
+
+function expectedPaymentFields(
+  expected: X402ServicePaymentTerms | PaymentRequirement,
+): { network: string; asset: string; payTo: string; amount: string; decimals: number } {
+  if ("tokenAddress" in expected) {
+    return {
+      network: expected.network,
+      asset: expected.tokenAddress,
+      payTo: expected.payToAddress,
+      amount: expected.amountAtomic,
+      decimals: expected.tokenDecimals,
+    };
+  }
+  if (!expected.amount) {
+    throw new Error("Payment requirement is missing its exact atomic amount.");
+  }
+  return {
+    network: expected.network,
+    asset: expected.asset,
+    payTo: expected.payTo,
+    amount: expected.amount,
+    decimals: expected.assetDecimals,
+  };
+}
+
+/** Extract the payer from either Permit2 or EIP-3009 custom wire payloads. */
+export function getPaymentPayloadPayer(payload: PaymentPayloadCustom): string | undefined {
+  const payment = payload.payment as unknown as Record<string, unknown> | undefined;
+  if (!payment || typeof payment !== "object") return undefined;
+  const authorization = payment.authorization;
+  if (authorization && typeof authorization === "object") {
+    const from = (authorization as Record<string, unknown>).from;
+    return typeof from === "string" ? from : undefined;
+  }
+  return typeof payment.from === "string" ? payment.from : undefined;
+}
+
+/**
+ * Validate a custom wire payload against server-owned terms. This is a pure
+ * check and must run immediately before every facilitator/local provider call.
  */
 export function verifyPaymentPayload(
   payload: PaymentPayloadCustom,
+  expected?: X402ServicePaymentTerms | PaymentRequirement,
 ): { valid: boolean; reason?: string } {
-  // Use the active settlement mode's expected network, USDC address, and payTo.
-  // In celo-facilitator mode: validates against Celo mainnet values.
-  // In local mode: validates against Celo Sepolia values (unchanged behavior).
-  const verifyConfig = getActiveVerificationConfig();
+  if (!payload || typeof payload !== "object") {
+    return { valid: false, reason: "Payment payload is missing." };
+  }
+  let fields: ReturnType<typeof expectedPaymentFields>;
+  try {
+    fields = expectedPaymentFields(
+      expected ?? getActiveServicePaymentTerms("reclaim-dispute-brief-v1"),
+    );
+  } catch (error) {
+    return { valid: false, reason: error instanceof Error ? error.message : "Payment terms are invalid." };
+  }
 
-  // Check scheme
+  if (
+    typeof fields.network !== "string" ||
+    !/^eip155:[0-9]+$/.test(fields.network) ||
+    typeof fields.asset !== "string" ||
+    !ADDR_RE.test(fields.asset) ||
+    typeof fields.payTo !== "string" ||
+    !ADDR_RE.test(fields.payTo) ||
+    !/^[0-9]+$/.test(fields.amount) ||
+    BigInt(fields.amount) <= 0n
+  ) {
+    return { valid: false, reason: "Server payment terms are invalid." };
+  }
   if (payload.scheme !== SUPPORTED_SCHEME) {
-    return {
-      valid: false,
-      reason: `Unsupported payment scheme: ${payload.scheme}. Expected: ${SUPPORTED_SCHEME}`,
-    };
+    return { valid: false, reason: `Unsupported payment scheme: ${payload.scheme}. Expected: ${SUPPORTED_SCHEME}` };
   }
-
-  // Check network against the active mode's expected network
-  if (payload.network !== verifyConfig.network) {
-    return {
-      valid: false,
-      reason: `Unsupported network: ${payload.network}. Expected: ${verifyConfig.network}`,
-    };
+  if (payload.network !== fields.network) {
+    return { valid: false, reason: `Unsupported network: ${payload.network}. Expected: ${fields.network}` };
   }
-
-  // Check payment details exist
-  if (!payload.payment) {
+  if (!payload.payment || typeof payload.payment !== "object") {
     return { valid: false, reason: "Missing payment details in payload." };
   }
 
-  const payment = payload.payment;
+  const payment = payload.payment as unknown as Record<string, unknown>;
+  const authorization = payment.authorization;
+  const isEip3009 = authorization !== undefined;
+  if (isEip3009 && (!authorization || typeof authorization !== "object" || Array.isArray(authorization))) {
+    return { valid: false, reason: "Invalid EIP-3009 authorization payload." };
+  }
+  const from = isEip3009 ? (authorization as Record<string, unknown>).from : payment.from;
+  const to = isEip3009 ? (authorization as Record<string, unknown>).to : payment.to;
+  const amount = isEip3009 ? (authorization as Record<string, unknown>).value : payment.amount;
+  const signature = payment.signature;
+  const suppliedToken = typeof payment.token === "string"
+    ? payment.token
+    : typeof payment.asset === "string" ? payment.asset : undefined;
 
-  // Validate required fields
-  if (!payment.from || !payment.to || !payment.token || !payment.signature) {
-    return {
-      valid: false,
-      reason:
-        "Payment details missing required fields (from, to, token, signature).",
-    };
+  // Local settlement is Permit2-only. EIP-3009 is accepted only when the
+  // explicitly selected provider is the mainnet facilitator.
+  if (isEip3009 && X402_SETTLEMENT_MODE !== "celo-facilitator") {
+    return { valid: false, reason: "Payment details missing required fields (from, to, token, signature)." };
   }
 
-  // Validate address formats
-  if (!ADDR_RE.test(payment.from) || !ADDR_RE.test(payment.to)) {
+  if (
+    typeof from !== "string" || !from ||
+    typeof to !== "string" || !to ||
+    typeof signature !== "string" || !signature ||
+    (!isEip3009 && !suppliedToken)
+  ) {
     return {
       valid: false,
-      reason: "Invalid address format in payment details.",
+      reason: isEip3009
+        ? "Payment details missing required EIP-3009 fields (authorization.from, authorization.to, authorization.value, signature)."
+        : "Payment details missing required fields (from, to, token, signature).",
     };
   }
-
-  // Validate token matches the active mode's USDC address
-  if (payment.token.toLowerCase() !== verifyConfig.usdcAddress.toLowerCase()) {
-    return {
-      valid: false,
-      reason: `Payment token ${payment.token} does not match expected ${verifyConfig.usdcAddress}.`,
-    };
+  if (!ADDR_RE.test(from) || !ADDR_RE.test(to)) {
+    return { valid: false, reason: "Invalid address format in payment details." };
+  }
+  if (to.toLowerCase() !== fields.payTo.toLowerCase()) {
+    return { valid: false, reason: `Payment recipient ${to} does not match service wallet ${fields.payTo}.` };
   }
 
-  // Validate recipient matches the active mode's pay-to address
-  if (payment.to.toLowerCase() !== verifyConfig.payToAddress.toLowerCase()) {
-    return {
-      valid: false,
-      reason: `Payment recipient ${payment.to} does not match service wallet ${verifyConfig.payToAddress}.`,
-    };
+  // EIP-3009 binds the token through the server-supplied requirement. If a
+  // custom token field is present, it must agree as well; it can never select
+  // a different asset. Permit2 carries the token directly in the payload.
+  if (!isEip3009 && (!suppliedToken || suppliedToken.toLowerCase() !== fields.asset.toLowerCase())) {
+    return { valid: false, reason: `Payment token ${String(suppliedToken)} does not match expected ${fields.asset}.` };
+  }
+  if (suppliedToken && suppliedToken.toLowerCase() !== fields.asset.toLowerCase()) {
+    return { valid: false, reason: `Payment token ${suppliedToken} does not match expected ${fields.asset}.` };
   }
 
-  // Validate amount is at least the dispute brief price
-  const expectedAmount = getDisputeBriefPriceAtomic();
+  let providedAmount: bigint;
   try {
-    const providedAmount = BigInt(payment.amount);
-    if (providedAmount < expectedAmount) {
-      return {
-        valid: false,
-        reason: `Payment amount ${payment.amount} is less than required ${expectedAmount.toString()}.`,
-      };
-    }
+    if (typeof amount !== "string" || !/^[0-9]+$/.test(amount)) throw new Error();
+    providedAmount = BigInt(amount);
   } catch {
     return { valid: false, reason: "Invalid payment amount format." };
   }
-
-  // Validate signature is present (non-empty, non-placeholder)
-  if (!payment.signature || payment.signature === "0x") {
+  if (providedAmount !== BigInt(fields.amount)) {
+    const comparison = providedAmount < BigInt(fields.amount) ? " (less than required)" : "";
     return {
       valid: false,
-      reason: "Payment signature is missing or is a placeholder.",
+      reason: `Payment amount ${providedAmount} does not match exact amount ${fields.amount}${comparison}.`,
     };
   }
+  if (signature === "0x") {
+    return { valid: false, reason: "Payment signature is missing or is a placeholder." };
+  }
+  if (isEip3009) {
+    const auth = authorization as Record<string, unknown>;
+    if (
+      typeof auth.validAfter !== "string" || !/^[0-9]+$/.test(auth.validAfter) ||
+      typeof auth.validBefore !== "string" || !/^[0-9]+$/.test(auth.validBefore) ||
+      typeof auth.nonce !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(auth.nonce)
+    ) {
+      return { valid: false, reason: "Payment details missing required EIP-3009 authorization fields." };
+    }
+  }
+  return { valid: true };
+}
 
+/** Validate the @x402/core envelope before invoking a provider. */
+export function validateCorePaymentPayload(
+  payload: CorePaymentPayload,
+  requirement: CorePaymentRequirements,
+  terms?: X402ServicePaymentTerms,
+): { valid: boolean; reason?: string } {
+  if (!payload || typeof payload !== "object" || !requirement || typeof requirement !== "object") {
+    return { valid: false, reason: "Payment payload or requirement is missing." };
+  }
+  const resolvedTerms = resolveServerPaymentTerms(terms);
+  if (!resolvedTerms.valid) return resolvedTerms;
+  const configuredFields = expectedPaymentFields(resolvedTerms.terms);
+  const requirementFields = {
+    network: requirement.network,
+    asset: requirement.asset,
+    payTo: requirement.payTo,
+    amount: requirement.amount,
+  };
+  if (
+    !requirement.amount ||
+    requirement.scheme !== SUPPORTED_SCHEME ||
+    typeof requirementFields.network !== "string" ||
+    requirementFields.network !== configuredFields.network ||
+    typeof requirementFields.asset !== "string" ||
+    requirementFields.asset.toLowerCase() !== configuredFields.asset.toLowerCase() ||
+    typeof requirementFields.payTo !== "string" ||
+    requirementFields.payTo.toLowerCase() !== configuredFields.payTo.toLowerCase() ||
+    requirementFields.amount !== configuredFields.amount
+  ) {
+    return { valid: false, reason: "Payment requirement does not match the server-configured exact USDC terms." };
+  }
+  const accepted = payload.accepted;
+  if (
+    !accepted ||
+    payload.x402Version !== 2 ||
+    accepted.scheme !== requirement.scheme ||
+    accepted.network !== requirement.network ||
+    typeof accepted.asset !== "string" ||
+    typeof requirement.asset !== "string" ||
+    accepted.asset.toLowerCase() !== requirement.asset.toLowerCase() ||
+    typeof accepted.payTo !== "string" ||
+    typeof requirement.payTo !== "string" ||
+    accepted.payTo.toLowerCase() !== requirement.payTo.toLowerCase() ||
+    accepted.amount !== requirement.amount
+  ) {
+    return { valid: false, reason: "Payment payload accepted terms do not match the server requirement." };
+  }
+
+  const rawPayload = payload.payload;
+  if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) {
+    return { valid: false, reason: "Payment scheme payload is missing or invalid." };
+  }
+  const raw = rawPayload as Record<string, unknown>;
+  const authorizationValue = raw.authorization;
+  if (
+    authorizationValue !== undefined &&
+    (!authorizationValue || typeof authorizationValue !== "object" || Array.isArray(authorizationValue))
+  ) {
+    return { valid: false, reason: "Invalid EIP-3009 authorization payload." };
+  }
+  const authorization = authorizationValue as Record<string, unknown> | undefined;
+  const to = authorization?.to ?? raw?.to;
+  const amount = authorization?.value ?? raw?.amount;
+  const token = raw?.token ?? raw?.asset;
+  const signature = raw?.signature;
+  if (!authorization && typeof token !== "string") return { valid: false, reason: "Payment token is missing." };
+  const from = authorization?.from ?? raw?.from;
+  if (typeof from !== "string" || !ADDR_RE.test(from)) return { valid: false, reason: "Payment payer is missing or invalid." };
+  if (typeof to !== "string" || to.toLowerCase() !== requirement.payTo.toLowerCase()) return { valid: false, reason: "Payment recipient does not match the server requirement." };
+  if (typeof amount !== "string" || !/^[0-9]+$/.test(amount)) return { valid: false, reason: "Payment amount is missing or invalid." };
+  try {
+    if (BigInt(amount) !== BigInt(requirement.amount)) return { valid: false, reason: "Payment amount does not match the exact server amount." };
+  } catch {
+    return { valid: false, reason: "Payment amount has an invalid format." };
+  }
+  if (typeof token === "string" && token.toLowerCase() !== requirement.asset.toLowerCase()) return { valid: false, reason: "Payment token does not match the server requirement." };
+  if (typeof signature !== "string" || !signature || signature === "0x") return { valid: false, reason: "Payment signature is missing or is a placeholder." };
+  if (authorization && (
+    typeof authorization.validAfter !== "string" || !/^[0-9]+$/.test(authorization.validAfter) ||
+    typeof authorization.validBefore !== "string" || !/^[0-9]+$/.test(authorization.validBefore) ||
+    typeof authorization.nonce !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(authorization.nonce)
+  )) {
+    return { valid: false, reason: "Payment details missing required EIP-3009 authorization fields." };
+  }
   return { valid: true };
 }
 
@@ -341,19 +613,19 @@ export function verifyPaymentPayload(
 // Helper: get a single PaymentRequirement for facilitator.verify() calls
 // ---------------------------------------------------------------------------
 
-export function getVerificationRequirement(): PaymentRequirement {
-  const active = getActiveVerificationConfig();
-  const price = X402_SETTLEMENT_MODE === "celo-facilitator"
-    ? (process.env.X402_DISPUTE_BRIEF_PRICE || "0.01")
-    : getX402ServerConfig().disputeBriefPrice;
+export function getVerificationRequirement(
+  service: X402ServiceIdentifier = "reclaim-dispute-brief-v1",
+): PaymentRequirement {
+  const terms = getActiveServicePaymentTerms(service);
 
   return {
     scheme: SUPPORTED_SCHEME,
-    price: `$${price}`,
-    network: active.network,
-    payTo: active.payToAddress,
-    asset: active.usdcAddress,
-    assetDecimals: 6, // USDC always 6 decimals
+    price: `$${terms.amountDisplay}`,
+    network: terms.network,
+    payTo: terms.payToAddress,
+    asset: terms.tokenAddress,
+    assetDecimals: terms.tokenDecimals,
+    amount: terms.amountAtomic,
     ...(X402_SETTLEMENT_MODE === "celo-facilitator"
       ? { extra: { name: "USDC", version: "2" } }
       : {}),

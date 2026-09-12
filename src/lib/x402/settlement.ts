@@ -25,26 +25,23 @@ import {
   http,
   parseAbi,
   type PublicClient,
-  type WalletClient,
   type TransactionReceipt,
   type Log,
   decodeEventLog,
   keccak256,
   toHex,
-  stringToHex,
 } from "viem";
 import { celoSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import {
-  X402_NETWORK,
   X402_USDC_ADDRESS,
   X402_PAY_TO_ADDRESS,
-  X402_USDC_DECIMALS,
   requireRelayerPrivateKey,
   getDisputeBriefPriceAtomic,
   validatePayToAddress,
 } from "./config";
 import type { PaymentDetails, SettlementReceipt } from "./types";
+import type { Permit2VerificationTerms } from "./localVerify";
 import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 
 // ---------------------------------------------------------------------------
@@ -93,9 +90,15 @@ function getRpcUrl(): string {
   );
 }
 
-function getPublicClient(): PublicClient {
+const DECIMAL_RE = /^[0-9]+$/;
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+function getPublicClient(chainId = 11142220): PublicClient {
+  const chain = chainId === celoSepolia.id
+    ? celoSepolia
+    : { ...celoSepolia, id: chainId };
   return createPublicClient({
-    chain: celoSepolia,
+    chain,
     transport: http(getRpcUrl()),
   }) as unknown as PublicClient;
 }
@@ -117,13 +120,39 @@ function getPublicClient(): PublicClient {
  */
 export async function settlePayment(
   payment: PaymentDetails,
+  terms: Permit2VerificationTerms = {
+    amountAtomic: getDisputeBriefPriceAtomic().toString(),
+    tokenAddress: X402_USDC_ADDRESS,
+    payToAddress: X402_PAY_TO_ADDRESS,
+    chainId: celoSepolia.id,
+  },
 ): Promise<SettlementReceipt> {
   // --- Step 0: Validate configuration ---
   validatePayToAddress();
 
-  const payTo = X402_PAY_TO_ADDRESS as `0x${string}`;
-  const usdcAddress = X402_USDC_ADDRESS as `0x${string}`;
-  const requiredAmount = getDisputeBriefPriceAtomic();
+  const payTo = terms.payToAddress as `0x${string}`;
+  const usdcAddress = terms.tokenAddress as `0x${string}`;
+  const chainId = terms.chainId ?? celoSepolia.id;
+  if (!Number.isInteger(chainId) || chainId <= 0) {
+    throw new Error("Configured x402 chain ID is invalid.");
+  }
+  const chain = chainId === celoSepolia.id
+    ? celoSepolia
+    : { ...celoSepolia, id: chainId };
+  if (
+    !ADDRESS_RE.test(terms.tokenAddress) ||
+    !ADDRESS_RE.test(terms.payToAddress) ||
+    !DECIMAL_RE.test(terms.amountAtomic)
+  ) {
+    throw new Error("Configured x402 payment terms are invalid.");
+  }
+  let requiredAmount: bigint;
+  try {
+    requiredAmount = BigInt(terms.amountAtomic);
+  } catch {
+    throw new Error("Configured x402 amount is invalid.");
+  }
+  if (requiredAmount <= 0n) throw new Error("Configured x402 amount must be greater than zero.");
 
   // --- Step 1: Validate payment details ---
   if (!payment.signature || payment.signature === "0x") {
@@ -132,10 +161,16 @@ export async function settlePayment(
   if (!payment.from || !/^0x[0-9a-fA-F]{40}$/.test(payment.from)) {
     throw new Error(`Invalid buyer address: ${payment.from}`);
   }
+  if (!payment.to || !/^0x[0-9a-fA-F]{40}$/.test(payment.to)) {
+    throw new Error(`Invalid payment recipient: ${payment.to}`);
+  }
   if (payment.to.toLowerCase() !== payTo.toLowerCase()) {
     throw new Error(
       `Payment recipient ${payment.to} does not match payTo address ${payTo}.`,
     );
+  }
+  if (!payment.token || !/^0x[0-9a-fA-F]{40}$/.test(payment.token)) {
+    throw new Error(`Invalid payment token address: ${payment.token}`);
   }
   if (payment.token.toLowerCase() !== usdcAddress.toLowerCase()) {
     throw new Error(
@@ -143,10 +178,15 @@ export async function settlePayment(
     );
   }
 
-  const amount = BigInt(payment.amount);
-  if (amount < requiredAmount) {
+  let amount: bigint;
+  try {
+    amount = BigInt(payment.amount);
+  } catch {
+    throw new Error(`Invalid payment amount: ${payment.amount}`);
+  }
+  if (amount !== requiredAmount) {
     throw new Error(
-      `Payment amount ${payment.amount} (${amount}) is less than required ${requiredAmount}.`,
+      `Payment amount ${payment.amount} (${amount}) does not match exact amount ${requiredAmount}.`,
     );
   }
 
@@ -154,9 +194,9 @@ export async function settlePayment(
   const relayerKey = requireRelayerPrivateKey();
   const relayerAccount = privateKeyToAccount(relayerKey);
 
-  const publicClient = getPublicClient();
+  const publicClient = getPublicClient(chainId);
   const walletClient = createWalletClient({
-    chain: celoSepolia,
+    chain,
     transport: http(getRpcUrl()),
     account: relayerAccount,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,11 +206,21 @@ export async function settlePayment(
   // The payment.nonce is required for Permit2. If not provided, we try to
   // find the next unused nonce for the buyer.
   const nonce = payment.nonce
-    ? BigInt(payment.nonce)
-    : await getNextPermit2Nonce(publicClient, payment.from as `0x${string}`);
+    ? (() => {
+        if (typeof payment.nonce !== "string" || !DECIMAL_RE.test(payment.nonce)) {
+          throw new Error("Invalid Permit2 nonce format.");
+        }
+        return BigInt(payment.nonce);
+      })()
+    : await getNextPermit2Nonce();
 
   const deadline = payment.deadline
-    ? BigInt(payment.deadline)
+    ? (() => {
+        if (typeof payment.deadline !== "string" || !DECIMAL_RE.test(payment.deadline)) {
+          throw new Error("Invalid Permit2 deadline format.");
+        }
+        return BigInt(payment.deadline);
+      })()
     : BigInt(Math.floor(Date.now() / 1000) + 3600); // 1 hour default
 
   // Validate deadline hasn't passed
@@ -184,7 +234,12 @@ export async function settlePayment(
   // Permit2 binds spender = msg.sender of permitTransferFrom, and the relayer
   // submits it, so the buyer-signed spender MUST equal the relayer address.
   const spender = payment.spender
-    ? (payment.spender as `0x${string}`)
+    ? (() => {
+        if (typeof payment.spender !== "string" || !ADDRESS_RE.test(payment.spender)) {
+          throw new Error("Invalid Permit2 spender address.");
+        }
+        return payment.spender as `0x${string}`;
+      })()
     : relayerAccount.address;
 
   if (spender.toLowerCase() !== relayerAccount.address.toLowerCase()) {
@@ -227,7 +282,7 @@ export async function settlePayment(
       abi: permit2ABI,
       functionName: "permitTransferFrom",
       args: [permit, transferDetails, buyer, signature],
-      chain: celoSepolia,
+      chain,
       // Gas estimation will be automatic; add a buffer for safety
       gas: undefined as unknown as bigint,
       dataSuffix,
@@ -394,10 +449,7 @@ function padAddressToTopic(address: `0x${string}`): `0x${string}` {
 // Helper: get the next unused Permit2 nonce for a user
 // ---------------------------------------------------------------------------
 
-async function getNextPermit2Nonce(
-  client: PublicClient,
-  user: `0x${string}`,
-): Promise<bigint> {
+async function getNextPermit2Nonce(): Promise<bigint> {
   // This is a simplified nonce discovery. In production, you'd iterate through
   // the nonceBitmap to find the first unused nonce. For the demo, we accept
   // that the nonce MUST be provided in the payment details.

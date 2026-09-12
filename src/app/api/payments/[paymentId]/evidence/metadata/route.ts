@@ -16,6 +16,7 @@
 //   201 — metadata persisted
 //   200 — idempotent (same evidence ref already stored)
 //   400 — hash mismatch or invalid body
+//   409 — reviewer review has begun; evidence is immutable
 //   500 — internal error / chain read failure
 // ---------------------------------------------------------------------------
 
@@ -91,12 +92,24 @@ export async function POST(
           persisted: true,
         }, { status: 201 });
 
+      case "review_locked":
+        return NextResponse.json({
+          error: result.detail ?? "Reviewer review has begun; evidence metadata is immutable.",
+          code: "EVIDENCE_REVIEW_LOCKED",
+        }, { status: 409 });
+
       case "hash_mismatch":
         return NextResponse.json({
           error: "Evidence manifest hash does not match the current on-chain evidence reference.",
           code: "HASH_MISMATCH",
           details: { computed: result.detail, onChain: result.evidenceReference },
         }, { status: 400 });
+
+      case "insert_failed":
+        return NextResponse.json({
+          error: result.detail ?? "Failed to persist verified evidence metadata.",
+          code: "PERSISTENCE_FAILED",
+        }, { status: 500 });
 
       default:
         return NextResponse.json({

@@ -221,7 +221,7 @@ describe("/receipts (index discovery)", () => {
     expect(text).toContain("Worker");
   });
 
-  it("keeps the empty state for a connected wallet with no eligible receipts", async () => {
+  it("keeps the empty state for a connected wallet with no on-chain payments", async () => {
     mockWallet = {
       ...mockWallet,
       address: "0x1111111111111111111111111111111111111111",
@@ -234,18 +234,19 @@ describe("/receipts (index discovery)", () => {
     await mountIndex();
 
     const text = document.body.textContent ?? "";
-    expect(text).toContain("No settlement receipts yet.");
-    expect(text).toContain("Receipts appear after a protected payment is released or resolved.");
-  });
+     expect(text).toContain("No payment receipts yet.");
+     expect(text).toContain("Receipts appear when a protected payment can be verified on-chain.");
+   });
 
-  it("does not list candidates the canonical receipt API does not confirm", async () => {
+  it("lists a non-terminal payment with its current escrow state", async () => {
     mockWallet = {
       ...mockWallet,
       address: CLIENT,
       isConnected: true,
       connectionState: "connected",
     };
-    // Payment #1 exists but is not released → not an eligible receipt.
+     // Payment #1 exists but is not released; it still has a canonical
+     // read-only receipt so the user can see the current state.
     mockClientIds = { ...mockClientIds, data: [1n] };
     mockWorkerIds = { ...mockWorkerIds, data: [] };
     setupFetch({
@@ -254,12 +255,12 @@ describe("/receipts (index discovery)", () => {
       receipt: { ...RECEIPT, protectedPayment: { ...RECEIPT.protectedPayment, finalState: "Funded" } },
     });
 
-    await mountIndex();
+     await mountIndex();
 
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("No settlement receipts yet.");
-    expect(text).not.toContain("Payment #1");
-  });
+     const text = document.body.textContent ?? "";
+     expect(text).toContain("Payment #1");
+     expect(text).toContain("Funded");
+   });
 
   it("renders the receipt card as a link to the canonical /receipts/[id] page", async () => {
     mockWallet = {

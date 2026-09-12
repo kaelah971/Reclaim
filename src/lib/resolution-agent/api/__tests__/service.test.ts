@@ -31,8 +31,8 @@ const {
 } = vi.hoisted(() => ({
   FIXED_FUNDER_A: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   FIXED_FUNDER_B: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  FIXED_CLIENT: "0xCLIENT_CLIENT_CLIENT_CLIENT_CLIENT_CLIENT_CLIENT",
-  FIXED_WORKER: "0xWORKER_WORKER_WORKER_WORKER_WORKER_WORKER_WORKER",
+  FIXED_CLIENT: "0xcccccccccccccccccccccccccccccccccccccccc",
+  FIXED_WORKER: "0xdddddddddddddddddddddddddddddddddddddddd",
   FIXED_UNRELATED: "0xDEADDEADDEADDEADDEADDEADDEADDEADDEADDEAD",
   FIXED_CASE_WALLET: "0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
   FIXED_ENCRYPTED_SECRET: {
@@ -253,7 +253,7 @@ beforeEach(() => {
 // Test payment ID used throughout
 // ---------------------------------------------------------------------------
 
-const testPaymentId = "pay_test_service_001";
+const testPaymentId = "1";
 
 // ---------------------------------------------------------------------------
 // Helpers

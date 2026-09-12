@@ -225,7 +225,7 @@ describe("renewal message transport + verification (RA1R.7F)", () => {
 
   it("canonical message is ASCII-only but MULTILINE — raw header transport is illegal", () => {
     const message = buildMessage();
-    expect(message.startsWith("Reclaim - Renew Resolution Agent Policy")).toBe(true);
+    expect(message.startsWith("Reclaim Resolution Agent Authorization v2")).toBe(true);
     // ASCII-only (no smart punctuation)…
     expect(message).not.toMatch(/[\u2014\u2013\u201C\u201D]/);
     expect(message).toContain("renew_resolution_agent_policy");

@@ -1,18 +1,23 @@
 // ---------------------------------------------------------------------------
 // SERVER-ONLY
-// Reads authoritative case party info from the canonical escrow contract on
-// Celo Sepolia.  The escrow contract is the authoritative source of truth for
-// who the client and worker are for a given payment case.
+// Reads authoritative case party info from the configured escrow contract on
+// a supported Celo chain. The escrow contract is the authoritative source of
+// truth for who the client and worker are for a given payment case.
 //
 // This is used by the service layer to enforce that only legitimate case
 // participants (client or worker) may create or view resolution agents.
 // ---------------------------------------------------------------------------
 
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
+import type { Chain } from "viem/chains";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
-import { CELO_CHAIN_ID } from "@/lib/web3/chains";
+import {
+  celoMainnetChain,
+  celoSepoliaChain,
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+} from "@/lib/web3/chains";
 import type { CaseObservationReader } from "../observation/types";
 
 // ---------------------------------------------------------------------------
@@ -67,8 +72,9 @@ export interface EscrowCaseAuthorizationReader {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Default Celo Sepolia public RPC endpoint (Forno). */
+/** Default public RPC endpoints (Forno). */
 const DEFAULT_CELO_SEPOLIA_RPC = "https://sepolia-forno.celo.org";
+const DEFAULT_CELO_MAINNET_RPC = "https://forno.celo.org";
 
 /** Zero address sentinel for non-existent payments. */
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
@@ -90,33 +96,66 @@ function parsePaymentIdToBigInt(raw: string): bigint {
 }
 
 // ---------------------------------------------------------------------------
-// Production implementation — Celo Sepolia escrow contract
+// Production implementation — chain-scoped Celo escrow contract
 // ---------------------------------------------------------------------------
 
 /**
- * Reads case-party information from the canonical ProtectedPaymentEscrow
- * contract on Celo Sepolia via `getPayment(paymentId)`.
+ * Reads case-party information from a configured ProtectedPaymentEscrow
+ * contract via `getPayment(paymentId)`. A chain without a configured escrow
+ * address fails during construction rather than falling back to Sepolia.
  */
-export class CeloSepoliaEscrowCaseReader
+export class CeloEscrowCaseReader
   implements EscrowCaseAuthorizationReader
 {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private client: any;
 
-  /** The canonical escrow chain ID (numeric), exposed for test assertions. */
-  public readonly chainId: number = CANONICAL_ESCROW_CHAIN_ID;
+  /** The configured escrow chain ID (numeric), exposed for test assertions. */
+  public readonly chainId: number;
 
-  /** The canonical escrow contract address, exposed for test assertions. */
-  public readonly contractAddress: `0x${string}` = CANONICAL_ESCROW_CONTRACT_ADDRESS;
+  /** The configured escrow contract address, exposed for test assertions. */
+  public readonly contractAddress: `0x${string}`;
 
   /**
-   * @param rpcUrl — Optional RPC endpoint override.  Defaults to the
-   *   public Celo Sepolia Forno endpoint.
+   * @param chain — Celo chain definition or chain ID. Defaults to Sepolia.
+   * @param rpcUrl — Optional RPC endpoint override. Defaults to the public
+   *   Forno endpoint for the selected chain.
    */
-  constructor(rpcUrl?: string) {
+  constructor(chain: Chain | number = celoSepoliaChain, rpcUrl?: string) {
+    const chainDefinition =
+      typeof chain === "number"
+        ? chain === CELO_CHAIN_ID
+          ? celoSepoliaChain
+          : chain === CELO_MAINNET_CHAIN_ID
+            ? celoMainnetChain
+            : undefined
+        : chain;
+
+    if (!chainDefinition) {
+      throw new Error(`Unsupported escrow chain ${chain}.`);
+    }
+
+    const contractAddress = getEscrowAddress(chainDefinition.id);
+    if (!contractAddress) {
+      throw new Error(
+        `ProtectedPaymentEscrow is not deployed on chain ${chainDefinition.id}.`,
+      );
+    }
+
+    this.chainId = chainDefinition.id;
+    this.contractAddress = contractAddress;
+
+    const defaultRpc =
+      chainDefinition.id === CELO_MAINNET_CHAIN_ID
+        ? process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL ||
+          DEFAULT_CELO_MAINNET_RPC
+        : process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+          process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+          DEFAULT_CELO_SEPOLIA_RPC;
+
     this.client = createPublicClient({
-      chain: celoSepolia,
-      transport: http(rpcUrl ?? DEFAULT_CELO_SEPOLIA_RPC),
+      chain: chainDefinition,
+      transport: http(rpcUrl ?? defaultRpc),
     });
   }
 
@@ -136,7 +175,7 @@ export class CeloSepoliaEscrowCaseReader
       // `getPayment(uint256)` returns the full Payment struct.
       // viem decodes the named tuple components as object properties.
       const payment = (await this.client.readContract({
-        address: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        address: this.contractAddress,
         abi: protectedPaymentEscrowABI,
         functionName: "getPayment",
         args: [paymentId],
@@ -176,7 +215,7 @@ export class CeloSepoliaEscrowCaseReader
 
     try {
       const payment = (await this.client.readContract({
-        address: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        address: this.contractAddress,
         abi: protectedPaymentEscrowABI,
         functionName: "getPayment",
         args: [paymentId],
@@ -194,6 +233,16 @@ export class CeloSepoliaEscrowCaseReader
       }
       throw error;
     }
+  }
+}
+
+/**
+ * Backward-compatible Celo Sepolia reader. Existing callers intentionally
+ * keep using Sepolia until a deployed mainnet escrow is configured.
+ */
+export class CeloSepoliaEscrowCaseReader extends CeloEscrowCaseReader {
+  constructor(rpcUrl?: string) {
+    super(celoSepoliaChain, rpcUrl);
   }
 }
 

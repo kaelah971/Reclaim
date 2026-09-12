@@ -6,26 +6,46 @@
 
 import { NextResponse } from "next/server";
 import { requireReviewer } from "@/lib/reviewer/auth";
-import { getDecisionsForPayment } from "@/lib/reviewer/store";
+import {
+  getDecisionsForPayment,
+  normalizeEscrowPaymentId,
+  type ReviewerOnchainBinding,
+} from "@/lib/reviewer/store";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
-import { getEscrowAddress as getEscrowContractAddress } from "@/lib/contracts/addresses";
+import { CELO_MAINNET_CHAIN_ID, CELO_SEPOLIA_CHAIN_ID } from "@/lib/web3/chains";
+import { getEscrowChain, getEscrowContractAddress } from "@/lib/contracts/config";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { parsePaymentData } from "@/lib/contracts/types";
 
-function getRpcClient() {
-  const rpcUrl = process.env.NEXT_PUBLIC_CELO_RPC_URL || "https://forno.celo-sepolia.celo-testnet.org";
-  return createPublicClient({ chain: celoSepolia, transport: http(rpcUrl) });
+function getRpcUrl(chainId: number): string {
+  if (chainId === CELO_MAINNET_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || "https://forno.celo.org";
+  }
+  if (chainId === CELO_SEPOLIA_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+      process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+      "https://forno.celo-sepolia.celo-testnet.org";
+  }
+  throw new Error(`Unsupported escrow chain ${chainId}.`);
 }
 
-async function isPaymentDisputed(escrowPaymentId: string): Promise<boolean> {
-  if (!escrowPaymentId) return false;
-  const escrow = getEscrowContractAddress(11142220);
-  if (!escrow) return false;
+async function getLiveDisputedEscrow(
+  escrowPaymentIdValue: unknown,
+  chainIdValue: unknown,
+): Promise<ReviewerOnchainBinding | null> {
+  const escrowPaymentId = normalizeEscrowPaymentId(escrowPaymentIdValue);
+  const chainId = typeof chainIdValue === "number" ? chainIdValue : Number(chainIdValue);
+  if (escrowPaymentId === null || !Number.isSafeInteger(chainId) || chainId <= 0) return null;
 
   try {
-    const client = getRpcClient();
+    // The address lookup intentionally throws when a chain has no deployed
+    // escrow. A missing mainnet deployment must not fall back to Sepolia.
+    const escrow = getEscrowContractAddress(chainId);
+    const client = createPublicClient({
+      chain: getEscrowChain(chainId),
+      transport: http(getRpcUrl(chainId)),
+    });
     const raw = await client.readContract({
       address: escrow,
       abi: protectedPaymentEscrowABI,
@@ -33,9 +53,19 @@ async function isPaymentDisputed(escrowPaymentId: string): Promise<boolean> {
       args: [BigInt(escrowPaymentId)],
     });
     const pd = parsePaymentData(raw as Parameters<typeof parsePaymentData>[0]);
-    return pd.state === "Disputed";
+    if (pd.id.toString() !== escrowPaymentId || pd.state !== "Disputed") return null;
+    return {
+      chainId,
+      contractAddress: escrow,
+      escrowPaymentId: pd.id.toString(),
+      client: pd.client,
+      worker: pd.worker,
+      amount: pd.amount.toString(),
+      token: pd.token,
+      state: pd.state,
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -53,7 +83,7 @@ export async function GET(request: Request): Promise<Response> {
     // Get payments that have briefs AND are in reviewable states
     const { data: payments, error } = await sb
       .from("x402_payments")
-      .select("payment_identifier, payer_address, pay_to_address, amount_display, state, brief, created_at, generation_mode, ai_provider, ai_model, escrow_payment_id")
+      .select("payment_identifier, state, brief, created_at, generation_mode, ai_provider, ai_model, escrow_payment_id, chain_id")
       .in("state", ["paid_pending_brief", "settled"])
       .not("brief", "is", null)
       .order("created_at", { ascending: false })
@@ -65,11 +95,12 @@ export async function GET(request: Request): Promise<Response> {
 
     const cases = [];
     for (const payment of payments as Array<Record<string, unknown>>) {
-      const escrowPaymentId = (payment.escrow_payment_id as string) || "";
+      const escrowPaymentId = normalizeEscrowPaymentId(payment.escrow_payment_id);
+      if (escrowPaymentId === null) continue;
 
       // Exclude non-disputed payments: verify on-chain dispute state
-      const disputed = await isPaymentDisputed(escrowPaymentId);
-      if (!disputed) continue;
+      const onchainBinding = await getLiveDisputedEscrow(escrowPaymentId, payment.chain_id);
+      if (!onchainBinding) continue;
 
       const pid = payment.payment_identifier as string;
       const decisions = await getDecisionsForPayment(pid);
@@ -81,9 +112,12 @@ export async function GET(request: Request): Promise<Response> {
       cases.push({
         paymentId: pid,
         agreementTitle: brief?.caseTitle || brief?.neutralCaseTitle || `Payment #${pid}`,
-        protectedAmount: brief?.protectedAmount || (payment.amount_display as string),
-        client: payment.payer_address as string,
-        worker: payment.pay_to_address as string,
+        protectedAmount: onchainBinding.amount,
+        client: onchainBinding.client,
+        worker: onchainBinding.worker,
+        token: onchainBinding.token,
+        chainId: onchainBinding.chainId,
+        escrowContractAddress: onchainBinding.contractAddress,
         state: payment.state as string,
         generationMode: payment.generation_mode as string,
         provider: payment.ai_provider as string,

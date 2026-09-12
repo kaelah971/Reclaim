@@ -25,6 +25,9 @@ export interface ReceiptData {
       network?: string;
       finalState?: string;
       releasedAt?: string | null;
+      escrowState?: string;
+      financialOutcome?: string | null;
+      resolvedAt?: string | null;
     };
     agreement?: {
       deliverable?: string | null;
@@ -70,15 +73,19 @@ export interface ReceiptData {
       inconsistencies?: string[];
     };
     humanDecision?: {
-      decision?: string;
-      authority?: string;
+      decision?: string | null;
+      authority?: string | null;
       txHash?: string | null;
       sender?: string | null;
       blockNumber?: string | null;
       blockTime?: string | null;
       status?: string | null;
-      finalRecipient?: string;
-      outcome?: string;
+      finalRecipient?: string | null;
+      outcome?: string | null;
+      clientAmount?: string | null;
+      workerAmount?: string | null;
+      clientAmountHuman?: string | null;
+      workerAmountHuman?: string | null;
     };
     audit?: {
       explorerLinks?: {
@@ -88,11 +95,17 @@ export interface ReceiptData {
         releaseTransaction?: string | null;
         evidenceSubmissionTransaction?: string | null;
         x402SettlementTransaction?: string | null;
+        disputeTransaction?: string | null;
+        resolutionTransaction?: string | null;
+        cancellationTransaction?: string | null;
       };
       timestamps?: {
         evidenceSubmittedAt?: string | null;
         releaseAt?: string | null;
         qcSettlementAt?: string | null;
+        disputedAt?: string | null;
+        resolvedAt?: string | null;
+        cancelledAt?: string | null;
       };
     };
   };

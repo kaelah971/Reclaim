@@ -15,8 +15,8 @@ export const RECEIPT_FILTERS: { value: ReceiptFilterValue; label: string }[] = [
 
 const emptyStateMessages: Record<ReceiptFilterValue, { title: string; description: string }> = {
   all: {
-    title: "No settlement receipts yet.",
-    description: "Receipts appear after a protected payment is released or resolved.",
+    title: "No payment receipts yet.",
+    description: "Receipts appear when a protected payment can be verified on-chain.",
   },
   released: {
     title: "No released payments.",

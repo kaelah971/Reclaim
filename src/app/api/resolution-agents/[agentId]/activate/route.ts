@@ -27,10 +27,16 @@
 // ---------------------------------------------------------------------------
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifyAuth } from "@/lib/resolution-agent/api/auth";
+import {
+  authorizeWalletRequest,
+  EMPTY_BODY_HASH,
+  requestHasUnexpectedBody,
+} from "@/lib/resolution-agent/api/auth";
 import { activateResolutionAgent, createStore } from "@/lib/resolution-agent/api/service";
 import {
   CeloSepoliaEscrowCaseReader,
+  CANONICAL_ESCROW_CHAIN_ID,
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
 } from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
@@ -61,35 +67,62 @@ export async function POST(
       );
     }
 
-    const authResult = await verifyAuth({
+    if (await requestHasUnexpectedBody(request)) {
+      return NextResponse.json(
+        { error: "This route does not accept a request body.", code: "BODY_NOT_ALLOWED" },
+        { status: 400 },
+      );
+    }
+
+    const store = createStore();
+    const agent = await store.getAgentById(agentId);
+    if (!agent) {
+      return NextResponse.json(
+        { error: "Resolution agent not found.", code: "AGENT_NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    const authResult = await authorizeWalletRequest({
       claimedAddress: walletAddress,
       message: signedMessage,
       signature: walletSignature,
+      expected: {
+        action: "activate_resolution_agent",
+        agentId: agent.id,
+        escrowChainId: `eip155:${CANONICAL_ESCROW_CHAIN_ID}`,
+        escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        escrowPaymentId: agent.identity.escrowPaymentId,
+        bodyHash: EMPTY_BODY_HASH,
+        signerAddress: agent.policy.funderAddress,
+        fields: {
+          Goal: agent.goal,
+          "Approved Budget (atomic USDC)": agent.policy.approvedBudgetAtomic.toString(),
+          "Refund Address": agent.policy.funderAddress,
+          "Allowed Tools": agent.policy.allowedTools.join(","),
+          "Policy Version": "v1",
+          "Agent Expiry": String(agent.policy.expiresAt),
+          "Funder Address": agent.policy.funderAddress,
+        },
+      },
+      nonceStore: store,
     });
 
     if (!authResult.verified) {
       return NextResponse.json(
         {
-          error: `Wallet signature verification failed: ${authResult.error}`,
-          code: "SIGNATURE_INVALID",
+          error: `Wallet authorization failed: ${authResult.error}`,
+          code: authResult.code,
         },
-        { status: 401 },
-      );
-    }
-
-    // -----------------------------------------------------------------
-    // Step 2: Verify the signed message contains this agent ID
-    //         (prevents signing a message intended for a different agent)
-    // -----------------------------------------------------------------
-    if (!signedMessage.includes(agentId)) {
-      return NextResponse.json(
         {
-          error:
-            "Activation message must contain the agent ID to prove intent. " +
-            `Expected agent ID "${agentId}" in the signed message.`,
-          code: "MESSAGE_AGENT_ID_MISMATCH",
+          status:
+            authResult.code.startsWith("MESSAGE_") &&
+            authResult.code !== "MESSAGE_SIGNER_MISMATCH"
+              ? 400
+              : authResult.code === "MESSAGE_SIGNER_MISMATCH"
+                ? 403
+                : 401,
         },
-        { status: 400 },
       );
     }
 
@@ -101,7 +134,6 @@ export async function POST(
     //         the state transition)
     // -----------------------------------------------------------------
     const escrowReader = new CeloSepoliaEscrowCaseReader();
-    const store = createStore();
     const now = Date.now();
 
     const publicView = await activateResolutionAgent({

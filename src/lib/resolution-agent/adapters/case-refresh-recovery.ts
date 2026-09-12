@@ -15,7 +15,10 @@
 import type { ResolutionAgent } from "../types";
 import type { ActionExecutionResult, LeaseContext } from "../worker/types";
 import type { ToolExecutionRow } from "../store/types";
-import type { CaseRefreshDependencies } from "./types";
+import {
+  validatePersistedSettlementProof,
+  type CaseRefreshDependencies,
+} from "./types";
 import { normalizeCaseRefreshResult } from "./case-refresh-result";
 import { buildCaseRefreshInput } from "./case-refresh-input";
 import { transitionAgentStatus } from "../state-machine";
@@ -47,10 +50,11 @@ export async function recoverPaidCaseRefresh(params: {
   }
 
   // ---- Step 2: Verify payment proof exists --------------------------------
-  if (!execution.settlement_tx_hash && !execution.payment_reference) {
+  const proofError = validatePersistedSettlementProof(execution);
+  if (proofError) {
     return {
       kind: "failed_recoverable",
-      reason: "No payment proof — cannot recover without proof of payment",
+      reason: proofError,
     };
   }
 

@@ -95,6 +95,16 @@ const REVIEWER_ADDRESS = "0xabcdef0123456789abcdef0123456789abcdef01";
 const WRONG_ADDRESS = "0xdead00000000000000000000000000000000dead";
 const PAYMENT_ID = "pay_test_123";
 const DECISION_ID = "550e8400-e29b-41d4-a716-446655440000";
+const REVIEWER_BINDING = {
+  chainId: 11142220,
+  contractAddress: "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+  escrowPaymentId: "7",
+  client: "0x1111111111111111111111111111111111111111",
+  worker: "0x2222222222222222222222222222222222222222",
+  amount: "1000000",
+  token: "0x3333333333333333333333333333333333333333",
+  state: "Disputed",
+};
 
 function makeDraftRecord(overrides: Record<string, unknown> = {}) {
   return {
@@ -197,6 +207,19 @@ describe("createDraftDecision", () => {
     expect(result).not.toBeNull();
     expect(result!.decision_status).toBe("draft");
   });
+
+  it("rejects an x402 UUID when supplied as an escrow payment ID", async () => {
+    const result = await store.createDraftDecision({
+      payment_identifier: PAYMENT_ID,
+      reviewer_address: REVIEWER_ADDRESS,
+      decision: "release_to_worker",
+      rationale: "Valid rationale — sufficiently long.",
+      onchain_payment_id: "pay_550e8400-e29b-41d4-a716-446655440000",
+    });
+
+    expect(result).toBeNull();
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
 });
 
 describe("submitDecision", () => {
@@ -209,12 +232,26 @@ describe("submitDecision", () => {
     });
     mockBuilder.maybeSingle.mockResolvedValueOnce({ data: submittedRecord, error: null });
 
-    const result = await store.submitDecision(DECISION_ID, REVIEWER_ADDRESS);
+    const result = await store.submitDecision(DECISION_ID, REVIEWER_ADDRESS, REVIEWER_BINDING);
 
     expect(result).not.toBeNull();
     expect(result!.decision_status).toBe("ready_for_execution");
     expect(result!.submitted_at).not.toBeNull();
     expect(result!.finalized_at).not.toBeNull();
+    expect(mockBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+      onchain_payment_id: "7",
+      chain_id: 11142220,
+      contract_address: REVIEWER_BINDING.contractAddress,
+      onchain_snapshot: expect.objectContaining({
+        id: "7",
+        chainId: 11142220,
+        contractAddress: REVIEWER_BINDING.contractAddress,
+        client: REVIEWER_BINDING.client,
+        worker: REVIEWER_BINDING.worker,
+        amount: REVIEWER_BINDING.amount,
+        token: REVIEWER_BINDING.token,
+      }),
+    }));
   });
 
   it("returns null when decision is not in draft status", async () => {

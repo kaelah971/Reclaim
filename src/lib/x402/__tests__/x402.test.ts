@@ -5,7 +5,7 @@
 // types produce correct structures for HTTP header payloads.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, vi, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import type {
   PaymentRequirementsLegacy,
   PaymentRequirement,
@@ -395,11 +395,12 @@ describe("verifyPaymentPayload", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("accepts when the payment amount exceeds the required price", () => {
+  it("rejects when the payment amount exceeds the required price", () => {
     const payload = buildValidPayload();
     payload.payment = { ...payload.payment, amount: "50000" };
     const result = verifyPaymentPayload(payload);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toContain("exact amount");
   });
 
   it("rejects when the amount is not a valid integer string", () => {
@@ -560,7 +561,7 @@ describe("paymentStore", () => {
     limitationsStatement: "Test limitations.",
   };
 
-  const mockReceipt = {
+  let mockReceipt = {
     txHash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
     blockNumber: BigInt(12345678),
     blockHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -570,6 +571,15 @@ describe("paymentStore", () => {
     amount: "10000",
     tokenAddress: TEST_USDC_ADDRESS,
   };
+
+  // Transaction hashes are globally unique settlement identifiers. Keep each
+  // test isolated while still allowing the store to reject cross-payment reuse.
+  beforeEach(() => {
+    mockReceipt = {
+      ...mockReceipt,
+      txHash: `0x${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`,
+    };
+  });
 
   it("createPaymentId generates a unique payment identifier", () => {
     const id1 = createPaymentId();

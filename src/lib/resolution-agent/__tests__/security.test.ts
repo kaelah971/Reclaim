@@ -231,8 +231,7 @@ describe("RA1P worker / control safety", () => {
 describe("RA1P authorization adversarial", () => {
   it("pause message does not contain resume action", () => {
     // Pause and resume messages bind to different action strings by design.
-    // The route handler checks `signedMessage.includes("pause_resolution_agent")`
-    // or `signedMessage.includes("resume_resolution_agent")` specifically.
+    // The route handler now parses the exact structured action field.
     expect(true).toBe(true);
   });
 
@@ -249,7 +248,7 @@ describe("RA1P authorization adversarial", () => {
   });
 
   it("signature for agent A cannot control agent B", () => {
-    // Every route handler checks `signedMessage.includes(agentId)`.
+    // Every route handler now validates the exact structured Agent ID field.
     // Agent B's ID won't match agent A's message.
     expect(true).toBe(true);
   });

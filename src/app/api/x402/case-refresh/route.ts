@@ -21,10 +21,8 @@ import { NextResponse } from "next/server";
 import {
   canProcessPayments,
   validatePayToAddress,
-  getEvidenceCheckPriceAtomic,
   generatePaymentId,
-  X402_FACILITATOR_USDC_MAINNET,
-  X402_USDC_ADDRESS,
+  getX402ServicePaymentTerms,
 } from "@/lib/x402/config";
 import {
   parseCaseRefreshRequest,
@@ -35,13 +33,19 @@ import {
   PaymentPayloadCustom,
 } from "@/lib/x402/types";
 import {
-  buildEvidenceCheckHeader,
+  buildCaseRefreshHeader,
   verifyPaymentPayload,
+  getPaymentPayloadPayer,
   encodePaymentResponseHeader,
 } from "@/lib/x402/shared";
 import {
   getPaymentStore,
 } from "@/lib/x402/paymentStore.supabase";
+import {
+  assertNumericEscrowPaymentId,
+  assertSettlementReceiptPersistable,
+  PaymentStoreConflictError,
+} from "@/lib/x402/paymentStore";
 import {
   getSettlementProvider,
   type FacilitatorSettlementReceipt,
@@ -169,6 +173,7 @@ async function handlePaymentRequest(
   // ---- Step 0b: Settlement provider ----
   const settlementProvider = getSettlementProvider();
   const isTrack2Mode = settlementProvider.isTrack2Qualifying;
+  const paymentTerms = getX402ServicePaymentTerms("case-refresh");
 
   // ---- Step 1: Check for PAYMENT-SIGNATURE header ----
   const paymentSignatureHeader = request.headers.get("payment-signature");
@@ -188,11 +193,12 @@ async function handlePaymentRequest(
       isTrack2Mode,
       correlationId,
       store,
+      paymentTerms,
     );
     if (preflightResult) return preflightResult;
 
     // ---- No payment, no existing result → return 402 ----
-    const paymentRequiredValue = buildEvidenceCheckHeader();
+    const paymentRequiredValue = buildCaseRefreshHeader();
     return new NextResponse(
       JSON.stringify({
         correlationId,
@@ -217,38 +223,94 @@ async function handlePaymentRequest(
 
   const paymentPayload = decoded.payload;
 
-  // ---- Step 3: Structural validation ----
-  if (!isTrack2Mode) {
-    const verification = verifyPaymentPayload(paymentPayload);
-    if (!verification.valid) {
-      return jsonSafe(
-        {
-          correlationId,
-          status: 402,
-          error: `Payment verification failed: ${verification.reason}`,
-        },
-        { status: 402 },
-      );
-    }
-  } else {
-    if (paymentPayload.scheme !== "exact") {
-      return jsonSafe(
-        { correlationId, status: 402, error: "Unsupported payment scheme for facilitator mode." },
-        { status: 402 },
-      );
-    }
-    if (paymentPayload.network !== settlementProvider.network) {
-      return jsonSafe(
-        { correlationId, status: 402, error: `Network ${paymentPayload.network} not supported.` },
-        { status: 402 },
-      );
-    }
+  // ---- Step 3: Structural validation against server-owned exact terms ----
+  const structuralVerification = verifyPaymentPayload(paymentPayload, paymentTerms);
+  if (!structuralVerification.valid) {
+    return jsonSafe(
+      {
+        correlationId,
+        status: 402,
+        error: `Payment verification failed: ${structuralVerification.reason}`,
+      },
+      { status: 402 },
+    );
   }
 
   // ---- Step 4: Idempotency via X-Payment-Id ----
   const paymentIdHeader = request.headers.get("x-payment-id");
   const paymentId = paymentIdHeader || generatePaymentId();
 
+  // ---- Resolve payment data ----
+  const isFacilitator = settlementProvider.identifier === "celo-facilitator";
+  const x402PaymentData = paymentPayload.payment as unknown as Record<string, unknown>;
+  const isEIP3009 =
+    x402PaymentData != null &&
+    typeof x402PaymentData === "object" &&
+    "authorization" in x402PaymentData;
+  const eipAuth = isEIP3009
+    ? (x402PaymentData.authorization as Record<string, unknown>)
+    : null;
+  const resolvedToken = paymentTerms.tokenAddress;
+  const resolvedAmount = paymentTerms.amountAtomic;
+
+  // ---- Parse request body ----
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    return errorResponse(400, "Malformed JSON body.", correlationId);
+  }
+
+  const bodyParseResult = parseCaseRefreshRequest(body);
+  if (!bodyParseResult.success) {
+    return errorResponse(400, "Request body validation failed.", correlationId, bodyParseResult.errors);
+  }
+
+  const caseRefreshRequest = bodyParseResult.data;
+
+  try {
+    assertNumericEscrowPaymentId("case-refresh", caseRefreshRequest.escrowPaymentId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid escrow payment ID.";
+    return errorResponse(400, message, correlationId, {
+      escrowPaymentId: ["Must be a numeric escrow payment ID; x402 payment IDs are not escrow IDs."],
+    });
+  }
+
+  // ---- Compute input hash ----
+  const inputHash = computeCaseRefreshInputHash(caseRefreshRequest);
+
+  // ---- Resolve payer address ----
+  const receiptPayer = getPaymentPayloadPayer(paymentPayload) || "";
+
+  // ---- Compute canonical request hash ----
+  const canonicalIdentity = {
+    service: "case-refresh" as const,
+    escrowPaymentId: caseRefreshRequest.escrowPaymentId,
+    payer: receiptPayer,
+    paymentNetwork: settlementProvider.network,
+    asset: resolvedToken,
+    payTo: settlementProvider.payToAddress,
+    amount: resolvedAmount,
+    scheme: "exact",
+    caseRefreshInputHash: inputHash,
+  };
+
+  const identityValidation = caseRefreshIdentitySchema.safeParse(canonicalIdentity);
+  if (!identityValidation.success) {
+    return errorResponse(
+      422,
+      `Invalid request: ${identityValidation.error.message}`,
+      correlationId,
+    );
+  }
+
+  const computedRequestHash = computeCaseRefreshHash(identityValidation.data);
+
+  const storedRequestHash = await store.getRequestHash(paymentId);
+  if (storedRequestHash && storedRequestHash !== computedRequestHash) {
+    return errorResponse(409, "Payment ID is already bound to a different request.", correlationId);
+  }
   const cachedResult = await store.getResult(paymentId);
   if (cachedResult) {
     const response: Record<string, unknown> = {
@@ -256,11 +318,9 @@ async function handlePaymentRequest(
       settlement: cachedResult.receipt,
       settlementMode: settlementProvider.identifier,
       isTrack2Qualifying: isTrack2Mode,
+      result: cachedResult.brief ?? null,
     };
-    if (cachedResult.brief) {
-      response.result = cachedResult.brief;
-    } else {
-      response.result = null;
+    if (!cachedResult.brief) {
       response.recoveryNote =
         "Settlement confirmed but result was deferred. Retry to regenerate.";
     }
@@ -278,7 +338,6 @@ async function handlePaymentRequest(
     });
   }
 
-  // Check previous failure
   const previousError = await store.getError(paymentId);
   if (previousError) {
     return errorResponse(
@@ -288,121 +347,67 @@ async function handlePaymentRequest(
     );
   }
 
-  await store.recordPending(paymentId);
-
-  // ---- Resolve payment data ----
-  const isFacilitator = settlementProvider.identifier === "celo-facilitator";
-  const x402PaymentData = paymentPayload.payment as unknown as Record<string, unknown>;
-  const isEIP3009 =
-    x402PaymentData != null &&
-    typeof x402PaymentData === "object" &&
-    "authorization" in x402PaymentData;
-  const eipAuth = isEIP3009
-    ? (x402PaymentData.authorization as Record<string, unknown>)
-    : null;
-  const resolvedToken = isEIP3009
-    ? X402_FACILITATOR_USDC_MAINNET
-    : (x402PaymentData.token as string);
-  const resolvedAmount = isEIP3009
-    ? String(eipAuth?.value ?? getEvidenceCheckPriceAtomic().toString())
-    : (x402PaymentData.amount as string);
-
-  // ---- Parse request body ----
-  let body: unknown;
+  let pendingCreation;
   try {
-    body = await request.clone().json();
-  } catch {
-    await store.recordFailed(paymentId, "Malformed JSON body.");
-    return errorResponse(400, "Malformed JSON body.", correlationId);
-  }
-
-  const bodyParseResult = parseCaseRefreshRequest(body);
-  if (!bodyParseResult.success) {
-    await store.recordFailed(paymentId, "Request body validation failed.");
-    return errorResponse(400, "Request body validation failed.", correlationId, bodyParseResult.errors);
-  }
-
-  const caseRefreshRequest = bodyParseResult.data;
-
-  // ---- Compute input hash ----
-  const inputHash = computeCaseRefreshInputHash(caseRefreshRequest);
-
-  // ---- Resolve payer address ----
-  const receiptPayer = isEIP3009
-    ? (eipAuth?.from as string)
-    : (x402PaymentData.from as string);
-
-  // ---- Compute canonical request hash ----
-  const canonicalIdentity = {
-    service: "case-refresh" as const,
-    escrowPaymentId: caseRefreshRequest.escrowPaymentId,
-    payer: receiptPayer,
-    paymentNetwork: settlementProvider.network,
-    asset: resolvedToken,
-    payTo: settlementProvider.payToAddress,
-    amount: resolvedAmount,
-    scheme: "exact",
-    caseRefreshInputHash: inputHash,
-  };
-
-  const identityValidation = caseRefreshIdentitySchema.safeParse(canonicalIdentity);
-  if (!identityValidation.success) {
-    await store.recordFailed(
-      paymentId,
-      `Request identity validation: ${identityValidation.error.message}`,
-    );
-    return errorResponse(
-      422,
-      `Invalid request: ${identityValidation.error.message}`,
-      correlationId,
-    );
-  }
-
-  const computedRequestHash = computeCaseRefreshHash(identityValidation.data);
-  await store.setRequestHash(paymentId, computedRequestHash);
-
-  // ---- Duplicate-settlement gate ----
-  const existingByHash = await store.findByRequestHash(computedRequestHash);
-  if (existingByHash) {
-    if (
-      existingByHash.status === "settled" ||
-      existingByHash.status === "paid_pending_brief"
-    ) {
-      return jsonSafe(
-        normalizeForJson({
-          correlationId,
-          paymentId: existingByHash.paymentId,
-          status: existingByHash.status,
-          recoveredFromHash: true,
-          settlement: existingByHash.receipt,
-          result: existingByHash.brief ?? null,
-          settlementMode: settlementProvider.identifier,
-          isTrack2Qualifying: isTrack2Mode,
-        }),
-        {
-          status: 200,
-          headers: {
-            "PAYMENT-RESPONSE": encodePaymentResponseHeader({
-              success: true,
-              transaction: existingByHash.receipt?.txHash ?? "",
-              network: settlementProvider.network as `${string}:${string}`,
-              payer: existingByHash.receipt?.from ?? "",
-            }),
-            "X-Payment-Id": existingByHash.paymentId,
-          },
-        },
-      );
+    pendingCreation = await store.recordPending(paymentId, {
+      service: "case-refresh",
+      payerAddress: receiptPayer,
+      payToAddress: paymentTerms.payToAddress,
+      network: paymentTerms.network,
+      chainId: paymentTerms.chainId,
+      tokenAddress: paymentTerms.tokenAddress,
+      tokenSymbol: "USDC",
+      tokenDecimals: paymentTerms.tokenDecimals,
+      amountAtomic: paymentTerms.amountAtomic,
+      amountDisplay: paymentTerms.amountDisplay,
+      escrowPaymentId: caseRefreshRequest.escrowPaymentId,
+      requestHash: computedRequestHash,
+      authorizationNonce: String((isEIP3009 ? eipAuth?.nonce : x402PaymentData.nonce) ?? ""),
+      authorizationDeadline: String((isEIP3009 ? eipAuth?.validBefore : x402PaymentData.deadline) ?? ""),
+    });
+  } catch (err) {
+    if (!(err instanceof PaymentStoreConflictError)) throw err;
+    const existing = await store.findByRequestHash(computedRequestHash);
+    if (existing?.receipt) {
+      return jsonSafe({
+        correlationId,
+        paymentId: existing.paymentId,
+        status: existing.status,
+        recoveredFromHash: true,
+        settlement: existing.receipt,
+        result: existing.brief ?? null,
+      }, { status: 200, headers: { "X-Payment-Id": existing.paymentId } });
     }
+    return errorResponse(409, existing
+      ? "An identical x402 request is already being settled."
+      : err.message, correlationId);
+  }
+
+  if (!pendingCreation.created && pendingCreation.paymentId !== paymentId) {
+    if (pendingCreation.record.receipt) {
+      return jsonSafe({
+        correlationId,
+        paymentId: pendingCreation.paymentId,
+        status: pendingCreation.record.status,
+        recoveredFromHash: true,
+        settlement: pendingCreation.record.receipt,
+        result: pendingCreation.record.brief ?? null,
+      }, { status: 200, headers: { "X-Payment-Id": pendingCreation.paymentId } });
+    }
+    return errorResponse(409, "An identical x402 request is already being settled.", correlationId);
+  }
+  if (pendingCreation.record.state === "settlement_submitted") {
+    return errorResponse(409, "This x402 payment is already being settled. Retry after settlement confirmation.", correlationId);
   }
 
   // ---- Step 5: Cryptographic verification ----
   try {
     const verificationRequirements: PaymentRequirements = {
       scheme: "exact",
-      network: settlementProvider.network as `${string}:${string}`,
-      asset: resolvedToken,
-      amount: resolvedAmount,
-      payTo: settlementProvider.payToAddress,
+      network: paymentTerms.network as `${string}:${string}`,
+      asset: paymentTerms.tokenAddress,
+      amount: paymentTerms.amountAtomic,
+      payTo: paymentTerms.payToAddress,
       maxTimeoutSeconds: 300,
       extra: isFacilitator ? { name: "USDC", version: "2" } : {},
     };
@@ -416,6 +421,7 @@ async function handlePaymentRequest(
     const verifyResult = await settlementProvider.verifyPayment(
       x402Payload,
       verificationRequirements,
+      paymentTerms,
     );
 
     if (!verifyResult.valid) {
@@ -426,10 +432,32 @@ async function handlePaymentRequest(
         { status: 402 },
       );
     }
+    if (verifyResult.payer && (
+      !/^0x[0-9a-fA-F]{40}$/.test(verifyResult.payer) ||
+      verifyResult.payer.toLowerCase() !== receiptPayer.toLowerCase()
+    )) {
+      throw new Error("Payment verifier returned a payer different from the signed payment payload.");
+    }
+    await store.recordAuthorizationVerified(paymentId);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     await store.recordFailed(paymentId, `Verification error: ${message}`);
     return errorResponse(502, `Payment verification service unavailable: ${message}`, correlationId);
+  }
+
+  const settlementClaim = await store.claimSettlement(paymentId, computedRequestHash);
+  if (!settlementClaim.claimed) {
+    if (settlementClaim.receipt) {
+      return jsonSafe({
+        correlationId,
+        paymentId,
+        status: settlementClaim.brief ? "settled" : "paid_pending_brief",
+        settlement: settlementClaim.receipt,
+        result: settlementClaim.brief ?? null,
+        recovered: true,
+      });
+    }
+    return errorResponse(409, "This x402 payment is already being settled. Retry after settlement confirmation.", correlationId);
   }
 
   // ---- Step 6: On-chain settlement ----
@@ -437,12 +465,16 @@ async function handlePaymentRequest(
   let facilitatorReceipt: FacilitatorSettlementReceipt | undefined;
 
   try {
+    const beforeSettlementValidation = verifyPaymentPayload(paymentPayload, paymentTerms);
+    if (!beforeSettlementValidation.valid) {
+      throw new Error(`Payment changed before settlement: ${beforeSettlementValidation.reason}`);
+    }
     const settlementRequirements: PaymentRequirements = {
       scheme: "exact",
-      network: settlementProvider.network as `${string}:${string}`,
-      asset: resolvedToken,
-      amount: resolvedAmount,
-      payTo: settlementProvider.payToAddress,
+      network: paymentTerms.network as `${string}:${string}`,
+      asset: paymentTerms.tokenAddress,
+      amount: paymentTerms.amountAtomic,
+      payTo: paymentTerms.payToAddress,
       maxTimeoutSeconds: 300,
       extra: isFacilitator ? { name: "USDC", version: "2" } : {},
     };
@@ -456,6 +488,7 @@ async function handlePaymentRequest(
     const settleResult = await settlementProvider.settlePayment(
       x402SettlePayload,
       settlementRequirements,
+      paymentTerms,
     );
 
     if (!settleResult.success) {
@@ -463,13 +496,25 @@ async function handlePaymentRequest(
       throw new Error(reason);
     }
 
+    if (!/^0x[0-9a-fA-F]{64}$/.test(settleResult.txHash || "")) {
+      throw new Error("Settlement provider returned an incomplete transaction receipt.");
+    }
+    if (settleResult.receipt && (
+      !settleResult.receipt.settlementSuccess ||
+      settleResult.receipt.network !== paymentTerms.network ||
+      settleResult.receipt.token.toLowerCase() !== paymentTerms.tokenAddress.toLowerCase() ||
+      settleResult.receipt.payTo.toLowerCase() !== paymentTerms.payToAddress.toLowerCase() ||
+      settleResult.receipt.amount !== paymentTerms.amountAtomic ||
+      (settleResult.receipt.payer && settleResult.receipt.payer.toLowerCase() !== receiptPayer.toLowerCase())
+    )) {
+      throw new Error("Settlement provider receipt does not match the server-configured USDC terms.");
+    }
+
     if (settleResult.receipt) {
       facilitatorReceipt = settleResult.receipt;
     }
 
-    const receiptFrom = isEIP3009
-      ? (eipAuth?.from as string)
-      : (x402PaymentData.from as string);
+    const receiptFrom = getPaymentPayloadPayer(paymentPayload) || "";
 
     settlementReceipt = {
       txHash: settleResult.txHash || "",
@@ -477,28 +522,32 @@ async function handlePaymentRequest(
       blockHash: "",
       status: "success" as const,
       from: receiptFrom,
-      to: settlementProvider.payToAddress,
-      amount: resolvedAmount,
-      tokenAddress: resolvedToken,
+      to: paymentTerms.payToAddress,
+      amount: paymentTerms.amountAtomic,
+      tokenAddress: paymentTerms.tokenAddress,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    await store.recordFailed(paymentId, `Settlement failed: ${message}`);
+    await store.recordSettlementFailed(paymentId, `Settlement failed: ${message}`);
     return errorResponse(502, `Payment settlement failed: ${message}`, correlationId);
   }
 
-  // ---- Persist settlement receipt ----
+  // ---- Validate before persistence ----
+  try {
+    assertSettlementReceiptPersistable(settlementReceipt);
+    if (
+      settlementReceipt.to.toLowerCase() !== paymentTerms.payToAddress.toLowerCase() ||
+      settlementReceipt.tokenAddress.toLowerCase() !== paymentTerms.tokenAddress.toLowerCase() ||
+      settlementReceipt.amount !== paymentTerms.amountAtomic
+    ) {
+      throw new Error("Settlement receipt does not match the server-configured USDC terms.");
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid settlement receipt";
+    await store.recordSettlementFailed(paymentId, `Settlement receipt rejected: ${message}`);
+    return errorResponse(502, `Settlement receipt rejected: ${message}`, correlationId);
+  }
   await store.recordSettlementReceipt(paymentId, settlementReceipt);
-
-  if (settlementReceipt.status !== "success") {
-    await store.recordFailed(paymentId, "Settlement receipt status is not success.");
-    return errorResponse(502, "Settlement transaction did not succeed on-chain.", correlationId);
-  }
-
-  if (!settlementReceipt.txHash) {
-    await store.recordFailed(paymentId, "Settlement receipt missing transaction hash.");
-    return errorResponse(502, "Settlement receipt is incomplete.", correlationId);
-  }
 
   // ---- Generate case refresh ----
   let refreshResult;
@@ -601,6 +650,7 @@ async function checkPreflightDuplicate(
   isTrack2Mode: boolean,
   correlationId: string,
   store: ReturnType<typeof getPaymentStore>,
+  paymentTerms: ReturnType<typeof getX402ServicePaymentTerms>,
 ): Promise<Response | null> {
   if (!body || typeof body !== "object") return null;
 
@@ -609,6 +659,13 @@ async function checkPreflightDuplicate(
   if (!bodyParseResult.success) return null;
 
   const caseRefreshRequest = bodyParseResult.data;
+  try {
+    assertNumericEscrowPaymentId("case-refresh", caseRefreshRequest.escrowPaymentId);
+  } catch {
+    return errorResponse(400, "Invalid escrow payment ID.", correlationId, {
+      escrowPaymentId: ["Must be a numeric escrow payment ID; x402 payment IDs are not escrow IDs."],
+    });
+  }
   const inputHash = computeCaseRefreshInputHash(caseRefreshRequest);
 
   const precheckPayer =
@@ -622,11 +679,9 @@ async function checkPreflightDuplicate(
     escrowPaymentId: caseRefreshRequest.escrowPaymentId,
     payer: precheckPayer,
     paymentNetwork: settlementProvider.network,
-    asset: isTrack2Mode
-      ? X402_FACILITATOR_USDC_MAINNET
-      : X402_USDC_ADDRESS,
+    asset: paymentTerms.tokenAddress,
     payTo: settlementProvider.payToAddress,
-    amount: getEvidenceCheckPriceAtomic().toString(),
+    amount: paymentTerms.amountAtomic,
     scheme: "exact",
     caseRefreshInputHash: inputHash,
   };

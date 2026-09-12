@@ -63,6 +63,9 @@ export interface PaymentRequirement {
 
   /** Decimals of the payment token (USDC = 6). */
   assetDecimals: number;
+
+  /** Exact amount in atomic token units. */
+  amount: string;
 }
 
 /**

@@ -266,6 +266,20 @@ function makeMockDependencies(overrides: Partial<EvidenceQualityCheckDependencie
   const mockSettle = vi.fn<(...args: unknown[]) => Promise<X402SettlementResult>>().mockResolvedValue({
     success: true,
     txHash: "0xs-tx-hash",
+    receipt: {
+      facilitatorUrl: "https://api.x402.celo.org",
+      x402Version: 2,
+      scheme: "exact",
+      network: "eip155:42220",
+      payer: "0x0000000000000000000000000000000000000001",
+      payTo: "0x0000000000000000000000000000000000000002",
+      token: "0x0000000000000000000000000000000000000003",
+      amount: "10000",
+      paymentIdentifier: "pay_test",
+      settlementTxHash: "0xs-tx-hash",
+      settlementSuccess: true,
+      settledAt: new Date().toISOString(),
+    },
     ambiguous: false,
   } satisfies X402SettlementResult);
   const mockGenerate = vi.fn<(...args: unknown[]) => Promise<EvidenceQualityGenerationResult>>().mockResolvedValue(makeGenResult());
@@ -548,7 +562,11 @@ describe("executeEvidenceQualityCheck — execution creation", () => {
     });
 
     // Mock existing execution for the duplicate
-    const existingRow = makeToolExecutionRow({ state: "settled", result_data: {} });
+    const existingRow = makeToolExecutionRow({
+      state: "settled",
+      result_data: {},
+      settlement_tx_hash: "0xexisting-tx",
+    });
     deps.rawMocks.getToolExecutionByRequestHash.mockResolvedValue(existingRow);
     // Reset mock call count
     deps.rawMocks.settle.mockClear();
@@ -644,7 +662,11 @@ describe("executeEvidenceQualityCheck — wallet security", () => {
     const lease = makeLeaseContext();
 
     // Mock existing settled execution
-    const existingRow = makeToolExecutionRow({ state: "settled", result_data: {} });
+    const existingRow = makeToolExecutionRow({
+      state: "settled",
+      result_data: {},
+      settlement_tx_hash: "0xexisting-tx",
+    });
     deps.rawMocks.getToolExecutionByRequestHash.mockResolvedValue(existingRow);
     deps.rawMocks.decrypt.mockClear();
 
@@ -906,7 +928,11 @@ describe("executeEvidenceQualityCheck — concurrency", () => {
     });
 
     // Second worker: sees existing settled execution
-    const existingRow = makeToolExecutionRow({ state: "settled", result_data: {} });
+    const existingRow = makeToolExecutionRow({
+      state: "settled",
+      result_data: {},
+      settlement_tx_hash: "0xexisting-tx",
+    });
     deps.rawMocks.getToolExecutionByRequestHash.mockResolvedValue(existingRow);
     deps.rawMocks.settle.mockClear();
 
@@ -978,6 +1004,39 @@ describe("executeEvidenceQualityCheck — edge cases", () => {
     expect((result as any).reason).toContain("recovery needed");
   });
 
+  it("rejects an RPC state that disagrees with the reloaded execution row", async () => {
+    const agent = makeAgent();
+    const plan = makePlan();
+    const action = makeToolAction();
+    const lease = makeLeaseContext();
+    deps.rawMocks.reserveToolExecutionAtomically.mockResolvedValue({
+      kind: "existing",
+      agentId: agent.id,
+      requestHash: "0xhash",
+      state: "settled",
+    });
+    deps.rawMocks.getToolExecutionByRequestHash
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(
+        makeToolExecutionRow({
+          state: "paid_pending_result",
+          settlement_tx_hash: "0xtx",
+        }),
+      );
+
+    const result = await executeEvidenceQualityCheck({
+      agent,
+      plan,
+      action,
+      leaseContext: lease,
+      now: Date.now(),
+      dependencies: deps.dependencies,
+    });
+
+    expect(result.kind).toBe("failed_recoverable");
+    expect((result as any).reason).toContain("reloaded safely");
+  });
+
   it("existing cancelled execution returned as skipped", async () => {
     const agent = makeAgent();
     const plan = makePlan();
@@ -995,7 +1054,7 @@ describe("executeEvidenceQualityCheck — edge cases", () => {
     expect((result as any).reason).toContain("cancelled");
   });
 
-  it("settlement success without txHash still succeeds", async () => {
+  it("settlement success without txHash is not treated as paid", async () => {
     const agent = makeAgent();
     const plan = makePlan();
     const action = makeToolAction();
@@ -1011,7 +1070,7 @@ describe("executeEvidenceQualityCheck — edge cases", () => {
       agent, plan, action, leaseContext: lease, now: Date.now(), dependencies: deps.dependencies,
     });
 
-    expect(result.kind).toBe("executed");
+    expect(result.kind).toBe("failed_recoverable");
     // persistPaymentProof should NOT be called (no txHash)
     expect(deps.paymentStore.persistPaymentProof).not.toHaveBeenCalled();
   });

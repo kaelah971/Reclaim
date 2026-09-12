@@ -167,6 +167,9 @@ describe("GET /api/payments/[paymentId]/receipt", () => {
         price_atomic: 10000,
         case_version_hash: "0x72ecc6a1d46a2dbb3f20c585e7805f3e7719cbfe4d454444210114446f636695",
         evidence_version_hash: "0xa55191010c0589a9f1dba4a26f0d168df1b8b1d9e402d7877b3b7a281beddf13",
+        payment_reference: X402_TX,
+        settlement_tx_hash: X402_TX,
+        result_reference: "0xadca01fdcc736941cdfb99b4b781ae51af21bae7d2fadc8f2ff334492e232ac3",
       },
     ]);
     evidenceReaderMock.getEvidenceMetadata.mockResolvedValue(FACTS);
@@ -252,6 +255,31 @@ describe("GET /api/payments/[paymentId]/receipt", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.found).toBe(false);
+  });
+
+  it("uses durable execution settlement proof instead of packet-provided tx metadata", async () => {
+    const { limit } = makeQueryChain().order() as { limit: ReturnType<typeof vi.fn> };
+    limit.mockResolvedValueOnce({
+      data: [{
+        id: "evt-1",
+        created_at: "2026-08-09T09:25:44Z",
+        metadata: {
+          ...PACKET,
+          qualityCheck: {
+            ...PACKET.qualityCheck,
+            settlementTxHash: "0xpacket-only-value",
+          },
+        },
+      }],
+      error: null,
+    });
+
+    const req = new NextRequest("http://localhost/api/payments/1/receipt");
+    const res = await GET(req, { params: Promise.resolve({ paymentId: "1" }) });
+    const body = await res.json();
+
+    expect(body.receipt.qualityCheck.settlementTxHash).toBe(X402_TX);
+    expect(body.receipt.qualityCheck.paymentReference).toBe(X402_TX);
   });
 
   it("works without an agent/packet — null fields, no fabrication", async () => {

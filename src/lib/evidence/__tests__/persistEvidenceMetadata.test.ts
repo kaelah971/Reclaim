@@ -274,4 +274,35 @@ describe("persistVerifiedEvidenceMetadata", () => {
     expect(result.status).toBe("chain_read_failed");
     expect(fake.insertRows).toHaveLength(0);
   });
+
+  it("rejects a new evidence version after reviewer review has begun", async () => {
+    const manifest = buildEvidenceManifest(FORM);
+    const computed = keccak256(stringToHex(manifest)).toLowerCase();
+    const makeQuery = (data: unknown) => {
+      const query = {
+        select: () => query,
+        eq: () => query,
+        maybeSingle: async () => ({ data, error: null }),
+      };
+      return query;
+    };
+    const store = {
+      from: (table: string) =>
+        table === "evidence_review_locks"
+          ? makeQuery({ locked_at: "2026-08-09T09:00:00.000Z" })
+          : makeQuery(null),
+    } as unknown as SupabaseClient;
+
+    const result = await persistVerifiedEvidenceMetadata({
+      chainReader: makeChainReader(computed),
+      store,
+      escrowAddress: ESCROW,
+      escrowChainId: CHAIN_ID,
+      paymentId: "1",
+      data: FORM,
+    });
+
+    expect(result.status).toBe("review_locked");
+    expect(result.rowId).toBeNull();
+  });
 });

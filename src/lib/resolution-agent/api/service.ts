@@ -46,7 +46,8 @@ import {
   CANONICAL_ESCROW_CHAIN_ID,
   CANONICAL_ESCROW_CONTRACT_ADDRESS,
 } from "./escrow-reader";
-import { buildActivationMessage } from "./auth";
+import { assertActivationAuthorization, EMPTY_BODY_HASH } from "./auth";
+import type { AuthorizationAction } from "./auth";
 import { runResolutionAgentWorkerIteration } from "../worker/service";
 import type { ResolutionAgentWorkerResult } from "../worker/types";
 import type { CaseObservationReader } from "../observation/types";
@@ -84,6 +85,16 @@ export interface ResolutionAgentStore {
   ): Promise<void>;
   /** Read the current optimistic-concurrency version for an agent. */
   getAgentVersion(agentId: string): Promise<number>;
+  /** Durable P2C nonce consumption. Missing implementations fail closed. */
+  consumeAuthorizationNonce?(input: {
+    nonceHash: string;
+    nonce: string;
+    action: AuthorizationAction;
+    signerAddress: string;
+    agentId: string;
+    issuedAt: number;
+    expiresAt: number;
+  }): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +149,17 @@ class SupabaseStoreAdapter implements ResolutionAgentStore {
     }
 
     return (data as { version: number }).version;
+  }
+  consumeAuthorizationNonce(input: {
+    nonceHash: string;
+    nonce: string;
+    action: AuthorizationAction;
+    signerAddress: string;
+    agentId: string;
+    issuedAt: number;
+    expiresAt: number;
+  }): Promise<boolean> {
+    return this.inner.consumeAuthorizationNonce(input);
   }
   listToolExecutions(agentId: string): Promise<ToolExecutionRow[]> {
     return this.inner.listToolExecutions(agentId);
@@ -281,6 +303,15 @@ export async function isAuthorizedForAgent(
   caller: string,
   escrowReader: EscrowCaseAuthorizationReader,
 ): Promise<boolean> {
+  const storedChain = agent.identity.escrowChainId.replace(/^eip155:/, "");
+  if (
+    storedChain !== String(CANONICAL_ESCROW_CHAIN_ID) ||
+    agent.identity.escrowContractAddress.toLowerCase() !==
+      CANONICAL_ESCROW_CONTRACT_ADDRESS.toLowerCase()
+  ) {
+    return false;
+  }
+
   // Stored funder always has access
   if (
     agent.policy.funderAddress.toLowerCase() === caller.toLowerCase()
@@ -319,68 +350,34 @@ function verifyActivationMessageMatchesAgent(
   signedMessage: string,
   agent: ResolutionAgent,
 ): void {
-  // Build the canonical message from the agent's current stored state
-  const canonicalMessage = buildActivationMessage({
+  assertActivationAuthorization(signedMessage, {
+    action: "activate_resolution_agent",
     agentId: agent.id,
-    funderAddress: agent.policy.funderAddress,
     escrowChainId: agent.identity.escrowChainId,
-    escrowContractAddress: agent.identity.escrowContractAddress,
+    escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
     escrowPaymentId: agent.identity.escrowPaymentId,
-    goal: agent.goal,
-    approvedBudgetAtomic: agent.policy.approvedBudgetAtomic,
-    refundAddress: agent.policy.funderAddress,
-    policyVersion: "v1",
-    allowedToolIds: [...agent.policy.allowedTools],
-    agentExpiresAt: agent.policy.expiresAt,
-    authorizationExpiresAt: Date.now() + 5 * 60 * 1000, // placeholder, ignored in comparison
+    bodyHash: EMPTY_BODY_HASH,
+    signerAddress: agent.policy.funderAddress,
+    fields: {
+      Goal: agent.goal,
+      "Approved Budget (atomic USDC)": agent.policy.approvedBudgetAtomic.toString(),
+      "Refund Address": agent.policy.funderAddress,
+      "Allowed Tools": agent.policy.allowedTools.join(","),
+      "Policy Version": "v1",
+      "Agent Expiry": String(agent.policy.expiresAt),
+      "Funder Address": agent.policy.funderAddress,
+    },
   });
+}
 
-  const canonicalLines = canonicalMessage.split("\n");
-  const signedLines = signedMessage.split("\n");
-
-  // Line count must match — ensures no fields were added/removed
-  if (canonicalLines.length !== signedLines.length) {
-    throw new Error(
-      "Activation authorization does not match the agent's canonical permissions.",
-    );
-  }
-
-  // Compare line-by-line, skipping variable fields
-  for (let i = 0; i < canonicalLines.length; i++) {
-    const cLine = canonicalLines[i];
-    const sLine = signedLines[i];
-
-    // Skip variable fields — these differ between client and server
-    if (
-      cLine.startsWith("Timestamp:") ||
-      cLine.startsWith("Nonce:") ||
-      cLine.startsWith("Authorization Expires:")
-    ) {
-      continue;
-    }
-
-    if (cLine !== sLine) {
-      throw new Error(
-        "Activation authorization does not match the agent's canonical permissions.",
-      );
-    }
-  }
-
-  // Validate the authorization expiry timestamp from the signed message
-  const authExpiryLine = signedLines.find((l) =>
-    l.startsWith("Authorization Expires:"),
-  );
-  if (authExpiryLine) {
-    const expiryStr = authExpiryLine.replace("Authorization Expires:", "").trim();
-    const expiry = parseInt(expiryStr, 10);
-    if (isNaN(expiry)) {
-      throw new Error(
-        "Invalid authorization expiry in activation message.",
-      );
-    }
-    if (Date.now() > expiry) {
-      throw new Error("Activation authorization has expired.");
-    }
+function assertCanonicalAgentIdentity(agent: ResolutionAgent): void {
+  const storedChain = agent.identity.escrowChainId.replace(/^eip155:/, "");
+  if (
+    storedChain !== String(CANONICAL_ESCROW_CHAIN_ID) ||
+    agent.identity.escrowContractAddress.toLowerCase() !==
+      CANONICAL_ESCROW_CONTRACT_ADDRESS.toLowerCase()
+  ) {
+    throw new Error("Agent is not bound to the canonical escrow case.");
   }
 }
 
@@ -604,6 +601,8 @@ export async function getResolutionAgentPublicView(params: {
     throw new ResolutionAgentNotFoundError(agentId);
   }
 
+  assertCanonicalAgentIdentity(agent);
+
   // Verify authorization: funder, client, or worker
   const authorized = await isAuthorizedForAgent(agent, authenticatedCaller, escrowReader);
   if (!authorized) {
@@ -650,6 +649,8 @@ export async function refreshFundingStatus(
   if (!agent) {
     throw new ResolutionAgentNotFoundError(agentId);
   }
+
+  assertCanonicalAgentIdentity(agent);
 
   // 2. Authorisation check (funder, client, or worker)
   const authorized = await isAuthorizedForAgent(agent, authenticatedCaller, escrowReader);
@@ -1532,7 +1533,7 @@ export async function closeResolutionAgent(
 export type EscrowCaseRunReader = EscrowCaseAuthorizationReader &
   Pick<CaseObservationReader, "getFullPayment">;
 
-/** Escrow contract terminal states (released, cancelled, refunded). */
+/** Escrow contract terminal states (released, cancelled, resolved). */
 const TERMINAL_ESCROW_STATES: readonly number[] = [5, 7, 8];
 
 /**
@@ -1545,7 +1546,7 @@ const TERMINAL_ESCROW_STATES: readonly number[] = [5, 7, 8];
  * - The worker itself enforces all policy, budget, lease, idempotency, and
  *   x402 protections internally — they are NOT duplicated here.
  * - No worker work is triggered when the escrow case is missing on-chain or
- *   in a terminal state (released / cancelled / refunded).
+ *   in a terminal state (released / cancelled / resolved).
  *
  * # Authorisation
  * Access is granted if the caller is the stored funder, the on-chain client,

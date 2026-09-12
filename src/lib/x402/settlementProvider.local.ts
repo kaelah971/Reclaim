@@ -26,6 +26,11 @@ import {
 } from "./config";
 import { verifyPermit2Authorization } from "./localVerify";
 import { settlePayment as settleOnChain } from "./settlement";
+import {
+  validateCorePaymentPayload,
+  resolveServerPaymentTerms,
+} from "./shared";
+import type { X402ServicePaymentTerms } from "./config";
 
 // ---------------------------------------------------------------------------
 // LocalSettlementProvider
@@ -48,14 +53,37 @@ export class LocalSettlementProvider implements X402SettlementProvider {
    */
   async verifyPayment(
     payload: PaymentPayload,
-    _requirement: PaymentRequirements, // eslint-disable-line @typescript-eslint/no-unused-vars
+    requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<VerifyResult> {
+    const resolvedTerms = resolveServerPaymentTerms(terms);
+    if (!resolvedTerms.valid) return resolvedTerms;
+    const serverTerms = resolvedTerms.terms;
+    if (serverTerms.network !== this.network || serverTerms.payToAddress.toLowerCase() !== this.payToAddress.toLowerCase()) {
+      return { valid: false, reason: "Payment terms do not match the local settlement provider." };
+    }
+    const structure = validateCorePaymentPayload(payload, requirement, serverTerms);
+    if (!structure.valid) return structure;
+
+    const rawPayment = payload.payload as Record<string, unknown>;
+    if (rawPayment && typeof rawPayment.authorization === "object") {
+      return {
+        valid: false,
+        reason: "Local settlement requires a Permit2 payment; EIP-3009 belongs to facilitator mode.",
+      };
+    }
+
     // Extract the Permit2 payment details from the x402 PaymentPayload.
     // The payload.payload field contains our Reclaim-specific PaymentDetails
     // structure when using the local (Permit2) payment scheme.
     const payment = payload.payload as unknown as PaymentDetails;
 
-    const result = await verifyPermit2Authorization(payment);
+    const result = await verifyPermit2Authorization(payment, {
+      amountAtomic: requirement.amount,
+      tokenAddress: requirement.asset,
+      payToAddress: requirement.payTo,
+      chainId: serverTerms.chainId,
+    });
 
     return {
       valid: result.isValid,
@@ -74,13 +102,36 @@ export class LocalSettlementProvider implements X402SettlementProvider {
    */
   async settlePayment(
     payload: PaymentPayload,
-    _requirement: PaymentRequirements, // eslint-disable-line @typescript-eslint/no-unused-vars
+    requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<SettleResult> {
+    const resolvedTerms = resolveServerPaymentTerms(terms);
+    if (!resolvedTerms.valid) return { success: false, reason: resolvedTerms.reason };
+    const serverTerms = resolvedTerms.terms;
+    if (serverTerms.network !== this.network || serverTerms.payToAddress.toLowerCase() !== this.payToAddress.toLowerCase()) {
+      return { success: false, reason: "Payment terms do not match the local settlement provider." };
+    }
+    const structure = validateCorePaymentPayload(payload, requirement, serverTerms);
+    if (!structure.valid) return { success: false, reason: structure.reason };
+
+    const rawPayment = payload.payload as Record<string, unknown>;
+    if (rawPayment && typeof rawPayment.authorization === "object") {
+      return {
+        success: false,
+        reason: "Local settlement requires a Permit2 payment; EIP-3009 belongs to facilitator mode.",
+      };
+    }
+
     // Extract the Permit2 payment details from the x402 PaymentPayload.
     const payment = payload.payload as unknown as PaymentDetails;
 
     try {
-      const receipt = await settleOnChain(payment);
+      const receipt = await settleOnChain(payment, {
+        amountAtomic: requirement.amount,
+        tokenAddress: requirement.asset,
+        payToAddress: requirement.payTo,
+        chainId: serverTerms.chainId,
+      });
 
       return {
         success: receipt.status === "success",

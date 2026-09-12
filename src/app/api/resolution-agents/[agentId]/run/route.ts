@@ -14,7 +14,7 @@
 //     be the funder, the on-chain client, or the on-chain worker, the agent
 //     must be bound to the canonical escrow case, and the escrow case must
 //     exist on-chain and not be in a terminal state (released/cancelled/
-//     refunded).
+//     resolved).
 //
 // Headers (wallet auth — same transport as every resolution-agent route):
 //   x-wallet-address   — caller's EVM address
@@ -34,7 +34,11 @@
 // ---------------------------------------------------------------------------
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifyAuth } from "@/lib/resolution-agent/api/auth";
+import {
+  authorizeWalletRequest,
+  EMPTY_BODY_HASH,
+  requestHasUnexpectedBody,
+} from "@/lib/resolution-agent/api/auth";
 
 // Serverless execution budget: one worker iteration may run up to
 // DEFAULT_MAX_ITERATION_MS (45s) plus store/observer overhead. 60s keeps a
@@ -45,7 +49,11 @@ import {
   createStore,
   runResolutionAgentIteration,
 } from "@/lib/resolution-agent/api/service";
-import { CeloSepoliaEscrowCaseReader } from "@/lib/resolution-agent/api/escrow-reader";
+import {
+  CeloSepoliaEscrowCaseReader,
+  CANONICAL_ESCROW_CHAIN_ID,
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -68,36 +76,55 @@ export async function POST(
       );
     }
 
-    const authResult = await verifyAuth({
+    if (await requestHasUnexpectedBody(request)) {
+      return NextResponse.json(
+        { error: "This route does not accept a request body.", code: "BODY_NOT_ALLOWED" },
+        { status: 400 },
+      );
+    }
+
+    const store = createStore();
+    const storedAgent = await store.getAgentById(agentId);
+    if (!storedAgent) {
+      return NextResponse.json(
+        { error: "Resolution agent not found.", code: "AGENT_NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    const authResult = await authorizeWalletRequest({
       claimedAddress: walletAddress,
       message: signedMessage,
       signature: walletSignature,
+      expected: {
+        action: "run_resolution_agent",
+        agentId: storedAgent.id,
+        escrowChainId: `eip155:${CANONICAL_ESCROW_CHAIN_ID}`,
+        escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        escrowPaymentId: storedAgent.identity.escrowPaymentId,
+        bodyHash: EMPTY_BODY_HASH,
+        signerAddress: walletAddress,
+      },
+      nonceStore: store,
     });
 
     if (!authResult.verified) {
       return NextResponse.json(
-        { error: `Wallet signature verification failed: ${authResult.error}`, code: "SIGNATURE_INVALID" },
-        { status: 401 },
-      );
-    }
-
-    if (!signedMessage.includes(agentId)) {
-      return NextResponse.json(
-        { error: `Run-agent message must contain the agent ID "${agentId}".`, code: "MESSAGE_AGENT_ID_MISMATCH" },
-        { status: 400 },
-      );
-    }
-
-    if (!signedMessage.includes("run_resolution_agent")) {
-      return NextResponse.json(
-        { error: "Signed message must bind to the run_resolution_agent action.", code: "MESSAGE_ACTION_MISMATCH" },
-        { status: 400 },
+        { error: `Wallet authorization failed: ${authResult.error}`, code: authResult.code },
+        {
+          status:
+            authResult.code.startsWith("MESSAGE_") &&
+            authResult.code !== "MESSAGE_SIGNER_MISMATCH"
+              ? 400
+              : authResult.code === "MESSAGE_SIGNER_MISMATCH"
+                ? 403
+                : 401,
+        },
       );
     }
 
     // No body parsing — this route accepts no JSON body.
 
-    const store = createStore();
     const escrowReader = new CeloSepoliaEscrowCaseReader();
     const now = Date.now();
 

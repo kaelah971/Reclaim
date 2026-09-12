@@ -1,9 +1,10 @@
 ﻿// ---------------------------------------------------------------------------
 // SERVER-ONLY â€” Final-settlement chain provenance (RA1R.8F)
 //
-// Read-only proof of the escrow outcome for a released payment:
+// Read-only proof of the escrow outcome for a payment:
 //   - getPayment(paymentId) â€” authoritative final state
-//   - PaymentReleased(paymentId) â€” the release transaction (approveRelease)
+//   - PaymentReleased / PaymentDisputed / PaymentResolved / PaymentCancelled
+//     lifecycle transaction proofs
 //   - DeliveryEvidenceSubmitted(paymentId) â€” the evidence submission tx
 //
 // All reads only. No transactions, no agent runs, no x402 calls.
@@ -23,7 +24,7 @@ import { CANONICAL_ESCROW_CONTRACT_ADDRESS } from "@/lib/resolution-agent/api/es
  * purpose: the receipt proof reader only needs read calls, and viem's
  * generic chains make exact public-client typing brittle across versions.
  */
-interface ChainReadClient {
+export interface ChainReadClient {
   getBlock(args: unknown): Promise<{ number: bigint | null; timestamp: bigint }>;
   getLogs(args: unknown): Promise<
     Array<{ transactionHash: `0x${string}`; blockNumber: bigint | null; args?: Record<string, unknown> | null }>
@@ -62,6 +63,38 @@ const EVIDENCE_SUBMITTED_EVENT = {
   ],
 } as const;
 
+const PAYMENT_DISPUTED_EVENT = {
+  type: "event",
+  name: "PaymentDisputed",
+  inputs: [
+    { type: "uint256", indexed: true, name: "paymentId" },
+    { type: "address", indexed: true, name: "disputer" },
+    { type: "bytes32", indexed: false, name: "disputeReference" },
+  ],
+} as const;
+
+const PAYMENT_RESOLVED_EVENT = {
+  type: "event",
+  name: "PaymentResolved",
+  inputs: [
+    { type: "uint256", indexed: true, name: "paymentId" },
+    { type: "address", indexed: true, name: "resolver" },
+    { type: "address", indexed: false, name: "client" },
+    { type: "address", indexed: false, name: "worker" },
+    { type: "uint256", indexed: false, name: "clientAmount" },
+    { type: "uint256", indexed: false, name: "workerAmount" },
+  ],
+} as const;
+
+const PAYMENT_CANCELLED_EVENT = {
+  type: "event",
+  name: "PaymentCancelled",
+  inputs: [
+    { type: "uint256", indexed: true, name: "paymentId" },
+    { type: "address", indexed: true, name: "client" },
+  ],
+} as const;
+
 // ---------------------------------------------------------------------------
 // Result types
 // ---------------------------------------------------------------------------
@@ -79,6 +112,26 @@ export interface ChainEvidenceProof {
   blockNumber: string | null;
   blockTime: string | null;
 }
+
+/** Proof shared by non-release escrow lifecycle events. */
+export interface ChainEventProof {
+  txHash: string | null;
+  status: "success" | "reverted" | null;
+  sender: string | null;
+  blockNumber: string | null;
+  blockTime: string | null;
+}
+
+export interface ChainDisputeProof extends ChainEventProof {
+  disputeReference: string | null;
+}
+
+export interface ChainResolutionProof extends ChainEventProof {
+  clientAmount: string | null;
+  workerAmount: string | null;
+}
+
+export type ChainCancellationProof = ChainEventProof;
 
 export interface ChainFinalState {
   state: string;
@@ -100,6 +153,7 @@ export interface ChainFinalState {
   deliveryDeadline: string | null;
   autoReleaseSeconds: string | null;
   disputeWindowSeconds: string | null;
+  createdAt: string | null;
 }
 
 export interface ChainFinalProof {
@@ -107,6 +161,9 @@ export interface ChainFinalProof {
   state: ChainFinalState;
   release: ChainReleaseProof;
   evidenceSubmission: ChainEvidenceProof;
+  dispute: ChainDisputeProof;
+  resolution: ChainResolutionProof;
+  cancellation: ChainCancellationProof;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +251,40 @@ async function findLatestLog(
   };
 }
 
+function emptyEventProof(): ChainEventProof {
+  return {
+    txHash: null,
+    status: null,
+    sender: null,
+    blockNumber: null,
+    blockTime: null,
+  };
+}
+
+function stringValue(value: unknown): string | null {
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+/** Read receipt, sender, and block time for a lifecycle event log. */
+async function readEventProof(
+  client: ChainReadClient,
+  log: FoundLog,
+): Promise<ChainEventProof> {
+  const receipt = await client.getTransactionReceipt({ hash: log.transactionHash });
+  const tx = await client.getTransaction({ hash: log.transactionHash });
+  const block = await client.getBlock({ blockNumber: receipt.blockNumber ?? log.blockNumber });
+  return {
+    txHash: log.transactionHash,
+    status: receipt.status,
+    sender: tx.from,
+    blockNumber: receipt.blockNumber?.toString() ?? log.blockNumber.toString(),
+    blockTime: new Date(Number(block.timestamp) * 1000).toISOString(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Production reader
 // ---------------------------------------------------------------------------
@@ -204,8 +295,8 @@ export class CeloSepoliaChainFinalProofReader {
   /** Chain label for the canonical escrow (Celo Sepolia). */
   public readonly network = "Celo Sepolia";
 
-  constructor(rpcUrl?: string) {
-    this.client = createPublicClient({
+  constructor(rpcUrl?: string, client?: ChainReadClient) {
+    this.client = client ?? createPublicClient({
       chain: celoSepolia,
       transport: http(rpcUrl ?? DEFAULT_SEPOLIA_RPC, { timeout: 15000 }),
     });
@@ -231,7 +322,7 @@ export class CeloSepoliaChainFinalProofReader {
         5: "released",
         6: "disputed",
         7: "cancelled",
-        8: "refunded",
+        8: "resolved",
       };
       return {
         state: String(stateNum),
@@ -251,9 +342,10 @@ export class CeloSepoliaChainFinalProofReader {
         releaseRule: payment.releaseRule as string | null,
         evidenceExpectation: payment.evidenceExpectation as string | null,
         deliveryDeadline: this.toIso(payment.deliveryDeadline as bigint),
-        autoReleaseSeconds: (payment.autoReleaseSeconds as bigint)?.toString() ?? null,
-        disputeWindowSeconds: (payment.disputeWindowSeconds as bigint)?.toString() ?? null,
-      };
+          autoReleaseSeconds: (payment.autoReleaseSeconds as bigint)?.toString() ?? null,
+          disputeWindowSeconds: (payment.disputeWindowSeconds as bigint)?.toString() ?? null,
+          createdAt: this.toIso(payment.createdAt as bigint),
+        };
     } catch {
       return null; // PaymentNotFound or RPC failure â€” treated as absent.
     }
@@ -277,6 +369,48 @@ export class CeloSepoliaChainFinalProofReader {
       };
     } catch {
       return { txHash: null, status: null, sender: null, blockNumber: null, blockTime: null };
+    }
+  }
+
+  /** Prove the PaymentDisputed transaction for a disputed payment. */
+  async getDisputeProof(paymentId: bigint, disputedAtUnix = 0): Promise<ChainDisputeProof> {
+    try {
+      const log = await findLatestLog(this.client, PAYMENT_DISPUTED_EVENT, paymentId, disputedAtUnix);
+      if (!log) return { ...emptyEventProof(), disputeReference: null };
+      const proof = await readEventProof(this.client, log);
+      return {
+        ...proof,
+        disputeReference: stringValue(log.args.disputeReference),
+      };
+    } catch {
+      return { ...emptyEventProof(), disputeReference: null };
+    }
+  }
+
+  /** Prove the PaymentResolved transaction and its client/worker allocations. */
+  async getResolutionProof(paymentId: bigint, resolvedAtUnix: number): Promise<ChainResolutionProof> {
+    try {
+      const log = await findLatestLog(this.client, PAYMENT_RESOLVED_EVENT, paymentId, resolvedAtUnix);
+      if (!log) return { ...emptyEventProof(), clientAmount: null, workerAmount: null };
+      const proof = await readEventProof(this.client, log);
+      return {
+        ...proof,
+        clientAmount: stringValue(log.args.clientAmount),
+        workerAmount: stringValue(log.args.workerAmount),
+      };
+    } catch {
+      return { ...emptyEventProof(), clientAmount: null, workerAmount: null };
+    }
+  }
+
+  /** Prove the PaymentCancelled transaction for an unfunded payment. */
+  async getCancellationProof(paymentId: bigint, createdAtUnix = 0): Promise<ChainCancellationProof> {
+    try {
+      const log = await findLatestLog(this.client, PAYMENT_CANCELLED_EVENT, paymentId, createdAtUnix);
+      if (!log) return emptyEventProof();
+      return readEventProof(this.client, log);
+    } catch {
+      return emptyEventProof();
     }
   }
 
@@ -311,9 +445,23 @@ export class CeloSepoliaChainFinalProofReader {
       ? Math.floor(new Date(state.deliveryAt).getTime() / 1000)
       : 0;
 
-    const [release, evidenceSubmission] = await Promise.all([
-      this.getReleaseProof(paymentId, releasedAtUnix),
+    const [release, evidenceSubmission, dispute, resolution, cancellation] = await Promise.all([
+      state.stateLabel === "released"
+        ? this.getReleaseProof(paymentId, releasedAtUnix)
+        : { txHash: null, status: null, sender: null, blockNumber: null, blockTime: null },
       this.getEvidenceSubmissionProof(paymentId, deliveryAtUnix),
+      state.stateLabel === "disputed"
+        ? this.getDisputeProof(paymentId, deliveryAtUnix)
+        : { ...emptyEventProof(), disputeReference: null },
+      state.stateLabel === "resolved"
+        ? this.getResolutionProof(paymentId, releasedAtUnix)
+        : { ...emptyEventProof(), clientAmount: null, workerAmount: null },
+      state.stateLabel === "cancelled"
+        ? this.getCancellationProof(
+            paymentId,
+            state.createdAt ? Math.floor(new Date(state.createdAt).getTime() / 1000) : 0,
+          )
+        : emptyEventProof(),
     ]);
 
     return {
@@ -321,6 +469,9 @@ export class CeloSepoliaChainFinalProofReader {
       state,
       release,
       evidenceSubmission,
+      dispute,
+      resolution,
+      cancellation,
     };
   }
 

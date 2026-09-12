@@ -6,7 +6,7 @@ import Button from "@/components/ui/Button";
 import ReceiptFilters, {
   type ReceiptFilterValue,
 } from "@/components/receipt/ReceiptFilters";
-import StatusBadge from "@/components/ui/StatusBadge";
+import StatusBadge, { type BadgeVariant } from "@/components/ui/StatusBadge";
 import Notice from "@/components/ui/Notice";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import {
@@ -18,13 +18,13 @@ import type { ReceiptData } from "@/lib/receipt/types";
 // ---------------------------------------------------------------------------
 // /receipts — settlement receipt index (read-only discovery)
 //
-// Discovers completed canonical receipts for the connected wallet (client or
+// Discovers canonical payment receipts for the connected wallet (client or
 // worker) using the SAME read model as /receipts/[receiptId]:
 //   GET /api/payments/[paymentId]/receipt
 // Candidate payment IDs come from read-only contract calls
 // (getClientPaymentIds / getWorkerPaymentIds). A candidate is listed only
-// when the canonical receipt endpoint returns found:true with a Released
-// final state — nothing is fabricated, nothing is mutated.
+// when the canonical receipt endpoint returns found:true — nothing is
+// fabricated, nothing is mutated.
 // ---------------------------------------------------------------------------
 
 interface EligibleReceipt {
@@ -34,32 +34,53 @@ interface EligibleReceipt {
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** Completed receipts are canonical receipts in the Released final state. */
-function isCompletedReceipt(data: ReceiptData): boolean {
-  return data.found === true && data.receipt?.protectedPayment?.finalState === "Released";
+/** Every on-chain payment state has a canonical, read-only receipt. */
+function isListableReceipt(data: ReceiptData): boolean {
+  return data.found === true && Boolean(data.receipt?.protectedPayment);
+}
+
+function statusVariant(finalState: string | undefined): BadgeVariant {
+  if (finalState === "Released" || finalState === "Resolved") return "settled";
+  if (finalState === "Disputed") return "disputed";
+  return "pending";
+}
+
+function receiptDate(data: ReceiptData): string | null {
+  const pp = data.receipt?.protectedPayment;
+  const timestamps = data.receipt?.audit?.timestamps;
+  return (
+    pp?.releasedAt ??
+    pp?.resolvedAt ??
+    timestamps?.cancelledAt ??
+    timestamps?.resolvedAt ??
+    timestamps?.disputedAt ??
+    timestamps?.releaseAt ??
+    null
+  );
 }
 
 function receiptMatchesFilter(
   data: ReceiptData,
   filter: ReceiptFilterValue,
 ): boolean {
-  const finalState = data.receipt?.protectedPayment?.finalState;
-  const outcome = data.receipt?.humanDecision?.outcome;
+  const pp = data.receipt?.protectedPayment;
+  const finalState = pp?.finalState;
+  const outcome = pp?.financialOutcome ?? data.receipt?.humanDecision?.outcome;
   switch (filter) {
     case "all":
       return true;
     case "released":
       return finalState === "Released";
     case "client-outcome":
-      return outcome === "Client";
+      return outcome === "Client" || outcome === "Refunded to client";
     case "worker-outcome":
-      return outcome === "Worker";
+      return outcome === "Worker" || outcome === "Released to worker";
     case "split":
-      return outcome === "Split";
+      return outcome === "Split" || outcome === "Partially resolved";
     case "recent": {
-      const releasedAt = data.receipt?.protectedPayment?.releasedAt;
-      if (!releasedAt) return false;
-      return Date.now() - new Date(releasedAt).getTime() <= THIRTY_DAYS_MS;
+      const date = receiptDate(data);
+      if (!date) return false;
+      return Date.now() - new Date(date).getTime() <= THIRTY_DAYS_MS;
     }
   }
 }
@@ -106,6 +127,8 @@ function ReceiptCard({
   userAddress: string;
 }) {
   const pp = data.receipt?.protectedPayment;
+  const finalState = pp?.finalState ?? "Pending";
+  const outcome = pp?.financialOutcome;
   const isClient =
     !!pp?.client && pp.client.toLowerCase() === userAddress.toLowerCase();
   const role = isClient ? "Client" : "Worker";
@@ -125,15 +148,18 @@ function ReceiptCard({
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <StatusBadge variant="settled" label="Released" />
+          <StatusBadge variant={statusVariant(finalState)} label={finalState} />
           <div className="flex flex-col items-end gap-0.5">
             <span className="text-[13px] text-muted">{role}</span>
             <span className="text-[13px] text-muted">
-              {formatReceiptDate(pp?.releasedAt)}
+              {formatReceiptDate(receiptDate(data))}
             </span>
           </div>
         </div>
       </div>
+      {outcome && outcome !== finalState ? (
+        <p className="mt-2 text-[13px] text-muted">{outcome}</p>
+      ) : null}
     </Link>
   );
 }
@@ -204,12 +230,12 @@ export default function ReceiptsPage() {
       for (const result of results) {
         if (result.status !== "fulfilled") continue;
         const candidate = result.value;
-        if (isCompletedReceipt(candidate.data)) found.push(candidate);
+        if (isListableReceipt(candidate.data)) found.push(candidate);
       }
-      // Newest releases first (null-safe; stable order for equal dates).
+      // Newest payment activity first (null-safe; stable order for equal dates).
       found.sort((a, b) => {
-        const aAt = a.data.receipt?.protectedPayment?.releasedAt ?? "";
-        const bAt = b.data.receipt?.protectedPayment?.releasedAt ?? "";
+        const aAt = receiptDate(a.data) ?? "";
+        const bAt = receiptDate(b.data) ?? "";
         return bAt.localeCompare(aAt);
       });
       setEligible(found);
@@ -241,7 +267,7 @@ export default function ReceiptsPage() {
           Settlement receipts
         </h1>
         <p className="mt-1 text-[15px] text-muted">
-          Plain-language records of completed protected payments.
+          Plain-language records of protected payments from terms through outcome.
         </p>
       </div>
 

@@ -15,7 +15,7 @@ import type { DisputeBrief } from "../disputeBrief";
 // Test fixtures
 // ---------------------------------------------------------------------------
 
-const MOCK_RECEIPT: SettlementReceipt = {
+let MOCK_RECEIPT: SettlementReceipt = {
   txHash: "0x392415d5642f5e74327fddbfba6fd1f434b05e7c6d4e084e3f7bcc4fbb9f0d7c",
   blockNumber: BigInt(10000000),
   blockHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -25,6 +25,15 @@ const MOCK_RECEIPT: SettlementReceipt = {
   amount: "10000",
   tokenAddress: "0x01C5C0122039549AD1493B8220cABEdD739BC44E",
 };
+
+// Each test receives a distinct transaction hash. Reusing one hash across
+// payments would correctly be rejected by the store's replay protection.
+beforeEach(() => {
+  MOCK_RECEIPT = {
+    ...MOCK_RECEIPT,
+    txHash: `0x${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`,
+  };
+});
 
 const MOCK_BRIEF: DisputeBrief = {
   briefId: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
@@ -157,7 +166,7 @@ describe("I4 atomic state transitions (InMemoryPaymentStore)", () => {
     expect(await store.getStatus(id)).toBe("settled");
   });
 
-  it("settled remains terminal — brief is preserved (in-memory: brief is idempotent, not locked)", async () => {
+  it("settled remains terminal — brief is preserved", async () => {
     const id = store.createPaymentId();
     await store.recordPending(id);
     await store.recordSettlementReceipt(id, MOCK_RECEIPT);
@@ -166,17 +175,11 @@ describe("I4 atomic state transitions (InMemoryPaymentStore)", () => {
     const result1 = await store.getResult(id);
     expect(result1!.brief).toBeDefined();
 
-    // In-memory store allows overwriting; SupabasePaymentStore would reject
-    // this via WHERE state = 'paid_pending_brief' conditional update.
-    // This is a known difference — the in-memory store is not designed
-    // for pessimistic concurrency.
     const differentBrief = { ...MOCK_BRIEF, briefId: "0x9999999999999999999999999999999999999999999999999999999999999999" };
     await store.recordBrief(id, differentBrief);
     const result2 = await store.getResult(id);
 
-    // The brief was overwritten because in-memory has no conditional update.
-    // This is documented and accepted — production uses Supabase.
-    expect(result2!.brief!.briefId).toBe(differentBrief.briefId);
+    expect(result2!.brief!.briefId).toBe(MOCK_BRIEF.briefId);
   });
 
   it("failed state returns error, not result", async () => {
@@ -225,7 +228,7 @@ describe("I4 concurrency — duplicate payment identifier", () => {
     store = new InMemoryPaymentStore();
   });
 
-  it("duplicate recordSettlementReceipt overwrites in-memory (documented limitation)", async () => {
+  it("duplicate recordSettlementReceipt preserves the first receipt", async () => {
     const id = store.createPaymentId();
     await store.recordPending(id);
     await store.recordSettlementReceipt(id, MOCK_RECEIPT);
@@ -237,11 +240,10 @@ describe("I4 concurrency — duplicate payment identifier", () => {
       ...MOCK_RECEIPT,
       txHash: "0x" + "b".repeat(64),
     };
-    await store.recordSettlementReceipt(id, secondReceipt);
+    await expect(store.recordSettlementReceipt(id, secondReceipt)).rejects.toThrow(/different settlement receipt/);
 
     const afterResult = await store.getResult(id);
-    // In-memory: overwritten. Supabase: first receipt preserved.
-    expect(afterResult!.receipt.txHash).toBe(secondReceipt.txHash);
+    expect(afterResult!.receipt.txHash).toBe(MOCK_RECEIPT.txHash);
   });
 
   it("transaction hash is unique — consumed only once", async () => {

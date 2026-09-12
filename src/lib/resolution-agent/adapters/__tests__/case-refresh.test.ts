@@ -179,12 +179,26 @@ function createMockDependencies(overrides: Partial<CaseRefreshDependencies> = {}
       updateAgent: vi.fn().mockResolvedValue(makeAgent({ status: "active" })),
       appendEvent: vi.fn().mockResolvedValue(undefined),
     } as any,
-    settlementClient: {
-      settleCaseRefresh: vi.fn().mockResolvedValue({
-        success: true,
-        txHash: "0xtxhash",
-        ambiguous: false,
-      }),
+      settlementClient: {
+        settleCaseRefresh: vi.fn().mockResolvedValue({
+          success: true,
+          txHash: "0xtxhash",
+          receipt: {
+            facilitatorUrl: "https://api.x402.celo.org",
+            x402Version: 2,
+            scheme: "exact",
+            network: "eip155:42220",
+            payer: "0x0000000000000000000000000000000000000001",
+            payTo: "0x0000000000000000000000000000000000000002",
+            token: "0x0000000000000000000000000000000000000003",
+            amount: "10000",
+            paymentIdentifier: "pay_test",
+            settlementTxHash: "0xtxhash",
+            settlementSuccess: true,
+            settledAt: new Date().toISOString(),
+          },
+          ambiguous: false,
+        }),
     } as any,
     generator: {
       generate: vi.fn().mockResolvedValue(makeGenerationResult()),
@@ -305,6 +319,7 @@ describe("executeCaseRefresh", () => {
   it("returns executed when existing execution is settled", async () => {
     (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
       state: "settled",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeCaseRefresh({
       agent, plan, action, leaseContext,
@@ -316,6 +331,7 @@ describe("executeCaseRefresh", () => {
   it("returns waiting when existing execution is paid_pending_result", async () => {
     (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
       state: "paid_pending_result",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeCaseRefresh({
       agent, plan, action, leaseContext,
@@ -384,6 +400,10 @@ describe("executeCaseRefresh", () => {
       kind: "existing",
       state: "settled",
     });
+    (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
+      state: "settled",
+      settlement_tx_hash: "0xexisting-tx",
+    });
     const result = await executeCaseRefresh({
       agent, plan, action, leaseContext,
       now: Date.now(), dependencies,
@@ -395,6 +415,10 @@ describe("executeCaseRefresh", () => {
     (dependencies.store.reserveToolExecutionAtomically as any).mockResolvedValue({
       kind: "existing",
       state: "paid_pending_result",
+    });
+    (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
+      state: "paid_pending_result",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeCaseRefresh({
       agent, plan, action, leaseContext,

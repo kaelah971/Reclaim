@@ -14,6 +14,7 @@ import {
   CANONICAL_ESCROW_CHAIN_ID,
   CANONICAL_ESCROW_CONTRACT_ADDRESS,
   MockEscrowCaseReader,
+  CeloEscrowCaseReader,
   CeloSepoliaEscrowCaseReader,
   type CaseParties,
 } from "../escrow-reader";
@@ -175,6 +176,24 @@ describe("CeloSepoliaEscrowCaseReader", () => {
   it("getCaseParties accepts 1 argument (caseIdentity object)", () => {
     const reader = new CeloSepoliaEscrowCaseReader();
     expect(reader.getCaseParties.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chain-aware reader
+// ---------------------------------------------------------------------------
+
+describe("CeloEscrowCaseReader", () => {
+  it("uses the selected Sepolia chain and address", () => {
+    const reader = new CeloEscrowCaseReader(11142220);
+    expect(reader.chainId).toBe(11142220);
+    expect(reader.contractAddress).toBe(CANONICAL_ESCROW_CONTRACT_ADDRESS);
+  });
+
+  it("fails closed for mainnet until its escrow address is configured", () => {
+    expect(() => new CeloEscrowCaseReader(42220)).toThrow(
+      /not deployed on chain 42220/i,
+    );
   });
 });
 

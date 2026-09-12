@@ -52,13 +52,13 @@ export const createAgentRequestSchema = z.object({
     .string()
     .min(1, "Payment ID must not be empty")
     .regex(
-      /^[0-9a-zA-Z_-]+$/,
-      "Payment ID must contain only alphanumeric characters, hyphens, and underscores",
+      /^[0-9]+$/,
+      "Payment ID must be a numeric escrow identifier",
     ),
   budgetAtomic: z.string().refine(isSupportedBudget, {
     message: "Budget must be one of: 30000, 40000, 50000 atomic USDC",
   }),
-});
+}).strict();
 
 export type CreateAgentRequestBody = z.infer<typeof createAgentRequestSchema>;
 
@@ -92,7 +92,7 @@ export const amendBudgetRequestSchema = z.object({
   budgetAtomic: z.string().refine(isSupportedBudget, {
     message: "Budget must be one of: 30000, 40000, 50000 atomic USDC",
   }),
-});
+}).strict();
 
 export type AmendBudgetRequestBody = z.infer<typeof amendBudgetRequestSchema>;
 
@@ -111,7 +111,7 @@ export const renewPolicyRequestSchema = z.object({
   expiresAt: z.string().refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
     message: "expiresAt must be a positive epoch-ms integer string",
   }),
-});
+}).strict();
 
 export type RenewPolicyRequestBody = z.infer<typeof renewPolicyRequestSchema>;
 

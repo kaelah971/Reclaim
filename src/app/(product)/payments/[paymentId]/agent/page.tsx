@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useSignMessage } from "wagmi";
 import AgentHeader from "@/components/agent/AgentHeader";
 import AgentBudgetCard from "@/components/agent/AgentBudgetCard";
 import AgentPolicyRenewCard from "@/components/agent/AgentPolicyRenewCard";
@@ -13,8 +14,10 @@ import AgentReadyState from "@/components/agent/AgentReadyState";
 import LoadingSkeleton from "@/components/ui/LoadingSkeleton";
 import ErrorState from "@/components/ui/ErrorState";
 import EmptyState from "@/components/ui/EmptyState";
-import Button from "@/components/ui/Button";
 import { usePayment } from "@/hooks/contracts/useReadContract";
+import { useWalletState } from "@/hooks/wallet/useWalletState";
+import { buildAgentDetailsMessage } from "@/lib/resolution-agent/api/auth";
+import { encodeWalletAuthMessage } from "@/lib/x402/walletAuth";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -99,6 +102,8 @@ export default function AgentControlRoomPage() {
   }, [paymentId]);
 
   const { data: escrowPayment } = usePayment(numericPaymentId);
+  const wallet = useWalletState();
+  const { signMessageAsync } = useSignMessage();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -132,12 +137,26 @@ export default function AgentControlRoomPage() {
       setPublicView(pv);
       setError(null);
 
-      // Step 2: Fetch detailed timeline/evidence events (public-safe summary)
-      // We fetch events separately via the details endpoint
-      // The details API requires wallet auth in production, but we try anyway
+      // Step 2: Fetch detailed timeline/evidence events (public-safe summary).
+      // The details endpoint requires a fresh structured wallet authorization.
       try {
+        if (!wallet.isConnected || !wallet.address) return;
+        const detailsMessage = buildAgentDetailsMessage({
+          agentId,
+          escrowChainId: "eip155:11142220",
+          escrowPaymentId: pv.identity.escrowPaymentId,
+          signerAddress: wallet.address,
+        });
+        const detailsSignature = await signMessageAsync({ message: detailsMessage });
         const detailsRes = await fetch(
           `/api/resolution-agents/${encodeURIComponent(agentId)}/details`,
+          {
+            headers: {
+              "x-wallet-address": wallet.address,
+              "x-wallet-message": encodeWalletAuthMessage(detailsMessage),
+              "x-wallet-signature": detailsSignature,
+            },
+          },
         );
         if (detailsRes.ok) {
           const details = await detailsRes.json();
@@ -153,7 +172,7 @@ export default function AgentControlRoomPage() {
     } finally {
       setLoading(false);
     }
-  }, [paymentId]);
+  }, [paymentId, signMessageAsync, wallet.address, wallet.isConnected]);
 
   useEffect(() => {
     void (async () => {

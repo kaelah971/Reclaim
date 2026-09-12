@@ -80,8 +80,8 @@ describe("ESCROW_STATE_MAP", () => {
     expect(ESCROW_STATE_MAP[5]).toBe("released");
   });
 
-  it("maps uint8 value 8 to 'refunded'", () => {
-    expect(ESCROW_STATE_MAP[8]).toBe("refunded");
+  it("maps uint8 value 8 to 'resolved'", () => {
+    expect(ESCROW_STATE_MAP[8]).toBe("resolved");
   });
 
   it("has exactly 9 entries (0-8)", () => {

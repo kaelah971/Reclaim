@@ -1,19 +1,41 @@
 import { celoSepolia, celo } from "viem/chains";
 import type { Chain } from "viem/chains";
 
-export const celoChain: Chain = celoSepolia;
+/** Explicit Celo Sepolia chain definition (chain ID 11142220). */
+export const celoSepoliaChain = celoSepolia;
 
-export const CELO_CHAIN_ID = celoSepolia.id;
+/** Explicit Celo Mainnet chain definition (chain ID 42220). */
+export const celoMainnetChain = celo;
+
+/**
+ * Historical default escrow chain. Keep this alias pointed at Sepolia until
+ * the mainnet escrow is deployed and the product is explicitly migrated.
+ */
+export const celoChain: Chain = celoSepoliaChain;
+
+/** Celo Sepolia chain ID. */
+export const CELO_SEPOLIA_CHAIN_ID = celoSepoliaChain.id;
+
+/** Historical alias retained for existing Sepolia escrow callers. */
+export const CELO_CHAIN_ID = CELO_SEPOLIA_CHAIN_ID;
 
 export const CELO_NETWORK_NAME = "Celo Sepolia";
 
 export const CELO_NETWORK_LABEL = "Celo Sepolia Testnet";
 
-/** Celo mainnet (chain ID 42220). */
-export const celoMainnetChain: Chain = celo;
+/** Celo Mainnet chain ID. */
+export const CELO_MAINNET_CHAIN_ID = celoMainnetChain.id;
 
-/** Celo mainnet chain ID. */
-export const CELO_MAINNET_CHAIN_ID = celo.id;
+/** The two Celo networks supported by the application. */
+export const CELO_CHAINS = {
+  [CELO_SEPOLIA_CHAIN_ID]: celoSepoliaChain,
+  [CELO_MAINNET_CHAIN_ID]: celoMainnetChain,
+} as const;
+
+/** Resolve a supported Celo chain by numeric chain ID. */
+export function getCeloChain(chainId: number): Chain | undefined {
+  return CELO_CHAINS[chainId as keyof typeof CELO_CHAINS];
+}
 
 const explorerBaseUrl = (
   process.env.NEXT_PUBLIC_CELO_EXPLORER_URL ||

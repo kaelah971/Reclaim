@@ -433,7 +433,7 @@ describe("RA1R.7B — run_tool execution path", () => {
       asset_address: "0xceba9300f2b948710d2653dd7b07f33a8b32118c",
       pay_to_address: "0x85522bde267d05bf8ce8813f97c75417b7894a33",
       payment_reference: null,
-      settlement_tx_hash: null,
+      settlement_tx_hash: "0xs-tx-hash",
       result_reference: null,
       result_data: null,
       failure_reason: null,

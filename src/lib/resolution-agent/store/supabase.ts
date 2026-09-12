@@ -27,6 +27,7 @@ import {
   ResolutionAgentConcurrencyError,
   ResolutionAgentToolExecutionConflictError,
 } from "./errors";
+import type { AuthorizationAction, AuthorizationNonceStore } from "../api/auth";
 
 // ---------------------------------------------------------------------------
 // Table name constants
@@ -36,6 +37,7 @@ const TABLE_AGENTS = "resolution_agents";
 const TABLE_EVENTS = "resolution_agent_events";
 const TABLE_TOOL_EXECUTIONS = "resolution_agent_tool_executions";
 const TABLE_EVIDENCE_REQUESTS = "resolution_agent_evidence_requests";
+const TABLE_AUTH_NONCES = "resolution_agent_auth_nonces";
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -50,6 +52,34 @@ export class SupabaseResolutionAgentStore {
    */
   constructor(client?: SupabaseClient) {
     this.client = client ?? getSupabaseClient();
+  }
+
+  // -------------------------------------------------------------------------
+  // Wallet authorization — durable nonce consumption
+  // -------------------------------------------------------------------------
+
+  /**
+   * Atomically consumes a wallet-authorization nonce.  The unique nonce hash
+   * is the concurrency boundary; a duplicate is a replay, while every other
+   * database error is propagated so callers fail closed.
+   */
+  async consumeAuthorizationNonce(
+    input: Parameters<AuthorizationNonceStore["consumeAuthorizationNonce"]>[0],
+  ): Promise<boolean> {
+    const { error } = await this.client.from(TABLE_AUTH_NONCES).insert({
+      nonce_hash: input.nonceHash,
+      nonce: input.nonce,
+      action: input.action as AuthorizationAction,
+      signer_address: input.signerAddress.toLowerCase(),
+      agent_id: input.agentId,
+      issued_at: new Date(input.issuedAt).toISOString(),
+      expires_at: new Date(input.expiresAt).toISOString(),
+      consumed_at: new Date().toISOString(),
+    });
+
+    if (!error) return true;
+    if (error.code === "23505") return false;
+    throw error;
   }
 
   // -------------------------------------------------------------------------

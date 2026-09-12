@@ -9,10 +9,6 @@
 // ---------------------------------------------------------------------------
 
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import {
-  PAYMENT_TOKEN_ADDRESS,
-  PAYMENT_TOKEN_DECIMALS,
-} from "@/lib/web3/tokens";
 import { getEscrowContractAddress } from "@/lib/contracts/config";
 import type {
   X402Config,
@@ -21,6 +17,14 @@ import type {
   PaymentIdentifier,
   SettlementMode,
 } from "./types";
+
+/**
+ * x402's local payment asset is deliberately independent from the protected
+ * escrow token configuration.  The escrow may use a different asset on a
+ * different chain; x402 service fees remain USDC.
+ */
+const X402_SEPOLIA_USDC_FALLBACK =
+  "0x01C5C0122039549AD1493B8220cABEdD739BC44E";
 
 // ---------------------------------------------------------------------------
 // Facilitator client (for cryptographic verification via Celo API)
@@ -93,15 +97,31 @@ export const X402_FACILITATOR_URL =
 /** CAIP-2 network identifier for Celo Sepolia. */
 export const X402_NETWORK = "eip155:11142220" as const;
 
-/** USDC token address on the active chain (from shared token config). */
+/** USDC token address for local Sepolia settlement. */
 export const X402_USDC_ADDRESS: string =
-  process.env.X402_USDC_ADDRESS || PAYMENT_TOKEN_ADDRESS;
+  process.env.X402_USDC_ADDRESS || X402_SEPOLIA_USDC_FALLBACK;
 
-/** USDC token decimals. */
-export const X402_USDC_DECIMALS: number =
-  Number.isFinite(Number(process.env.X402_USDC_DECIMALS))
-    ? Number(process.env.X402_USDC_DECIMALS)
-    : PAYMENT_TOKEN_DECIMALS;
+/** USDC token decimals. This is protocol data, not a client-configurable value. */
+export const X402_USDC_DECIMALS = 6 as const;
+
+export const X402_TOKEN_SYMBOL = "USDC" as const;
+
+export type X402ServiceIdentifier =
+  | "reclaim-dispute-brief-v1"
+  | "evidence-quality-check"
+  | "case-refresh";
+
+export interface X402ServicePaymentTerms {
+  service: X402ServiceIdentifier;
+  network: string;
+  chainId: number;
+  tokenAddress: string;
+  tokenSymbol: typeof X402_TOKEN_SYMBOL;
+  tokenDecimals: number;
+  payToAddress: string;
+  amountAtomic: string;
+  amountDisplay: string;
+}
 
 /**
  * Reclaim service-revenue wallet that receives x402 fees.
@@ -142,19 +162,10 @@ export const X402_DISPUTE_BRIEF_PRICE: string =
  * USDC on Celo uses 6 decimals, so "0.01" = 10_000 atomic units.
  */
 export function getDisputeBriefPriceAtomic(): bigint {
-  const price = process.env.X402_DISPUTE_BRIEF_PRICE_ATOMIC;
-  if (price) {
-    const parsed = BigInt(price);
-    if (parsed > BigInt(0)) return parsed;
-  }
-  // Compute from human-readable string
-  const human = X402_DISPUTE_BRIEF_PRICE;
-  const parts = human.split(".");
-  const whole = BigInt(parts[0] ?? "0");
-  const fraction = (parts[1] ?? "")
-    .slice(0, X402_USDC_DECIMALS)
-    .padEnd(X402_USDC_DECIMALS, "0");
-  return whole * (BigInt(10) ** BigInt(X402_USDC_DECIMALS)) + BigInt(fraction);
+  return parseConfiguredAtomicPrice(
+    process.env.X402_DISPUTE_BRIEF_PRICE_ATOMIC,
+    "X402_DISPUTE_BRIEF_PRICE_ATOMIC",
+  ) ?? toAtomicUnits(X402_DISPUTE_BRIEF_PRICE);
 }
 
 /**
@@ -171,12 +182,96 @@ export const X402_EVIDENCE_CHECK_PRICE: string =
  * USDC on Celo uses 6 decimals, so "0.01" = 10_000 atomic units.
  */
 export function getEvidenceCheckPriceAtomic(): bigint {
-  const price = process.env.X402_EVIDENCE_CHECK_PRICE_ATOMIC;
-  if (price) {
-    const parsed = BigInt(price);
-    if (parsed > BigInt(0)) return parsed;
+  return parseConfiguredAtomicPrice(
+    process.env.X402_EVIDENCE_CHECK_PRICE_ATOMIC,
+    "X402_EVIDENCE_CHECK_PRICE_ATOMIC",
+  ) ?? toAtomicUnits(X402_EVIDENCE_CHECK_PRICE);
+}
+
+/**
+ * Price of the case-refresh service in human-readable USDC.
+ *
+ * Case refresh has its own server-side price setting.  It intentionally falls
+ * back to the original dispute-brief price so existing deployments keep their
+ * established $0.01 default without making the client choose the amount.
+ */
+export const X402_CASE_REFRESH_PRICE: string =
+  process.env.X402_CASE_REFRESH_PRICE ||
+  process.env.NEXT_PUBLIC_X402_CASE_REFRESH_PRICE ||
+  X402_DISPUTE_BRIEF_PRICE;
+
+/** Return the server-configured case-refresh price in atomic USDC units. */
+export function getCaseRefreshPriceAtomic(): bigint {
+  return parseConfiguredAtomicPrice(
+    process.env.X402_CASE_REFRESH_PRICE_ATOMIC,
+    "X402_CASE_REFRESH_PRICE_ATOMIC",
+  ) ?? toAtomicUnits(X402_CASE_REFRESH_PRICE);
+}
+
+function parseConfiguredAtomicPrice(
+  value: string | undefined,
+  variableName: string,
+): bigint | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (!/^[0-9]+$/.test(value)) {
+    throw new Error(`${variableName} must be a positive integer in atomic units.`);
   }
-  return toAtomicUnits(X402_EVIDENCE_CHECK_PRICE);
+  const parsed = BigInt(value);
+  if (parsed <= 0n) {
+    throw new Error(`${variableName} must be greater than zero.`);
+  }
+  return parsed;
+}
+
+/**
+ * Return the server-owned payment terms for an x402 service.
+ *
+ * The returned atomic amount is the only amount routes may put into the
+ * facilitator/local provider requirement.  Client payloads are checked
+ * against it; they never select or raise the charge.
+ */
+export function getX402ServicePaymentTerms(
+  service: X402ServiceIdentifier,
+): X402ServicePaymentTerms {
+  const amountAtomic = (() => {
+    switch (service) {
+      case "reclaim-dispute-brief-v1":
+        return getDisputeBriefPriceAtomic();
+      case "evidence-quality-check":
+        return getEvidenceCheckPriceAtomic();
+      case "case-refresh":
+        return getCaseRefreshPriceAtomic();
+    }
+  })();
+  const facilitator = X402_SETTLEMENT_MODE === "celo-facilitator";
+  const network = facilitator ? X402_FACILITATOR_NETWORK : X402_NETWORK;
+  const chainId = facilitator ? 42220 : 11142220;
+  const tokenAddress = facilitator
+    ? X402_FACILITATOR_USDC_MAINNET
+    : X402_USDC_ADDRESS;
+  const payToAddress = facilitator
+    ? X402_PAY_TO_ADDRESS_FACILITATOR
+    : X402_PAY_TO_ADDRESS;
+
+  validatePayToAddress();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    throw new Error("X402 token address is not a valid hex address.");
+  }
+  if (amountAtomic <= 0n) {
+    throw new Error("X402 payment amount must be greater than zero.");
+  }
+
+  return {
+    service,
+    network,
+    chainId,
+    tokenAddress,
+    tokenSymbol: X402_TOKEN_SYMBOL,
+    tokenDecimals: 6,
+    payToAddress,
+    amountAtomic: amountAtomic.toString(),
+    amountDisplay: fromAtomicUnits(amountAtomic, 6),
+  };
 }
 
 /**
@@ -187,7 +282,18 @@ export function toAtomicUnits(
   humanAmount: string,
   decimals: number = X402_USDC_DECIMALS,
 ): bigint {
+  if (
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    typeof humanAmount !== "string" ||
+    !/^\d+(?:\.\d+)?$/.test(humanAmount)
+  ) {
+    throw new Error("Invalid human-readable USDC amount.");
+  }
   const parts = humanAmount.split(".");
+  if ((parts[1]?.length ?? 0) > decimals) {
+    throw new Error(`USDC amount has more than ${decimals} decimal places.`);
+  }
   const whole = BigInt(parts[0] ?? "0");
   const fraction = (parts[1] ?? "")
     .slice(0, decimals)
@@ -239,7 +345,11 @@ export function generatePaymentId(): PaymentIdentifier {
  * contract. Throws with a descriptive message on misconfiguration.
  */
 export function validatePayToAddress(): void {
-  if (!X402_PAY_TO_ADDRESS) {
+  const payTo = X402_SETTLEMENT_MODE === "celo-facilitator"
+    ? X402_PAY_TO_ADDRESS_FACILITATOR
+    : X402_PAY_TO_ADDRESS;
+
+  if (!payTo) {
     throw new Error(
       "X402_PAY_TO_ADDRESS is not configured. Cannot process payments. " +
         "Set X402_PAY_TO_ADDRESS (server) or NEXT_PUBLIC_X402_PAY_TO_ADDRESS (client).",
@@ -247,13 +357,14 @@ export function validatePayToAddress(): void {
   }
 
   // Must be a valid hex address
-  if (!/^0x[0-9a-fA-F]{40}$/.test(X402_PAY_TO_ADDRESS)) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(payTo)) {
     throw new Error(
-      `X402_PAY_TO_ADDRESS is not a valid hex address: ${X402_PAY_TO_ADDRESS}`,
+      `X402 payTo address is not a valid hex address: ${payTo}`,
     );
   }
 
   // Must NOT be the escrow contract
+  if (X402_SETTLEMENT_MODE === "celo-facilitator") return;
   const escrow = getEscrowContractAddress();
   if (X402_PAY_TO_ADDRESS.toLowerCase() === escrow.toLowerCase()) {
     throw new Error(
@@ -341,18 +452,18 @@ export function canSettleOnChain(): boolean {
  * @x402/core's verify() which expects a single entry.
  */
 export function buildLegacyPaymentRequirements(): PaymentRequirementsLegacy {
-  validatePayToAddress();
-  const config = getX402ServerConfig();
+  const terms = getX402ServicePaymentTerms("reclaim-dispute-brief-v1");
 
   return {
     accepts: [
       {
         scheme: "exact",
-        price: `$${config.disputeBriefPrice}`,
-        network: config.network,
-        payTo: config.payToAddress,
-        asset: config.usdcAddress,
-        assetDecimals: config.usdcDecimals,
+        price: `$${terms.amountDisplay}`,
+        network: terms.network,
+        payTo: terms.payToAddress,
+        asset: terms.tokenAddress,
+        assetDecimals: terms.tokenDecimals,
+        amount: terms.amountAtomic,
       },
     ],
     description: "Reclaim dispute preparation brief",
@@ -365,14 +476,14 @@ export function buildLegacyPaymentRequirements(): PaymentRequirementsLegacy {
  * for use with facilitator.verify().
  */
 export function getPaymentRequirement(): PaymentRequirement {
-  validatePayToAddress();
-  const config = getX402ServerConfig();
+  const terms = getX402ServicePaymentTerms("reclaim-dispute-brief-v1");
   return {
     scheme: "exact",
-    price: `$${config.disputeBriefPrice}`,
-    network: config.network,
-    payTo: config.payToAddress,
-    asset: config.usdcAddress,
-    assetDecimals: config.usdcDecimals,
+    price: `$${terms.amountDisplay}`,
+    network: terms.network,
+    payTo: terms.payToAddress,
+    asset: terms.tokenAddress,
+    assetDecimals: terms.tokenDecimals,
+    amount: terms.amountAtomic,
   };
 }

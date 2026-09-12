@@ -36,7 +36,21 @@ describe("POST /api/resolution-agents/[agentId]/renew — encoded transport", ()
   beforeEach(() => {
     serviceMock.createStore.mockReset();
     serviceMock.renewResolutionAgentPolicy.mockReset();
-    serviceMock.createStore.mockReturnValue({});
+    serviceMock.createStore.mockReturnValue({
+      getAgentById: vi.fn().mockResolvedValue({
+        id: "agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235",
+        identity: {
+          escrowChainId: "eip155:11142220",
+          escrowContractAddress: "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+          escrowPaymentId: "1",
+        },
+        policy: {
+          funderAddress: FUNDER_ACCOUNT.address,
+          expiresAt: 1786161440000,
+        },
+      }),
+      consumeAuthorizationNonce: vi.fn().mockResolvedValue(true),
+    });
     serviceMock.renewResolutionAgentPolicy.mockResolvedValue({
       id: "agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235",
       status: "active",
@@ -54,6 +68,7 @@ describe("POST /api/resolution-agents/[agentId]/renew — encoded transport", ()
       oldExpiresAtMs: 1786161440000,
       newExpiresAtMs: newExpiresAt,
       funderAddress: FUNDER_ACCOUNT.address,
+      signerAddress: FUNDER_ACCOUNT.address,
     });
     const signature = await signMessage({ privateKey: FUNDER_KEY, message });
 
@@ -93,6 +108,7 @@ describe("POST /api/resolution-agents/[agentId]/renew — encoded transport", ()
       oldExpiresAtMs: 1786161440000,
       newExpiresAtMs: newExpiresAt,
       funderAddress: FUNDER_ACCOUNT.address,
+      signerAddress: FUNDER_ACCOUNT.address,
     });
     const signature = await signMessage({ privateKey: FUNDER_KEY, message });
 

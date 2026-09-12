@@ -198,6 +198,20 @@ function createMockDependencies(overrides: Partial<DisputeBriefDependencies> = {
       settleDisputeBrief: vi.fn().mockResolvedValue({
         success: true,
         txHash: "0xtxhash",
+        receipt: {
+          facilitatorUrl: "https://api.x402.celo.org",
+          x402Version: 2,
+          scheme: "exact",
+          network: "eip155:42220",
+          payer: "0x0000000000000000000000000000000000000001",
+          payTo: "0x0000000000000000000000000000000000000002",
+          token: "0x0000000000000000000000000000000000000003",
+          amount: "10000",
+          paymentIdentifier: "pay_test",
+          settlementTxHash: "0xtxhash",
+          settlementSuccess: true,
+          settledAt: new Date().toISOString(),
+        },
         ambiguous: false,
       }),
       settleEvidenceQualityCheck: vi.fn(),
@@ -334,6 +348,7 @@ describe("executeDisputeBrief", () => {
   it("returns executed when existing execution is settled", async () => {
     (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
       state: "settled",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeDisputeBrief({
       agent, plan, action, leaseContext,
@@ -345,6 +360,7 @@ describe("executeDisputeBrief", () => {
   it("returns waiting when existing execution is paid_pending_result", async () => {
     (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
       state: "paid_pending_result",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeDisputeBrief({
       agent, plan, action, leaseContext,
@@ -413,6 +429,10 @@ describe("executeDisputeBrief", () => {
       kind: "existing",
       state: "settled",
     });
+    (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
+      state: "settled",
+      settlement_tx_hash: "0xexisting-tx",
+    });
     const result = await executeDisputeBrief({
       agent, plan, action, leaseContext,
       now: Date.now(), dependencies,
@@ -424,6 +444,10 @@ describe("executeDisputeBrief", () => {
     (dependencies.store.reserveToolExecutionAtomically as any).mockResolvedValue({
       kind: "existing",
       state: "paid_pending_result",
+    });
+    (dependencies.store.getToolExecutionByRequestHash as any).mockResolvedValue({
+      state: "paid_pending_result",
+      settlement_tx_hash: "0xexisting-tx",
     });
     const result = await executeDisputeBrief({
       agent, plan, action, leaseContext,
@@ -755,7 +779,28 @@ describe("executeDisputeBrief", () => {
     }] as any; });
     (dependencies.store as any).reserveToolExecutionAtomically = vi.fn().mockImplementation(async () => { callOrder.push("reserve"); return { kind: "created", agentId: agent.id, requestHash: "h", state: "reserved" }; });
     (dependencies.walletDecryptor as any).decrypt = vi.fn().mockImplementation(async () => { callOrder.push("decrypt"); return { address: agent.caseWalletAddress } as Account; });
-    (dependencies.settlementClient as any).settleDisputeBrief = vi.fn().mockImplementation(async () => { callOrder.push("settle"); return { success: true, txHash: "0xtx", ambiguous: false }; });
+    (dependencies.settlementClient as any).settleDisputeBrief = vi.fn().mockImplementation(async () => {
+      callOrder.push("settle");
+      return {
+        success: true,
+        txHash: "0xtx",
+        receipt: {
+          facilitatorUrl: "https://api.x402.celo.org",
+          x402Version: 2,
+          scheme: "exact",
+          network: "eip155:42220",
+          payer: "0x0000000000000000000000000000000000000001",
+          payTo: "0x0000000000000000000000000000000000000002",
+          token: "0x0000000000000000000000000000000000000003",
+          amount: "10000",
+          paymentIdentifier: "pay_test",
+          settlementTxHash: "0xtx",
+          settlementSuccess: true,
+          settledAt: new Date().toISOString(),
+        },
+        ambiguous: false,
+      };
+    });
     (dependencies.generator as any).generate = vi.fn().mockImplementation(async () => { callOrder.push("generate"); return makeGenResult(); });
 
     await executeDisputeBrief({ agent, plan, action, leaseContext, now: Date.now(), dependencies });

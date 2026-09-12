@@ -30,6 +30,8 @@ import {
   X402_FACILITATOR_USDC_MAINNET,
   requireFacilitatorApiKey,
 } from "./config";
+import { resolveServerPaymentTerms, validateCorePaymentPayload } from "./shared";
+import type { X402ServicePaymentTerms } from "./config";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,7 +91,16 @@ export class CeloFacilitatorSettlementProvider implements X402SettlementProvider
   async verifyPayment(
     payload: PaymentPayload,
     requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<VerifyResult> {
+    const resolvedTerms = resolveServerPaymentTerms(terms);
+    if (!resolvedTerms.valid) return resolvedTerms;
+    const serverTerms = resolvedTerms.terms;
+    if (serverTerms.network !== this.network || serverTerms.payToAddress.toLowerCase() !== this.payToAddress.toLowerCase()) {
+      return { valid: false, reason: "Payment terms do not match the facilitator settlement provider." };
+    }
+    const structure = validateCorePaymentPayload(payload, requirement, serverTerms);
+    if (!structure.valid) return structure;
     try {
       const response: VerifyResponse = await this.client.verify(
         payload,
@@ -129,12 +140,54 @@ export class CeloFacilitatorSettlementProvider implements X402SettlementProvider
   async settlePayment(
     payload: PaymentPayload,
     requirement: PaymentRequirements,
+    terms?: X402ServicePaymentTerms,
   ): Promise<SettleResult> {
+    const resolvedTerms = resolveServerPaymentTerms(terms);
+    if (!resolvedTerms.valid) return { success: false, reason: resolvedTerms.reason };
+    const serverTerms = resolvedTerms.terms;
+    if (serverTerms.network !== this.network || serverTerms.payToAddress.toLowerCase() !== this.payToAddress.toLowerCase()) {
+      return { success: false, reason: "Payment terms do not match the facilitator settlement provider." };
+    }
+    const structure = validateCorePaymentPayload(payload, requirement, serverTerms);
+    if (!structure.valid) return { success: false, reason: structure.reason };
     try {
       const response: SettleResponse = await this.client.settle(
         payload,
         requirement,
       );
+
+      if (!response.success || !response.transaction) {
+        return {
+          success: false,
+          reason: response.errorReason || response.errorMessage || "Facilitator settlement did not return a confirmed transaction.",
+        };
+      }
+
+      if (!/^0x[0-9a-fA-F]{64}$/.test(response.transaction)) {
+        return {
+          success: false,
+          reason: "Facilitator settlement returned an invalid transaction hash.",
+        };
+      }
+
+      const rawPayload = payload.payload as Record<string, unknown>;
+      const authorization = rawPayload.authorization as Record<string, unknown>;
+      const payloadPayer = typeof authorization?.from === "string"
+        ? authorization.from
+        : undefined;
+      if (
+        typeof response.payer !== "string" ||
+        !/^0x[0-9a-fA-F]{40}$/.test(response.payer) ||
+        !payloadPayer ||
+        response.payer.toLowerCase() !== payloadPayer.toLowerCase() ||
+        (response.network !== undefined && response.network !== serverTerms.network) ||
+        (response.amount !== undefined && response.amount !== requirement.amount)
+      ) {
+        return {
+          success: false,
+          reason: "Facilitator settlement returned a payer different from the signed payment payload.",
+        };
+      }
 
       // Build the structured facilitator receipt from the response.
       const receipt: FacilitatorSettlementReceipt = {
@@ -142,7 +195,7 @@ export class CeloFacilitatorSettlementProvider implements X402SettlementProvider
         x402Version: FACILITATOR_X402_VERSION,
         scheme: requirement.scheme,
         network: this.network,
-        payer: response.payer || "",
+        payer: response.payer,
         payTo: requirement.payTo,
         token: requirement.asset,
         amount: requirement.amount,

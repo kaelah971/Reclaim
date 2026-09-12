@@ -48,7 +48,18 @@ describe("POST /api/resolution-agents/[agentId]/run", () => {
   beforeEach(() => {
     serviceMock.createStore.mockReset();
     serviceMock.runResolutionAgentIteration.mockReset();
-    serviceMock.createStore.mockReturnValue({});
+    serviceMock.createStore.mockReturnValue({
+      getAgentById: vi.fn().mockResolvedValue({
+        id: AGENT_ID,
+        identity: {
+          escrowChainId: "eip155:11142220",
+          escrowContractAddress: "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F",
+          escrowPaymentId: "1",
+        },
+        policy: { funderAddress: FUNDER_ACCOUNT.address },
+      }),
+      consumeAuthorizationNonce: vi.fn().mockResolvedValue(true),
+    });
     serviceMock.runResolutionAgentIteration.mockResolvedValue({
       result: {
         workerIterationId: "iter_1",
@@ -65,6 +76,7 @@ describe("POST /api/resolution-agents/[agentId]/run", () => {
       agentId: AGENT_ID,
       escrowChainId: "eip155:11142220",
       escrowPaymentId: "1",
+      signerAddress: FUNDER_ACCOUNT.address,
     });
     const signature = await signMessage({ privateKey: FUNDER_KEY, message });
 
@@ -116,6 +128,7 @@ describe("POST /api/resolution-agents/[agentId]/run", () => {
       agentId: AGENT_ID,
       escrowChainId: "eip155:11142220",
       escrowPaymentId: "1",
+      signerAddress: FUNDER_ACCOUNT.address,
     });
     const signature = await signMessage({ privateKey: FUNDER_KEY, message });
 
@@ -145,6 +158,7 @@ describe("POST /api/resolution-agents/[agentId]/run", () => {
       agentId: AGENT_ID,
       escrowChainId: "eip155:11142220",
       escrowPaymentId: "1",
+      signerAddress: FUNDER_ACCOUNT.address,
     });
     const signature = await signMessage({ privateKey: FUNDER_KEY, message });
 

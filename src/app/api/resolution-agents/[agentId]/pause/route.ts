@@ -20,8 +20,16 @@
 // ---------------------------------------------------------------------------
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifyAuth } from "@/lib/resolution-agent/api/auth";
+import {
+  authorizeWalletRequest,
+  EMPTY_BODY_HASH,
+  requestHasUnexpectedBody,
+} from "@/lib/resolution-agent/api/auth";
 import { pauseResolutionAgent, createStore } from "@/lib/resolution-agent/api/service";
+import {
+  CANONICAL_ESCROW_CHAIN_ID,
+  CANONICAL_ESCROW_CONTRACT_ADDRESS,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { extractWalletAuthHeaders } from "@/lib/x402/walletAuth";
 import { toErrorResponse } from "@/lib/resolution-agent/api/errors";
 
@@ -44,34 +52,53 @@ export async function POST(
       );
     }
 
-    const authResult = await verifyAuth({
-      claimedAddress: walletAddress,
-      message: signedMessage,
-      signature: walletSignature,
-    });
-
-    if (!authResult.verified) {
+    if (await requestHasUnexpectedBody(request)) {
       return NextResponse.json(
-        { error: `Wallet signature verification failed: ${authResult.error}`, code: "SIGNATURE_INVALID" },
-        { status: 401 },
-      );
-    }
-
-    if (!signedMessage.includes(agentId)) {
-      return NextResponse.json(
-        { error: `Pause message must contain the agent ID "${agentId}".`, code: "MESSAGE_AGENT_ID_MISMATCH" },
-        { status: 400 },
-      );
-    }
-
-    if (!signedMessage.includes("pause_resolution_agent")) {
-      return NextResponse.json(
-        { error: "Signed message must bind to the pause action.", code: "MESSAGE_ACTION_MISMATCH" },
+        { error: "This route does not accept a request body.", code: "BODY_NOT_ALLOWED" },
         { status: 400 },
       );
     }
 
     const store = createStore();
+    const agent = await store.getAgentById(agentId);
+    if (!agent) {
+      return NextResponse.json(
+        { error: "Resolution agent not found.", code: "AGENT_NOT_FOUND" },
+        { status: 404 },
+      );
+    }
+
+    const authResult = await authorizeWalletRequest({
+      claimedAddress: walletAddress,
+      message: signedMessage,
+      signature: walletSignature,
+      expected: {
+        action: "pause_resolution_agent",
+        agentId: agent.id,
+        escrowChainId: `eip155:${CANONICAL_ESCROW_CHAIN_ID}`,
+        escrowContractAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        escrowPaymentId: agent.identity.escrowPaymentId,
+        bodyHash: EMPTY_BODY_HASH,
+        signerAddress: agent.policy.funderAddress,
+      },
+      nonceStore: store,
+    });
+
+    if (!authResult.verified) {
+      return NextResponse.json(
+        { error: `Wallet authorization failed: ${authResult.error}`, code: authResult.code },
+        {
+          status:
+            authResult.code.startsWith("MESSAGE_") &&
+            authResult.code !== "MESSAGE_SIGNER_MISMATCH"
+              ? 400
+              : authResult.code === "MESSAGE_SIGNER_MISMATCH"
+                ? 403
+                : 401,
+        },
+      );
+    }
+
     const now = Date.now();
 
     const publicView = await pauseResolutionAgent({

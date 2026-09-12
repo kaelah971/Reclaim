@@ -221,7 +221,25 @@ function makeAccount(address: string): Account {
 }
 
 function makeSettledSuccess(): any {
-  return vi.fn().mockResolvedValue({ success: true, txHash: "0xtx", ambiguous: false });
+  return vi.fn().mockResolvedValue({
+    success: true,
+    txHash: "0xtx",
+    receipt: {
+      facilitatorUrl: "https://api.x402.celo.org",
+      x402Version: 2,
+      scheme: "exact",
+      network: "eip155:42220",
+      payer: "0x0000000000000000000000000000000000000001",
+      payTo: "0x0000000000000000000000000000000000000002",
+      token: "0x0000000000000000000000000000000000000003",
+      amount: "10000",
+      paymentIdentifier: "pay_test",
+      settlementTxHash: "0xtx",
+      settlementSuccess: true,
+      settledAt: new Date().toISOString(),
+    },
+    ambiguous: false,
+  });
 }
 
 function makeGenerator(): any {

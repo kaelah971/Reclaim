@@ -1,4 +1,9 @@
-import { celoChain, CELO_CHAIN_ID } from "@/lib/web3/chains";
+import {
+  celoChain,
+  celoMainnetChain,
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+} from "@/lib/web3/chains";
 import { getEscrowAddress } from "./addresses";
 import { protectedPaymentEscrowABI } from "./ProtectedPaymentEscrow.abi";
 import type { Chain } from "viem/chains";
@@ -10,14 +15,30 @@ import type { Chain } from "viem/chains";
 // environment override.
 // ---------------------------------------------------------------------------
 
+export type EscrowChainReference = Chain | number;
+
+function resolveChainId(chain: EscrowChainReference): number {
+  return typeof chain === "number" ? chain : chain.id;
+}
+
+function resolveChain(chain: EscrowChainReference): Chain {
+  if (typeof chain !== "number") return chain;
+  if (chain === CELO_CHAIN_ID) return celoChain;
+  if (chain === CELO_MAINNET_CHAIN_ID) return celoMainnetChain;
+  throw new Error(`Unsupported escrow chain ${chain}.`);
+}
+
 /**
  * Returns the deployed escrow contract address as a checksummed address.
  */
-export function getEscrowContractAddress(): `0x${string}` {
-  const address = getEscrowAddress(CELO_CHAIN_ID);
+export function getEscrowContractAddress(
+  chain: EscrowChainReference = celoChain,
+): `0x${string}` {
+  const chainId = resolveChainId(chain);
+  const address = getEscrowAddress(chainId);
   if (!address) {
     throw new Error(
-      `ProtectedPaymentEscrow is not deployed on chain ${CELO_CHAIN_ID}.`,
+      `ProtectedPaymentEscrow is not deployed on chain ${chainId}.`,
     );
   }
   return address;
@@ -27,24 +48,31 @@ export function getEscrowContractAddress(): `0x${string}` {
  * Returns a full wagmi contract config object suitable for use with
  * useReadContract / useWriteContract.
  */
-export function getEscrowContractConfig() {
+export function getEscrowContractConfig(
+  chain: EscrowChainReference = celoChain,
+) {
+  const chainId = resolveChainId(chain);
   return {
-    address: getEscrowContractAddress(),
+    address: getEscrowContractAddress(chainId),
     abi: protectedPaymentEscrowABI,
-    chainId: CELO_CHAIN_ID,
+    chainId,
   } as const;
 }
 
 /**
  * Returns a wagmi chain config for the escrow deployment.
  */
-export function getEscrowChain(): Chain {
-  return celoChain;
+export function getEscrowChain(
+  chain: EscrowChainReference = celoChain,
+): Chain {
+  return resolveChain(chain);
 }
 
 /**
  * Returns the escrow contract's chain ID.
  */
-export function getEscrowChainId(): number {
-  return celoChain.id;
+export function getEscrowChainId(
+  chain: EscrowChainReference = celoChain,
+): number {
+  return resolveChainId(chain);
 }

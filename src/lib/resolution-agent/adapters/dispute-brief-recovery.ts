@@ -15,7 +15,10 @@
 import type { ResolutionAgent } from "../types";
 import type { ActionExecutionResult, LeaseContext } from "../worker/types";
 import type { ToolExecutionRow } from "../store/types";
-import type { DisputeBriefDependencies } from "./types";
+import {
+  validatePersistedSettlementProof,
+  type DisputeBriefDependencies,
+} from "./types";
 import { normalizeDisputeBriefResult } from "./dispute-brief-result";
 import {
   buildDisputeBriefInput,
@@ -49,10 +52,11 @@ export async function recoverPaidDisputeBrief(params: {
   }
 
   // ---- Step 2: Verify payment proof exists --------------------------------
-  if (!execution.settlement_tx_hash && !execution.payment_reference) {
+  const proofError = validatePersistedSettlementProof(execution);
+  if (proofError) {
     return {
       kind: "failed_recoverable",
-      reason: "No payment proof — cannot recover without proof of payment",
+      reason: proofError,
     };
   }
 

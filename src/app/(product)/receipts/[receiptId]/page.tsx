@@ -20,9 +20,9 @@ import PrintReceiptButton from "@/components/receipt/PrintReceiptButton";
 import type { ReceiptData } from "@/lib/receipt/types";
 
 // ---------------------------------------------------------------------------
-// /receipts/[receiptId] — FINAL SETTLEMENT RECEIPT (read-only, durable)
+// /receipts/[receiptId] — PAYMENT RECEIPT (read-only, durable)
 //
-// The settlement receipt of a released payment, composed from durable
+// The receipt of a payment in any escrow state, composed from durable
 // verified sources only: on-chain escrow state + release/evidence tx proofs,
 // verified evidence metadata, and the resolution agent's durable review
 // packet (incl. recorded QC-vs-verified-evidence inconsistencies).
@@ -31,14 +31,84 @@ import type { ReceiptData } from "@/lib/receipt/types";
 // Missing sources render as "Pending" — nothing is fabricated.
 // ---------------------------------------------------------------------------
 
-const accordStages: AccordStage[] = [
-  { label: "Terms", state: "completed" },
-  { label: "Funds", state: "completed" },
-  { label: "Delivery", state: "completed" },
-  { label: "Evidence", state: "completed" },
-  { label: "Resolution", state: "completed" },
-  { label: "Receipt", state: "completed" },
-];
+const accordStageLabels = [
+  "Terms",
+  "Funds",
+  "Delivery",
+  "Evidence",
+  "Resolution",
+  "Receipt",
+] as const;
+
+/** Keep the ledger line honest for both terminal and in-progress receipts. */
+function buildAccordStages(
+  escrowState: string | undefined,
+  finalState: string | undefined,
+): AccordStage[] {
+  const parsedState = Number(escrowState);
+  const state = Number.isFinite(parsedState)
+    ? parsedState
+    : {
+        Created: 0,
+        Funded: 1,
+        Accepted: 2,
+        "Delivery submitted": 3,
+        "Release requested": 4,
+        Released: 5,
+        Disputed: 6,
+        Cancelled: 7,
+        Resolved: 8,
+      }[finalState ?? ""] ?? -1;
+  const terminal =
+    finalState === "Released" ||
+    finalState === "Resolved" ||
+    finalState === "Cancelled" ||
+    state === 5 ||
+    state === 7 ||
+    state === 8;
+
+  // Index of the current stage. Terminal states complete the whole line;
+  // otherwise the contract state determines the next meaningful milestone.
+  const activeIndex = terminal
+    ? accordStageLabels.length
+    : state === 0
+      ? 1
+      : state === 1 || state === 2
+        ? 2
+        : 4;
+
+  return accordStageLabels.map((label, index) => ({
+    label,
+    state:
+      index < activeIndex
+        ? "completed"
+        : index === activeIndex
+          ? "active"
+          : "pending",
+  }));
+}
+
+function receiptActivityDate(
+  finalState: string | undefined,
+  releasedAt: string | null | undefined,
+  resolvedAt: string | null | undefined,
+  timestamps: {
+    cancelledAt?: string | null;
+    disputedAt?: string | null;
+    resolvedAt?: string | null;
+    releaseAt?: string | null;
+  } | undefined,
+): string | undefined {
+  if (finalState === "Cancelled") return timestamps?.cancelledAt ?? undefined;
+  if (finalState === "Disputed") return timestamps?.disputedAt ?? undefined;
+  return (
+    releasedAt ??
+    resolvedAt ??
+    timestamps?.resolvedAt ??
+    timestamps?.releaseAt ??
+    undefined
+  );
+}
 
 export default function ReceiptDetailPage() {
   const params = useParams<{ receiptId: string }>();
@@ -104,6 +174,12 @@ export default function ReceiptDetailPage() {
   const decision = receipt?.humanDecision;
   const audit = receipt?.audit;
   const links = audit?.explorerLinks;
+  const activityDate = receiptActivityDate(
+    pp?.finalState,
+    pp?.releasedAt,
+    pp?.resolvedAt,
+    audit?.timestamps,
+  );
 
   if (!data?.found || !receipt) {
     return (
@@ -111,8 +187,8 @@ export default function ReceiptDetailPage() {
         <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
           <Notice variant="info">
             <p className="text-[14px] leading-relaxed">
-              This settlement receipt is not available yet. Receipts appear
-              after a protected payment is released.
+              This settlement receipt is not available yet. It will appear once
+              the payment can be verified on-chain.
             </p>
           </Notice>
           <div className="mt-8 flex justify-center gap-3">
@@ -133,10 +209,18 @@ export default function ReceiptDetailPage() {
       label: "Evidence submission (Sepolia)",
       reference: ev?.submissionTxHash ?? undefined,
     },
-    {
-      label: "Release transaction (Sepolia)",
-      reference: decision?.txHash ?? undefined,
-    },
+    ...(pp?.finalState === "Released"
+      ? [{ label: "Release transaction (Sepolia)", reference: decision?.txHash ?? undefined }]
+      : []),
+    ...(links?.resolutionTransaction
+      ? [{ label: "Resolution transaction (Sepolia)", reference: links.resolutionTransaction }]
+      : []),
+    ...(links?.disputeTransaction
+      ? [{ label: "Dispute transaction (Sepolia)", reference: links.disputeTransaction }]
+      : []),
+    ...(links?.cancellationTransaction
+      ? [{ label: "Cancellation transaction (Sepolia)", reference: links.cancellationTransaction }]
+      : []),
     {
       label: "x402 QC settlement (Mainnet)",
       reference: qc?.settlementTxHash ?? undefined,
@@ -156,9 +240,15 @@ export default function ReceiptDetailPage() {
   ];
 
   const outcome =
-    pp?.finalState === "Released"
-      ? "Released to the worker"
-      : pp?.finalState ?? "Awaiting integration";
+    pp?.financialOutcome ??
+    (pp?.finalState === "Released" ? "Released to the worker" : pp?.finalState ?? "Awaiting integration");
+  const outcomeVariant =
+    pp?.finalState === "Released" ||
+    pp?.finalState === "Resolved"
+      ? "settled"
+      : pp?.finalState === "Disputed"
+        ? "disputed"
+        : "pending";
 
   return (
     <>
@@ -177,8 +267,8 @@ export default function ReceiptDetailPage() {
             <ReceiptHeader
               receiptTitle={`Settlement receipt — Payment #${pp?.paymentId ?? paymentIdStr}`}
               outcome={outcome}
-              outcomeVariant={pp?.finalState === "Released" ? "settled" : "pending"}
-              settlementDate={pp?.releasedAt ?? undefined}
+              outcomeVariant={outcomeVariant}
+              settlementDate={activityDate}
               paymentRef={`Payment #${pp?.paymentId ?? paymentIdStr} · ${pp?.network ?? ""}`}
               verificationStatus="Verified on-chain"
             />
@@ -189,15 +279,23 @@ export default function ReceiptDetailPage() {
                 Outcome
               </h3>
               <p className="mt-3 text-[15px] leading-relaxed text-ink">
-                {pp?.finalState === "Released" ? (
-                  <>
-                    The protected amount was released to the worker after the
-                    client approved the release. The resolution agent prepared
-                    the case; a person made the final decision.
-                  </>
-                ) : (
-                  "The settlement outcome will appear here once the payment is released."
-                )}
+                {pp?.financialOutcome === "Refunded to client"
+                  ? "The dispute was resolved with the protected amount returned to the client."
+                  : pp?.financialOutcome === "Partially resolved"
+                    ? "The dispute was resolved with the protected amount split between the client and worker."
+                    : pp?.financialOutcome === "Cancelled"
+                      ? "The payment was cancelled before it was funded."
+                      : pp?.financialOutcome === "Disputed — funds remain locked"
+                        ? "The payment is disputed and funds remain locked while awaiting a resolution."
+                        : pp?.financialOutcome === "Resolved"
+                          ? "The payment is resolved on-chain; allocation details are pending transaction proof."
+                        : pp?.financialOutcome === "Released to worker" &&
+                            pp?.finalState === "Resolved"
+                          ? "The dispute was resolved with the protected amount released to the worker."
+                          : pp?.finalState === "Released"
+                            ? "The protected amount was released to the worker after the client approved the release. The resolution agent prepared the case; a person made the final decision."
+                            : "The payment has not reached a final settlement outcome."
+                }
               </p>
               <p className="mt-2 text-[13px] text-muted">
                 {receipt.productModel}
@@ -211,12 +309,16 @@ export default function ReceiptDetailPage() {
                 clientAllocation={
                   pp?.finalState === "Released"
                     ? "0.00"
-                    : undefined
+                    : pp?.finalState === "Resolved"
+                      ? decision?.clientAmountHuman ?? undefined
+                      : undefined
                 }
                 workerAllocation={
                   pp?.finalState === "Released"
                     ? pp?.amountHuman?.split(" ")[0] ?? undefined
-                    : undefined
+                    : pp?.finalState === "Resolved"
+                      ? decision?.workerAmountHuman ?? undefined
+                      : undefined
                 }
               />
               <ParticipantSummary
@@ -243,7 +345,9 @@ export default function ReceiptDetailPage() {
             </div>
 
             <div className="mt-8">
-              <AccordLine stages={accordStages} />
+              <AccordLine
+                stages={buildAccordStages(pp?.escrowState, pp?.finalState)}
+              />
             </div>
 
             {/* Evidence record */}
@@ -281,7 +385,12 @@ export default function ReceiptDetailPage() {
                 <Row label="QC request" value={qc?.executionRequestHash ?? null} mono breakAll />
                 <Row label="Decision" value={decision?.decision ?? null} />
                 <Row label="Decision authority" value={decision?.authority ?? null} />
-                <Row label="Release tx" value={decision?.txHash ?? null} mono breakAll />
+                <Row
+                  label={pp?.finalState === "Resolved" ? "Resolution tx" : "Release tx"}
+                  value={decision?.txHash ?? null}
+                  mono
+                  breakAll
+                />
                 <Row label="Final recipient" value={decision?.finalRecipient ?? null} mono breakAll />
                 <Row label="Outcome" value={decision?.outcome ?? null} />
               </dl>
@@ -313,15 +422,30 @@ export default function ReceiptDetailPage() {
             <div className="mt-8">
               <ReviewResult
                 finalRuling={
-                  pp?.finalState === "Released"
-                    ? "Released — approved by the client"
-                    : undefined
+                  pp?.financialOutcome === "Refunded to client"
+                    ? "Refunded to the client — dispute resolved"
+                    : pp?.financialOutcome === "Partially resolved"
+                      ? "Partially resolved"
+                      : pp?.financialOutcome === "Released to worker" &&
+                          pp?.finalState === "Resolved"
+                        ? "Released to the worker — dispute resolved"
+                        : pp?.finalState === "Released"
+                          ? "Released — approved by the client"
+                          : pp?.finalState === "Cancelled"
+                            ? "Cancelled — unfunded payment"
+                            : pp?.finalState === "Disputed"
+                              ? "Disputed — awaiting resolution"
+                              : pp?.finalState
                 }
                 reviewerCount={undefined}
                 reviewNote={
                   pp?.finalState === "Released"
                     ? "The agent prepared the case. A person made the final decision."
-                    : undefined
+                    : pp?.finalState === "Resolved"
+                      ? "The escrow owner resolved the dispute on-chain."
+                      : pp?.finalState === "Disputed"
+                        ? "Funds remain in escrow until the dispute is resolved."
+                        : undefined
                 }
               />
             </div>
@@ -348,6 +472,15 @@ export default function ReceiptDetailPage() {
                   ) : null}
                   {links.x402SettlementTransaction ? (
                     <AuditLink label="x402 QC settlement (Mainnet)" href={links.x402SettlementTransaction} />
+                  ) : null}
+                  {links.disputeTransaction ? (
+                    <AuditLink label="Dispute transaction (Sepolia)" href={links.disputeTransaction} />
+                  ) : null}
+                  {links.resolutionTransaction ? (
+                    <AuditLink label="Resolution transaction (Sepolia)" href={links.resolutionTransaction} />
+                  ) : null}
+                  {links.cancellationTransaction ? (
+                    <AuditLink label="Cancellation transaction (Sepolia)" href={links.cancellationTransaction} />
                   ) : null}
                   {links.escrowContract ? (
                     <AuditLink label="Escrow contract" href={links.escrowContract} />

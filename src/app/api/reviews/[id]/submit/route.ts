@@ -7,11 +7,18 @@
 
 import { NextResponse } from "next/server";
 import { requireReviewer } from "@/lib/reviewer/auth";
-import { getDecisionsForPayment, submitDecision, supersedeDecision } from "@/lib/reviewer/store";
+import {
+  getDecisionsForPayment,
+  getReviewerBindingMismatches,
+  normalizeEscrowPaymentId,
+  submitDecision,
+  supersedeDecision,
+  type ReviewerOnchainBinding,
+} from "@/lib/reviewer/store";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
-import { getEscrowAddress as getEscrowContractAddress } from "@/lib/contracts/addresses";
+import { CELO_MAINNET_CHAIN_ID, CELO_SEPOLIA_CHAIN_ID } from "@/lib/web3/chains";
+import { getEscrowChain, getEscrowContractAddress } from "@/lib/contracts/config";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { parsePaymentData } from "@/lib/contracts/types";
 import { z } from "zod";
@@ -20,6 +27,53 @@ const submitSchema = z.object({
   decisionId: z.string().uuid(),
   supersedePrevious: z.boolean().optional(),
 });
+
+function getRpcUrl(chainId: number): string {
+  if (chainId === CELO_MAINNET_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || "https://forno.celo.org";
+  }
+  if (chainId === CELO_SEPOLIA_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+      process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+      "https://forno.celo-sepolia.celo-testnet.org";
+  }
+  throw new Error(`Unsupported escrow chain ${chainId}.`);
+}
+
+async function readLiveEscrowBinding(
+  escrowPaymentId: string,
+  chainId: number,
+): Promise<ReviewerOnchainBinding> {
+  const contractAddress = getEscrowContractAddress(chainId);
+  const client = createPublicClient({
+    chain: getEscrowChain(chainId),
+    transport: http(getRpcUrl(chainId)),
+  });
+  const raw = await client.readContract({
+    address: contractAddress,
+    abi: protectedPaymentEscrowABI,
+    functionName: "getPayment",
+    args: [BigInt(escrowPaymentId)],
+  });
+  const pd = parsePaymentData(raw as Parameters<typeof parsePaymentData>[0]);
+
+  // getPayment is called with the canonical numeric ID, but verify the
+  // returned ID as well so an RPC/provider response can never be rebound.
+  if (pd.id.toString() !== escrowPaymentId) {
+    throw new Error("Live escrow payment ID differs from the stored escrow_payment_id.");
+  }
+
+  return {
+    chainId,
+    contractAddress,
+    escrowPaymentId: pd.id.toString(),
+    client: pd.client,
+    worker: pd.worker,
+    amount: pd.amount.toString(),
+    token: pd.token,
+    state: pd.state,
+  };
+}
 
 export async function POST(
   request: Request,
@@ -78,7 +132,7 @@ export async function POST(
     const sb = getSupabaseClient();
     const { data: payment } = await sb
       .from("x402_payments")
-      .select("escrow_payment_id, amount_atomic, payer_address, pay_to_address")
+      .select("escrow_payment_id, chain_id")
       .eq("payment_identifier", paymentId)
       .maybeSingle();
 
@@ -86,126 +140,105 @@ export async function POST(
       return NextResponse.json({ error: "Payment record not found." }, { status: 404 });
     }
 
-    // Verify on-chain state
+    const escrowPaymentId = normalizeEscrowPaymentId(payment.escrow_payment_id);
+    if (escrowPaymentId === null) {
+      return NextResponse.json({
+        error: "Stored escrow_payment_id is missing or not a numeric on-chain payment ID.",
+      }, { status: 409 });
+    }
+
+    const chainId = typeof payment.chain_id === "number" ? payment.chain_id : Number(payment.chain_id);
+    if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+      return NextResponse.json({ error: "Stored escrow chain ID is invalid." }, { status: 409 });
+    }
+
+    // Verify on-chain state and derive all escrow identity fields from the
+    // live contract. x402 service amount/payTo values are deliberately not
+    // treated as the escrow amount or worker.
     try {
-      const rpcUrl = process.env.NEXT_PUBLIC_CELO_RPC_URL || "https://forno.celo-sepolia.celo-testnet.org";
-      const client = createPublicClient({ chain: celoSepolia, transport: http(rpcUrl) });
-      const escrow = getEscrowContractAddress(11142220);
+      const binding = await readLiveEscrowBinding(escrowPaymentId, chainId);
 
-      if (escrow && payment.escrow_payment_id) {
-        const raw = await client.readContract({
-          address: escrow,
-          abi: protectedPaymentEscrowABI,
-          functionName: "getPayment",
-          args: [BigInt(payment.escrow_payment_id)],
-        });
-        const pd = parsePaymentData(raw as Parameters<typeof parsePaymentData>[0]);
+      if (binding.state !== "Disputed") {
+        return NextResponse.json({
+          error: `On-chain payment state is "${binding.state}". Only Disputed payments can receive final reviewer decisions.`,
+        }, { status: 409 });
+      }
 
-        // Validate payment still exists and is in a disputable state
-        const disputableStates = ["Funded", "Accepted", "DeliverySubmitted", "ReleaseRequested", "Disputed"];
-        if (!disputableStates.includes(pd.state)) {
-          return NextResponse.json({
-            error: `On-chain payment state is "${pd.state}", which is not currently disputable.`,
-          }, { status: 409 });
-        }
+      // A draft may be completely unbound. Any pre-existing binding, however,
+      // must match the live escrow exactly; this catches stale or tampered
+      // client, worker, amount, token, chain, contract, and ID values.
+      const bindingMismatches = getReviewerBindingMismatches(targetDecision, binding);
+      if (bindingMismatches.length > 0) {
+        return NextResponse.json({
+          error: "Persisted reviewer escrow binding does not match live on-chain data.",
+          fields: bindingMismatches,
+        }, { status: 409 });
+      }
 
-        // Validate amount matches
-        if (pd.amount.toString() !== payment.amount_atomic) {
-          return NextResponse.json({
-            error: "On-chain amount differs from stored case data. Review cannot proceed.",
-          }, { status: 409 });
-        }
+      // --- Race safety: check for existing ready_for_execution decisions ---
+      // The migration also backs this up with a partial unique index.
+      const { data: existingReady } = await sb
+        .from("reviewer_decisions")
+        .select("id, reviewer_address")
+        .eq("payment_identifier", paymentId)
+        .eq("decision_status", "ready_for_execution")
+        .maybeSingle();
 
-        // Take on-chain snapshot
-        const snapshot = {
-          id: pd.id.toString(),
-          client: pd.client,
-          worker: pd.worker,
-          amount: pd.amount.toString(),
-          token: pd.token,
-          state: pd.state,
-          verifiedAt: new Date().toISOString(),
-        };
+      if (existingReady && existingReady.id !== decisionId) {
+        return NextResponse.json({
+          error: "Another reviewer has already submitted a final decision for this payment.",
+          existingDecisionId: existingReady.id,
+        }, { status: 409 });
+      }
 
-        // Supersede previous decisions if requested
-        if (supersedePrevious) {
-          for (const d of decisions) {
-            if (d.id !== decisionId && (d.decision_status === "submitted" || d.decision_status === "ready_for_execution")) {
-              const newDraftInput = {
-                payment_identifier: paymentId,
-                reviewer_address: d.reviewer_address,
-                decision: d.decision as "release_to_worker" | "refund_to_client" | "partial_resolution" | "needs_more_evidence",
-                rationale: d.rationale,
-                evidence_notes: d.evidence_notes ?? undefined,
-                conditions: d.conditions ?? undefined,
-                client_amount: d.client_amount ?? undefined,
-                worker_amount: d.worker_amount ?? undefined,
-              };
-              await supersedeDecision(d.id, reviewerAddress, newDraftInput);
-            }
+      // Supersede previous decisions only after all live identity checks pass.
+      if (supersedePrevious) {
+        for (const d of decisions) {
+          if (d.id !== decisionId && (d.decision_status === "submitted" || d.decision_status === "ready_for_execution")) {
+            const newDraftInput = {
+              payment_identifier: paymentId,
+              reviewer_address: d.reviewer_address,
+              decision: d.decision as "release_to_worker" | "refund_to_client" | "partial_resolution" | "needs_more_evidence",
+              rationale: d.rationale,
+              evidence_notes: d.evidence_notes ?? undefined,
+              conditions: d.conditions ?? undefined,
+              client_amount: d.client_amount ?? undefined,
+              worker_amount: d.worker_amount ?? undefined,
+            };
+            await supersedeDecision(d.id, reviewerAddress, newDraftInput);
           }
         }
-
-        // --- Race safety: check for existing ready_for_execution decisions ---
-        // Only one non-superseded ready_for_execution decision per payment
-        const { data: existingReady } = await sb
-          .from("reviewer_decisions")
-          .select("id, reviewer_address")
-          .eq("payment_identifier", paymentId)
-          .eq("decision_status", "ready_for_execution")
-          .maybeSingle();
-
-        if (existingReady && existingReady.id !== decisionId) {
-          return NextResponse.json({
-            error: "Another reviewer has already submitted a final decision for this payment.",
-            existingDecisionId: existingReady.id,
-          }, { status: 409 });
-        }
-
-        // --- Race safety: verify on-chain state still disputed ---
-        // State 6 = Disputed. Only disputed payments should receive final decisions.
-        if (pd.state !== "Disputed") {
-          return NextResponse.json({
-            error: `On-chain payment state is "${pd.state}". Only Disputed payments can receive final reviewer decisions.`,
-          }, { status: 409 });
-        }
-
-        // --- Race safety: verify client and worker match stored data ---
-        if (pd.client.toLowerCase() !== (payment.payer_address as string).toLowerCase()) {
-          return NextResponse.json({
-            error: "On-chain client address differs from stored case data.",
-          }, { status: 409 });
-        }
-
-        // Save onchain snapshot to the decision
-        await sb.from("reviewer_decisions")
-          .update({ onchain_snapshot: snapshot })
-          .eq("id", decisionId);
-
-        // Submit the decision
-        const submitted = await submitDecision(decisionId, reviewerAddress);
-
-        if (!submitted) {
-          return NextResponse.json({ error: "Failed to submit decision." }, { status: 500 });
-        }
-
-        console.log(`[reviewer] Decision ${decisionId} submitted by ${reviewerAddress} for payment ${paymentId}`);
-
-        return NextResponse.json({
-          success: true,
-          decision: submitted,
-          message: "Decision submitted. It is now ready_for_execution. No funds have been moved.",
-        });
       }
+
+      // Persist the binding and ready status in one conditional update. No
+      // transaction construction occurs anywhere in the submit path.
+      const submitted = await submitDecision(decisionId, reviewerAddress, binding);
+
+      if (!submitted) {
+        return NextResponse.json({ error: "Failed to submit decision." }, { status: 409 });
+      }
+
+      console.log(`[reviewer] Decision ${decisionId} submitted by ${reviewerAddress} for payment ${paymentId}`);
+
+      return NextResponse.json({
+        success: true,
+        decision: submitted,
+        message: "Decision submitted. It is now ready_for_execution. No funds have been moved.",
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown error";
       if (message.includes("PaymentNotFound")) {
         return NextResponse.json({ error: "On-chain payment not found." }, { status: 404 });
       }
+      if (/payment ID differs/i.test(message)) {
+        return NextResponse.json({ error: message }, { status: 409 });
+      }
+      if (message.includes("not deployed")) {
+        return NextResponse.json({ error: `Escrow configuration rejected: ${message}` }, { status: 503 });
+      }
       return NextResponse.json({ error: `On-chain validation failed: ${message}` }, { status: 502 });
     }
 
-    return NextResponse.json({ error: "Could not verify on-chain state." }, { status: 500 });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

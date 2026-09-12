@@ -112,7 +112,10 @@ function makeDeps(options: {
       kind: options.reserveKind ?? "reused",
       agentId: AGENT_ID,
       requestHash: REQ_HASH,
-      state: "reserved",
+      state:
+        options.reserveKind === "existing"
+          ? options.existing?.state ?? "reserved"
+          : "reserved",
     }),
     getAgentById: vi.fn().mockResolvedValue(
       makeAgent(),

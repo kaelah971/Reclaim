@@ -21,16 +21,17 @@
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
+import { celo, celoSepolia } from "viem/chains";
 import {
   canProcessPayments,
   validatePayToAddress,
   X402_NETWORK,
   X402_PAY_TO_ADDRESS,
   X402_USDC_ADDRESS,
-  X402_FACILITATOR_USDC_MAINNET,
   getDisputeBriefPriceAtomic,
+  fromAtomicUnits,
   generatePaymentId,
+  getX402ServicePaymentTerms,
 } from "@/lib/x402/config";
 import { parseDisputeBriefRequest } from "@/lib/x402/validation";
 import { RawPaymentStruct, parsePaymentData } from "@/lib/contracts/types";
@@ -45,11 +46,17 @@ import {
 import {
   buildPaymentRequiredHeader,
   verifyPaymentPayload,
+  getPaymentPayloadPayer,
   encodePaymentResponseHeader,
 } from "@/lib/x402/shared";
 import {
   getPaymentStore,
 } from "@/lib/x402/paymentStore.supabase";
+import {
+  assertNumericEscrowPaymentId,
+  assertSettlementReceiptPersistable,
+  PaymentStoreConflictError,
+} from "@/lib/x402/paymentStore";
 import { findTransferEvents } from "@/lib/x402/settlement";
 import {
   getSettlementProvider,
@@ -59,7 +66,7 @@ import type {
   PaymentPayload as X402PaymentPayload,
   PaymentRequirements,
 } from "@x402/core/types";
-import { computeCanonicalRequestHash, canonicalRequestIdentitySchema, SERVICE_IDENTIFIER, computeRequestHash } from "@/lib/x402/requestHash";
+import { computeCanonicalRequestHash, canonicalRequestIdentitySchema, SERVICE_IDENTIFIER } from "@/lib/x402/requestHash";
 import {
   decodeWalletAuthMessage,
   extractWalletAuth,
@@ -195,6 +202,7 @@ async function handleRecovery(
   recoveryTxHash: string,
   body: Record<string, unknown>,
   correlationId: string,
+  paymentTerms: ReturnType<typeof getX402ServicePaymentTerms>,
 ): Promise<Response> {
   const store = getPaymentStore();
   const txHash = recoveryTxHash as `0x${string}`;
@@ -219,6 +227,15 @@ async function handleRecovery(
     }, { status: 400 });
   }
 
+  try {
+    assertNumericEscrowPaymentId("reclaim-dispute-brief-v1", escrowPaymentIdStr);
+  } catch {
+    return jsonSafe({
+      correlationId,
+      error: "Invalid escrow paymentId.",
+    }, { status: 400 });
+  }
+
   // --- Step R3: Wallet authentication ---
   const { walletAddress, signedMessage, walletSignature } = extractWalletAuth(
     body as Record<string, unknown>,
@@ -239,8 +256,17 @@ async function handleRecovery(
     }, { status: 401 });
   }
 
+  // Resolve persisted x402 chain metadata before touching the RPC. Historical
+  // recovery has no row and remains explicitly local Sepolia.
+  const existingRecord = await store.findByTxHash(txHash);
+  const recoveryChainId = existingRecord?.record.metadata?.chainId ?? 11142220;
+  const recoveryChain = recoveryChainId === 42220 ? celo : celoSepolia;
+
   // --- Step R4: Verify txHash on-chain (strict) ---
-  const rpcUrl =
+  const rpcUrl = recoveryChainId === 42220
+    ? process.env.X402_MAINNET_RPC_URL || "https://forno.celo.org"
+    : process.env.NEXT_PUBLIC_CELO_RPC_URL || "https://forno.celo-sepolia.celo-testnet.org";
+  const escrowRpcUrl =
     process.env.NEXT_PUBLIC_CELO_RPC_URL ||
     "https://forno.celo-sepolia.celo-testnet.org";
 
@@ -248,7 +274,7 @@ async function handleRecovery(
 
   try {
     const client = createPublicClient({
-      chain: celoSepolia,
+      chain: recoveryChain,
       transport: http(rpcUrl),
     });
 
@@ -279,10 +305,28 @@ async function handleRecovery(
     }, { status: 404 });
   }
 
+  // Reuse persisted payment terms for modern recovery records. Historical
+  // records without metadata are explicitly interpreted as local Sepolia
+  // payments and must not inherit facilitator mainnet configuration.
+  const recoveryTerms = existingRecord?.record.metadata ?? (existingRecord
+    ? paymentTerms
+    : {
+        service: SERVICE_IDENTIFIER,
+        payerAddress: walletAddress,
+        payToAddress: X402_PAY_TO_ADDRESS || KNOWN_SETTLEMENT_PAY_TO,
+        network: X402_NETWORK,
+        chainId: 11142220,
+        tokenAddress: X402_USDC_ADDRESS,
+        tokenSymbol: "USDC" as const,
+        tokenDecimals: 6,
+        amountAtomic: getDisputeBriefPriceAtomic().toString(),
+        amountDisplay: fromAtomicUnits(getDisputeBriefPriceAtomic(), 6),
+      });
+
   // --- Step R5: Verify exact USDC Transfer event ---
-  const payTo = X402_PAY_TO_ADDRESS || KNOWN_SETTLEMENT_PAY_TO;
-  const usdcAddr = X402_USDC_ADDRESS;
-  const expectedAmount = getDisputeBriefPriceAtomic();
+  const payTo = recoveryTerms.payToAddress;
+  const usdcAddr = recoveryTerms.tokenAddress;
+  const expectedAmount = BigInt(recoveryTerms.amountAtomic);
 
   const matchingTransfers = findTransferEvents(
     receipt.logs,
@@ -321,7 +365,6 @@ async function handleRecovery(
   }
 
   // --- Step R7: Determine paid_pending_brief or legacy ---
-  const existingRecord = await store.findByTxHash(txHash);
 
   let escrowPaymentId: bigint;
   try {
@@ -339,25 +382,34 @@ async function handleRecovery(
     // =================================================================
 
     const existingPaymentId = existingRecord.paymentId;
+    const storedEscrowPaymentId = existingRecord.record.metadata?.escrowPaymentId;
 
-    if (existingPaymentId !== escrowPaymentIdStr) {
+    // New x402 records use a pay_* identifier while legacy records used the
+    // numeric escrow ID as their payment identifier. Accept both shapes, but
+    // always bind recovery to the persisted escrow metadata when available.
+    if (
+      (storedEscrowPaymentId && storedEscrowPaymentId !== escrowPaymentIdStr) ||
+      (!storedEscrowPaymentId && existingPaymentId !== escrowPaymentIdStr)
+    ) {
       return jsonSafe({
         correlationId,
         error: `Payment ID mismatch: transaction ${txHash} is bound to payment '${existingPaymentId}', not '${escrowPaymentIdStr}'.`,
       }, { status: 409 });
     }
 
-    const storedHash = await store.getRequestHash(escrowPaymentIdStr);
+    const storedHash = await store.getRequestHash(existingPaymentId);
     if (storedHash) {
-      const computedHash = computeRequestHash({
-        paymentId: escrowPaymentIdStr,
+      const computedHash = computeCanonicalRequestHash({
+        service: SERVICE_IDENTIFIER,
+        escrowPaymentId: escrowPaymentIdStr,
+        payer: verifiedFrom,
+        paymentNetwork: recoveryTerms.network,
+        asset: recoveryTerms.tokenAddress,
+        payTo: recoveryTerms.payToAddress,
+        amount: recoveryTerms.amountAtomic,
+        scheme: "exact",
         disputeReason,
         requestedOutcome,
-        buyerAddress: verifiedFrom,
-        network: X402_NETWORK,
-        serviceIdentifier: SERVICE_IDENTIFIER,
-        price: expectedAmount.toString(),
-        payToAddress: verifiedTo,
       });
 
       if (computedHash !== storedHash) {
@@ -369,7 +421,7 @@ async function handleRecovery(
     }
 
     // Consume txHash so it cannot be reused
-    await store.consumeTxHash(txHash, escrowPaymentIdStr, {
+    await store.consumeTxHash(txHash, existingPaymentId, {
       recoveredPayer: verifiedFrom,
       recoveredRequestHash: storedHash,
     });
@@ -383,18 +435,17 @@ async function handleRecovery(
       }, { status: 500 });
     }
 
-    let raw: RawPaymentStruct;
     try {
       const client = createPublicClient({
         chain: celoSepolia,
-        transport: http(rpcUrl),
+        transport: http(escrowRpcUrl),
       });
-      raw = (await client.readContract({
+      await client.readContract({
         address: escrowAddress,
         abi: protectedPaymentEscrowABI,
         functionName: "getPayment",
         args: [escrowPaymentId],
-      })) as unknown as RawPaymentStruct;
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown RPC error";
       return jsonSafe({
@@ -415,7 +466,7 @@ async function handleRecovery(
       true,
     );
     const brief = genResult.brief;
-    await store.recordBrief(escrowPaymentIdStr, brief as unknown as Parameters<typeof store.recordBrief>[1]);
+    await store.recordBrief(existingPaymentId, brief as unknown as Parameters<typeof store.recordBrief>[1]);
 
     return jsonSafe({
       correlationId,
@@ -458,8 +509,24 @@ async function handleRecovery(
     }, { status: 403 });
   }
 
-  // Mark txHash as consumed — legacy, one-time only
-  await store.consumeTxHash(txHash, "1", {
+  // Legacy recovery predates x402 UUIDs and therefore has no durable payment
+  // row to satisfy the consumed-transaction foreign key. Create a deterministic
+  // synthetic x402 record with complete metadata before consuming the txHash.
+  const legacyRecoveryPaymentId = `pay_legacy_${txHash.toLowerCase()}`;
+  await store.recordPending(legacyRecoveryPaymentId, {
+    service: SERVICE_IDENTIFIER,
+    payerAddress: verifiedFrom,
+    payToAddress: verifiedTo,
+    network: X402_NETWORK,
+    chainId: 11142220,
+    tokenAddress: usdcAddr,
+    tokenSymbol: "USDC",
+    tokenDecimals: 6,
+    amountAtomic: verifiedAmount,
+    amountDisplay: fromAtomicUnits(BigInt(verifiedAmount), 6),
+    escrowPaymentId: "1",
+  });
+  await store.consumeTxHash(txHash, legacyRecoveryPaymentId, {
     legacyRecovery: true,
     recoveredPayer: verifiedFrom,
   });
@@ -473,18 +540,17 @@ async function handleRecovery(
     }, { status: 500 });
   }
 
-  let raw: RawPaymentStruct;
   try {
     const client = createPublicClient({
       chain: celoSepolia,
-      transport: http(rpcUrl),
+      transport: http(escrowRpcUrl),
     });
-    raw = (await client.readContract({
+    await client.readContract({
       address: escrowAddress,
       abi: protectedPaymentEscrowABI,
       functionName: "getPayment",
       args: [escrowPaymentId],
-    })) as unknown as RawPaymentStruct;
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown RPC error";
     return jsonSafe({
@@ -505,6 +571,17 @@ async function handleRecovery(
     true,
   );
   const brief = genResult.brief;
+  await store.recordSettlementReceipt(legacyRecoveryPaymentId, {
+    txHash,
+    blockNumber: BigInt(receipt.blockNumber),
+    blockHash: receipt.blockHash,
+    status: "success",
+    from: verifiedFrom,
+    to: verifiedTo,
+    amount: verifiedAmount,
+    tokenAddress: usdcAddr,
+  });
+  await store.recordBrief(legacyRecoveryPaymentId, brief as unknown as Parameters<typeof store.recordBrief>[1]);
 
   return jsonSafe({
     correlationId,
@@ -580,6 +657,7 @@ async function handlePaymentRequest(
   // --- Step 0b: Initialise the active settlement provider ---
   const settlementProvider = getSettlementProvider();
   const isTrack2Mode = settlementProvider.isTrack2Qualifying;
+  const paymentTerms = getX402ServicePaymentTerms("reclaim-dispute-brief-v1");
 
   // --- Step 1: Check for payment signature header ---
   const paymentSignatureHeader = request.headers.get("payment-signature");
@@ -599,6 +677,7 @@ async function handlePaymentRequest(
         recoveryBody.recoveryTxHash,
         recoveryBody,
         correlationId,
+        paymentTerms,
       );
     }
 
@@ -620,9 +699,9 @@ async function handlePaymentRequest(
           escrowPaymentId: precheckPaymentId,
           payer: precheckPayer,
           paymentNetwork: settlementProvider.network,
-          asset: isTrack2Mode ? X402_FACILITATOR_USDC_MAINNET : X402_USDC_ADDRESS,
-          payTo: settlementProvider.payToAddress,
-          amount: getDisputeBriefPriceAtomic().toString(),
+           asset: paymentTerms.tokenAddress,
+           payTo: paymentTerms.payToAddress,
+           amount: paymentTerms.amountAtomic,
           scheme: "exact",
           disputeReason: recoveryBody.disputeReason,
           requestedOutcome: recoveryBody.requestedOutcome,
@@ -688,39 +767,22 @@ async function handlePaymentRequest(
 
   const paymentPayload = decoded.payload;
 
-  // --- Step 3: Structural validation of payment payload ---
-  // In local mode: full legacy Permit2 shape validation (from/to/token/signature).
-  // In facilitator mode: lightweight scheme/network check; the facilitator
-  // provider handles full cryptographic verification of the EIP-3009 payload.
-  if (!isTrack2Mode) {
-    const verification = verifyPaymentPayload(paymentPayload);
-    if (!verification.valid) {
-      console.warn(
-        `[x402][${correlationId}] Payment verification failed: ${verification.reason}`,
-      );
-      return jsonSafe(
-        {
-          correlationId,
-          status: 402,
-          error: `Payment verification failed: ${verification.reason}`,
-        },
-        { status: 402 },
-      );
-    }
-  } else {
-    // Facilitator mode: basic scheme and network check only
-    if (paymentPayload.scheme !== "exact") {
-      return jsonSafe(
-        { correlationId, status: 402, error: "Unsupported payment scheme for facilitator mode. Expected: exact." },
-        { status: 402 },
-      );
-    }
-    if (paymentPayload.network !== settlementProvider.network) {
-      return jsonSafe(
-        { correlationId, status: 402, error: `Network ${paymentPayload.network} not supported. Expected: ${settlementProvider.network}.` },
-        { status: 402 },
-      );
-    }
+  // --- Step 3: Validate all client payment fields against server-owned terms ---
+  // This is intentionally strict: the client cannot select an amount, token,
+  // network, recipient, or scheme.
+  const structuralVerification = verifyPaymentPayload(paymentPayload, paymentTerms);
+  if (!structuralVerification.valid) {
+    console.warn(
+      `[x402][${correlationId}] Payment verification failed: ${structuralVerification.reason}`,
+    );
+    return jsonSafe(
+      {
+        correlationId,
+        status: 402,
+        error: `Payment verification failed: ${structuralVerification.reason}`,
+      },
+      { status: 402 },
+    );
   }
 
   // --- Step 4: Idempotency check via payment identifier ---
@@ -728,92 +790,47 @@ async function handlePaymentRequest(
   const paymentIdHeader = request.headers.get("x-payment-id");
   const paymentId = paymentIdHeader || generatePaymentId();
 
-  // Check if this payment ID was already settled
-  const cachedResult = await store.getResult(paymentId);
-  if (cachedResult) {
-    console.log(
-      `[x402][${correlationId}] Payment ${paymentId} already settled (${
-        cachedResult.brief ? "with brief" : "without brief"
-      }) — returning cached result.`,
-    );
-    const response: Record<string, unknown> = {
-      correlationId,
-      settlement: cachedResult.receipt,
-      settlementMode: settlementProvider.identifier,
-      isTrack2Qualifying: isTrack2Mode,
-    };
-    if (cachedResult.brief) {
-      response.brief = cachedResult.brief;
-    } else {
-      response.brief = null;
-      response.recoveryNote =
-        "Settlement confirmed but brief generation was deferred. " +
-        "The service fee has been paid; the brief will be regenerated on retry.";
-    }
-    return jsonSafe(normalizeForJson(response), {
-      status: 200,
-      headers: {
-        "PAYMENT-RESPONSE": encodePaymentResponseHeader({
-          success: true,
-          transaction: cachedResult.receipt.txHash,
-          network: settlementProvider.network as `${string}:${string}`,
-          payer: cachedResult.receipt.from,
-        }),
-        "X-Payment-Id": paymentId,
-      },
-    });
-  }
-
-  // Check if this payment ID previously failed
-  const previousError = await store.getError(paymentId);
-  if (previousError) {
-    return errorResponse(
-      402,
-      `Payment ${paymentId} previously failed: ${previousError}. Generate a new payment.`,
-      correlationId,
-    );
-  }
-
-  // Mark as pending
-  await store.recordPending(paymentId);
-
   // --- Resolve payment data for both EIP-3009 (facilitator) and Permit2 (local) ---
   const isFacilitator = settlementProvider.identifier === "celo-facilitator";
   const x402PaymentData = paymentPayload.payment as unknown as Record<string, unknown>;
   const isEIP3009 = x402PaymentData != null && typeof x402PaymentData === "object" && "authorization" in x402PaymentData;
   const eipAuth = isEIP3009 ? (x402PaymentData.authorization as Record<string, unknown>) : null;
-  const resolvedToken = isEIP3009
-    ? X402_FACILITATOR_USDC_MAINNET
-    : (x402PaymentData.token as string);
-  const resolvedAmount = isEIP3009
-    ? String(eipAuth?.value ?? getDisputeBriefPriceAtomic().toString())
-    : (x402PaymentData.amount as string);
+  const resolvedToken = paymentTerms.tokenAddress;
+  const resolvedAmount = paymentTerms.amountAtomic;
 
   // --- Parse request body EARLY — needed for hash check before /verify ---
   let body: unknown;
   try {
     body = await request.clone().json();
   } catch {
-    await store.recordFailed(paymentId, "Malformed JSON body.");
     return errorResponse(400, "Malformed JSON body.", correlationId);
   }
 
   const bodyParseResult = parseDisputeBriefRequest(body);
   if (!bodyParseResult.success) {
-    await store.recordFailed(paymentId, "Request body validation failed.");
     return errorResponse(400, "Request body validation failed.", correlationId, bodyParseResult.errors);
   }
 
   const disputeRequest = bodyParseResult.data;
+
+  // Escrow identity is separate from the x402 payment identifier. It is
+  // persisted only after strict numeric validation.
+  try {
+    assertNumericEscrowPaymentId(SERVICE_IDENTIFIER, disputeRequest.paymentId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid escrow payment ID.";
+    return errorResponse(400, message, correlationId, {
+      paymentId: ["Must be a numeric escrow payment ID; x402 payment IDs are not escrow IDs."],
+    });
+  }
+  const escrowPaymentId = BigInt(disputeRequest.paymentId);
 
   // --- Compute canonical request hash BEFORE /verify ---
   // This enables duplicate-charge prevention: if the exact same request was
   // already paid, return the existing result without calling /verify or /settle.
   const escrowChainIdStr = "11142220";
   const escrowContractAddr = getEscrowContractAddress(11142220);
-  const receiptPayer = isEIP3009
-    ? (eipAuth?.from as string)
-    : (x402PaymentData.from as string);
+  const receiptPayer = getPaymentPayloadPayer(paymentPayload) || "";
 
   const canonicalIdentity = {
     service: SERVICE_IDENTIFIER,
@@ -832,49 +849,114 @@ async function handlePaymentRequest(
 
   const identityValidation = canonicalRequestIdentitySchema.safeParse(canonicalIdentity);
   if (!identityValidation.success) {
-    await store.recordFailed(paymentId, `Request identity validation: ${identityValidation.error.message}`);
     return errorResponse(422, `Invalid request: ${identityValidation.error.message}`, correlationId);
   }
 
   const computedRequestHash = computeCanonicalRequestHash(identityValidation.data);
-  await store.setRequestHash(paymentId, computedRequestHash);
 
-  // --- DUPLICATE-SETTLEMENT GATE: check BEFORE /verify ---
-  // If the same canonical request already has a settled payment, return it now.
-  // This prevents duplicate facilitator /verify and /settle calls.
-  const existingByHash = await store.findByRequestHash(computedRequestHash);
-  if (existingByHash) {
-    if (existingByHash.status === "settled" || existingByHash.status === "paid_pending_brief") {
-      console.log(
-        `[x402][${correlationId}] Request hash already paid as ${existingByHash.paymentId} — returning cached.`,
-      );
-      const recoveryNote = existingByHash.brief
-        ? undefined
-        : "Settlement confirmed but brief was deferred. The service fee has been paid.";
+  // A cached result is safe to replay only when this request has the same
+  // canonical identity as the original payment.
+  const storedRequestHash = await store.getRequestHash(paymentId);
+  if (storedRequestHash && storedRequestHash !== computedRequestHash) {
+    return errorResponse(409, "Payment ID is already bound to a different request.", correlationId);
+  }
+  const cachedResult = await store.getResult(paymentId);
+  if (cachedResult) {
+    const response: Record<string, unknown> = {
+      correlationId,
+      settlement: cachedResult.receipt,
+      settlementMode: settlementProvider.identifier,
+      isTrack2Qualifying: isTrack2Mode,
+      brief: cachedResult.brief ?? null,
+    };
+    if (!cachedResult.brief) {
+      response.recoveryNote =
+        "Settlement confirmed but brief generation was deferred. " +
+        "The service fee has been paid; the brief will be regenerated on retry.";
+    }
+    return jsonSafe(normalizeForJson(response), {
+      status: 200,
+      headers: {
+        "PAYMENT-RESPONSE": encodePaymentResponseHeader({
+          success: true,
+          transaction: cachedResult.receipt.txHash,
+          network: settlementProvider.network as `${string}:${string}`,
+          payer: cachedResult.receipt.from,
+        }),
+        "X-Payment-Id": paymentId,
+      },
+    });
+  }
 
-      return jsonSafe(normalizeForJson({
+  const previousError = await store.getError(paymentId);
+  if (previousError) {
+    return errorResponse(
+      402,
+      `Payment ${paymentId} previously failed: ${previousError}. Generate a new payment.`,
+      correlationId,
+    );
+  }
+
+  let pendingCreation;
+  try {
+    pendingCreation = await store.recordPending(paymentId, {
+      service: SERVICE_IDENTIFIER,
+      payerAddress: receiptPayer,
+      payToAddress: paymentTerms.payToAddress,
+      network: paymentTerms.network,
+      chainId: paymentTerms.chainId,
+      tokenAddress: paymentTerms.tokenAddress,
+      tokenSymbol: "USDC",
+      tokenDecimals: paymentTerms.tokenDecimals,
+      amountAtomic: paymentTerms.amountAtomic,
+      amountDisplay: paymentTerms.amountDisplay,
+      escrowPaymentId: disputeRequest.paymentId,
+      requestHash: computedRequestHash,
+      disputeReason: disputeRequest.disputeReason,
+      requestedOutcome: disputeRequest.requestedOutcome,
+      authorizationNonce: String((isEIP3009 ? eipAuth?.nonce : x402PaymentData.nonce) ?? ""),
+      authorizationDeadline: String((isEIP3009 ? eipAuth?.validBefore : x402PaymentData.deadline) ?? ""),
+    });
+  } catch (err) {
+    if (!(err instanceof PaymentStoreConflictError)) throw err;
+    const existing = await store.findByRequestHash(computedRequestHash);
+    if (existing?.receipt) {
+      return jsonSafe({
         correlationId,
-        paymentId: existingByHash.paymentId,
-        status: existingByHash.status,
+        paymentId: existing.paymentId,
+        status: existing.status,
         recoveredFromHash: true,
-        settlement: existingByHash.receipt,
-        brief: existingByHash.brief ?? null,
-        recoveryNote,
+        settlement: existing.receipt,
+        brief: existing.brief ?? null,
+      }, { status: 200, headers: { "X-Payment-Id": existing.paymentId } });
+    }
+    return errorResponse(409, existing
+      ? "An identical x402 request is already being settled."
+      : err.message, correlationId);
+  }
+
+  // The unique payment/request-hash constraint chooses one owner. A loser
+  // returns the existing result or an in-progress response and never calls a
+  // settlement provider.
+  if (!pendingCreation.created && pendingCreation.paymentId !== paymentId) {
+    const existing = pendingCreation.record;
+    if (existing.receipt) {
+      return jsonSafe({
+        correlationId,
+        paymentId: pendingCreation.paymentId,
+        status: existing.status,
+        recoveredFromHash: true,
+        settlement: existing.receipt,
+        brief: existing.brief ?? null,
         settlementMode: settlementProvider.identifier,
         isTrack2Qualifying: isTrack2Mode,
-      }), {
-        status: 200,
-        headers: {
-          "PAYMENT-RESPONSE": encodePaymentResponseHeader({
-            success: true,
-            transaction: existingByHash.receipt?.txHash ?? "",
-            network: settlementProvider.network as `${string}:${string}`,
-            payer: existingByHash.receipt?.from ?? "",
-          }),
-          "X-Payment-Id": existingByHash.paymentId,
-        },
-      });
+      }, { status: 200, headers: { "X-Payment-Id": pendingCreation.paymentId } });
     }
+    return errorResponse(409, "An identical x402 request is already being settled.", correlationId);
+  }
+
+  if (pendingCreation.record.state === "settlement_submitted") {
+    return errorResponse(409, "This x402 payment is already being settled. Retry after settlement confirmation.", correlationId);
   }
 
   // --- Step 5: Cryptographic verification via the active provider ---
@@ -886,14 +968,13 @@ async function handlePaymentRequest(
       `[x402][${correlationId}] Verifying payment via ${settlementProvider.identifier} (network: ${settlementProvider.network})...`,
     );
 
-    // Build PaymentRequirements from the provider's config and the client's payment.
-    // In celo-facilitator mode, include the USDC EIP-712 domain for EIP-3009 signing.
+    // Build PaymentRequirements from server-owned terms, never client amount.
     const verificationRequirements: PaymentRequirements = {
       scheme: "exact",
-      network: settlementProvider.network as `${string}:${string}`,
-      asset: resolvedToken,
-      amount: resolvedAmount,
-      payTo: settlementProvider.payToAddress,
+      network: paymentTerms.network as `${string}:${string}`,
+      asset: paymentTerms.tokenAddress,
+      amount: paymentTerms.amountAtomic,
+      payTo: paymentTerms.payToAddress,
       maxTimeoutSeconds: 300,
       extra: isFacilitator ? { name: "USDC", version: "2" } : {},
     };
@@ -908,6 +989,7 @@ async function handlePaymentRequest(
     const verifyResult = await settlementProvider.verifyPayment(
       x402PaymentPayload,
       verificationRequirements,
+      paymentTerms,
     );
 
     if (!verifyResult.valid) {
@@ -926,9 +1008,17 @@ async function handlePaymentRequest(
       );
     }
 
+    if (verifyResult.payer && (
+      !/^0x[0-9a-fA-F]{40}$/.test(verifyResult.payer) ||
+      verifyResult.payer.toLowerCase() !== receiptPayer.toLowerCase()
+    )) {
+      throw new Error("Payment verifier returned a payer different from the signed payment payload.");
+    }
+
     console.log(
       `[x402][${correlationId}] Verification succeeded. Payer: ${verifyResult.payer || "unknown"}`,
     );
+    await store.recordAuthorizationVerified(paymentId);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error(
@@ -942,18 +1032,20 @@ async function handlePaymentRequest(
     );
   }
 
-  // --- Step 7: Convert paymentId to bigint ---
-  let escrowPaymentId: bigint;
-  try {
-    escrowPaymentId = BigInt(disputeRequest.paymentId);
-  } catch {
-    await store.recordFailed(paymentId, "Invalid escrow paymentId format.");
-    return errorResponse(
-      400,
-      "Invalid paymentId format.",
-      correlationId,
-      { paymentId: ["Must be a valid numeric string"] },
-    );
+  // --- Step 7: Atomically claim the sole provider settlement attempt ---
+  const settlementClaim = await store.claimSettlement(paymentId, computedRequestHash);
+  if (!settlementClaim.claimed) {
+    if (settlementClaim.receipt) {
+      return jsonSafe({
+        correlationId,
+        paymentId,
+        status: settlementClaim.brief ? "settled" : "paid_pending_brief",
+        settlement: settlementClaim.receipt,
+        brief: settlementClaim.brief ?? null,
+        recovered: true,
+      });
+    }
+    return errorResponse(409, "This x402 payment is already being settled. Retry after settlement confirmation.", correlationId);
   }
 
   // --- Step 8: Read on-chain payment data ---
@@ -961,7 +1053,7 @@ async function handlePaymentRequest(
   try {
     const result = await readOnChainPayment(escrowPaymentId, correlationId);
     if (!result) {
-      await store.recordFailed(paymentId, `Escrow payment #${escrowPaymentId} not found.`);
+       await store.recordSettlementFailed(paymentId, `Escrow payment #${escrowPaymentId} not found.`);
       return errorResponse(
         404,
         `Payment #${escrowPaymentId.toString()} not found on-chain.`,
@@ -971,7 +1063,7 @@ async function handlePaymentRequest(
     rawPayment = result;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    await store.recordFailed(paymentId, `Failed to read payment data: ${message}`);
+    await store.recordSettlementFailed(paymentId, `Failed to read payment data: ${message}`);
     return errorResponse(
       500,
       `Failed to read payment data: ${message}`,
@@ -990,7 +1082,7 @@ async function handlePaymentRequest(
     "Disputed",
   ];
   if (!disputableStates.includes(paymentData.state)) {
-    await store.recordFailed(
+    await store.recordSettlementFailed(
       paymentId,
       `Payment state ${paymentData.state} is not disputable.`,
     );
@@ -1009,17 +1101,21 @@ async function handlePaymentRequest(
   let facilitatorReceipt: FacilitatorSettlementReceipt | undefined;
   try {
     console.log(
-      `[x402][${correlationId}] Executing on-chain settlement via ${settlementProvider.identifier} for ${paymentPayload.payment.amount} USDC...`,
+      `[x402][${correlationId}] Executing on-chain settlement via ${settlementProvider.identifier} for ${paymentTerms.amountAtomic} atomic USDC...`,
     );
 
-    // Build PaymentRequirements from the provider's config — matches verify step.
-    // Reuse the resolved token/amount from EIP-3009 or Permit2 detection above.
+    const beforeSettlementValidation = verifyPaymentPayload(paymentPayload, paymentTerms);
+    if (!beforeSettlementValidation.valid) {
+      throw new Error(`Payment changed before settlement: ${beforeSettlementValidation.reason}`);
+    }
+
+    // Rebuild the same server-owned requirement immediately before settlement.
     const settlementRequirements: PaymentRequirements = {
       scheme: "exact",
-      network: settlementProvider.network as `${string}:${string}`,
-      asset: resolvedToken,
-      amount: resolvedAmount,
-      payTo: settlementProvider.payToAddress,
+      network: paymentTerms.network as `${string}:${string}`,
+      asset: paymentTerms.tokenAddress,
+      amount: paymentTerms.amountAtomic,
+      payTo: paymentTerms.payToAddress,
       maxTimeoutSeconds: 300,
       extra: isFacilitator ? { name: "USDC", version: "2" } : {},
     };
@@ -1034,11 +1130,26 @@ async function handlePaymentRequest(
     const settleResult = await settlementProvider.settlePayment(
       x402SettlementPayload,
       settlementRequirements,
+      paymentTerms,
     );
 
     if (!settleResult.success) {
       const reason = settleResult.reason || "Settlement failed with no reason given";
       throw new Error(reason);
+    }
+
+    if (!/^0x[0-9a-fA-F]{64}$/.test(settleResult.txHash || "")) {
+      throw new Error("Settlement provider returned an incomplete transaction receipt.");
+    }
+    if (settleResult.receipt && (
+      !settleResult.receipt.settlementSuccess ||
+      settleResult.receipt.network !== paymentTerms.network ||
+      settleResult.receipt.token.toLowerCase() !== paymentTerms.tokenAddress.toLowerCase() ||
+      settleResult.receipt.payTo.toLowerCase() !== paymentTerms.payToAddress.toLowerCase() ||
+      settleResult.receipt.amount !== paymentTerms.amountAtomic ||
+      (settleResult.receipt.payer && settleResult.receipt.payer.toLowerCase() !== receiptPayer.toLowerCase())
+    )) {
+      throw new Error("Settlement provider receipt does not match the server-configured USDC terms.");
     }
 
     // Capture the facilitator receipt for audit trail (only in facilitator mode).
@@ -1048,18 +1159,16 @@ async function handlePaymentRequest(
 
     // Construct the SettlementReceipt from the provider result + payment details.
     // Use EIP-3009 authorization fields or Permit2 fields depending on payload shape.
-    const receiptFrom = isEIP3009
-      ? (eipAuth?.from as string)
-      : (x402PaymentData.from as string);
+    const receiptFrom = getPaymentPayloadPayer(paymentPayload) || "";
     settlementReceipt = {
       txHash: settleResult.txHash || "",
       blockNumber: BigInt(settleResult.blockNumber || 0),
       blockHash: "",
       status: "success" as const,
       from: receiptFrom,
-      to: settlementProvider.payToAddress,
-      amount: resolvedAmount,
-      tokenAddress: resolvedToken,
+      to: paymentTerms.payToAddress,
+      amount: paymentTerms.amountAtomic,
+      tokenAddress: paymentTerms.tokenAddress,
     };
 
     console.log(
@@ -1071,7 +1180,7 @@ async function handlePaymentRequest(
     console.error(
       `[x402][${correlationId}] Settlement failed: ${message}`,
     );
-    await store.recordFailed(paymentId, `Settlement failed: ${message}`);
+    await store.recordSettlementFailed(paymentId, `Settlement failed: ${message}`);
     return errorResponse(
       502,
       `Payment settlement failed: ${message}`,
@@ -1079,54 +1188,46 @@ async function handlePaymentRequest(
     );
   }
 
-  // --- Step 10b: IMMEDIATELY persist the settlement receipt ---
-  // Even if brief generation fails later, the settlement is recorded
-  // and the buyer's payment is acknowledged. The brief can be recovered
-  // or regenerated on a subsequent idempotent retry.
-  await store.recordSettlementReceipt(paymentId, settlementReceipt);
-
-  // --- Step 11: Verify settlement receipt integrity ---
-  if (settlementReceipt.status !== "success") {
-    await store.recordFailed(paymentId, "Settlement receipt status is not success.");
-    return errorResponse(
-      502,
-      "Settlement transaction did not succeed on-chain.",
-      correlationId,
-    );
-  }
-
-  if (!settlementReceipt.txHash) {
-    await store.recordFailed(paymentId, "Settlement receipt missing transaction hash.");
-    return errorResponse(
-      502,
-      "Settlement receipt is incomplete (missing transaction hash).",
-      correlationId,
-    );
-  }
-
-  // Verify the recipient is NOT the escrow contract
+  // --- Step 10b: Validate before persisting the settlement receipt ---
+  // An incomplete/reverted/provider-mismatched receipt must never become a
+  // paid record. This ordering is also important for durable idempotency.
   const escrowAddr = getEscrowContractAddress(11142220);
   if (!escrowAddr) {
-    await store.recordFailed(paymentId, "Escrow contract address not configured — cannot verify recipient safety.");
+    await store.recordSettlementFailed(paymentId, "Escrow contract address is not configured; settlement receipt safety check failed.");
     return errorResponse(
       500,
       "Escrow contract address is not configured. Settlement safety check failed.",
       correlationId,
     );
   }
+  try {
+    assertSettlementReceiptPersistable(settlementReceipt);
+    if (
+      settlementReceipt.to.toLowerCase() !== paymentTerms.payToAddress.toLowerCase() ||
+      settlementReceipt.tokenAddress.toLowerCase() !== paymentTerms.tokenAddress.toLowerCase() ||
+      settlementReceipt.amount !== paymentTerms.amountAtomic
+    ) {
+      throw new Error("Settlement receipt does not match the server-configured USDC terms.");
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Invalid settlement receipt";
+    await store.recordSettlementFailed(paymentId, `Settlement receipt rejected: ${message}`);
+    return errorResponse(502, `Settlement receipt rejected: ${message}`, correlationId);
+  }
+
   if (
     settlementReceipt.to.toLowerCase() === escrowAddr.toLowerCase()
   ) {
-    await store.recordFailed(
-      paymentId,
-      "Settlement paid the escrow contract — this is forbidden.",
-    );
     return errorResponse(
       500,
       "CRITICAL: Settlement paid the escrow contract instead of the service wallet.",
       correlationId,
     );
   }
+
+  // Persist only after all receipt checks pass. Mutation errors are allowed to
+  // fail the request; they must never be logged and ignored.
+  await store.recordSettlementReceipt(paymentId, settlementReceipt);
 
   // --- Step 12: Generate the dispute brief (AI with deterministic fallback) ---
   // ONLY reached after confirmed on-chain settlement. If generation throws,

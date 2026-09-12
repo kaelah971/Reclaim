@@ -1,4 +1,9 @@
-import { CELO_CHAIN_ID } from "@/lib/web3/chains";
+import type { Chain } from "viem/chains";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  CELO_SEPOLIA_CHAIN_ID,
+} from "@/lib/web3/chains";
 
 /**
  * Canonical deployed contract addresses per chain.
@@ -16,7 +21,7 @@ import { CELO_CHAIN_ID } from "@/lib/web3/chains";
  * - Record:    contracts/deployments/celo-sepolia.json
  */
 export const DEPLOYED_ADDRESSES = {
-  [11142220]: {
+  [CELO_SEPOLIA_CHAIN_ID]: {
     /** V2 — current canonical escrow with dispute resolution. */
     protectedPaymentEscrow:
       "0x1A1CA38D6ac538d491A5c0db2Ed7FDDC3AeC709F" as `0x${string}`,
@@ -24,18 +29,30 @@ export const DEPLOYED_ADDRESSES = {
     protectedPaymentEscrowV1:
       "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79" as `0x${string}`,
   },
+  [CELO_MAINNET_CHAIN_ID]: {
+    // Deliberately unset until the P3 mainnet deployment is broadcast.
+    protectedPaymentEscrow: undefined,
+  },
 } as const;
 
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
-/**
- * Optional environment override for the escrow address. Falls back to the
- * canonical deployed address for the active chain when unset or malformed.
- */
+/** Optional per-chain environment overrides; malformed values are ignored. */
 const ENV_ESCROW_ADDRESS =
   process.env.NEXT_PUBLIC_PROTECTED_PAYMENT_ESCROW_ADDRESS;
+const ENV_MAINNET_ESCROW_ADDRESS =
+  process.env.NEXT_PUBLIC_CELO_MAINNET_PROTECTED_PAYMENT_ESCROW_ADDRESS;
 
-export function getEscrowAddress(chainId: number): `0x${string}` | undefined {
+type ChainReference = Chain | number;
+
+function resolveChainId(chain: ChainReference): number {
+  return typeof chain === "number" ? chain : chain.id;
+}
+
+export function getEscrowAddress(
+  chain: ChainReference,
+): `0x${string}` | undefined {
+  const chainId = resolveChainId(chain);
   if (
     chainId === CELO_CHAIN_ID &&
     ENV_ESCROW_ADDRESS &&
@@ -43,11 +60,18 @@ export function getEscrowAddress(chainId: number): `0x${string}` | undefined {
   ) {
     return ENV_ESCROW_ADDRESS as `0x${string}`;
   }
-  const chain = (
+  if (
+    chainId === CELO_MAINNET_CHAIN_ID &&
+    ENV_MAINNET_ESCROW_ADDRESS &&
+    ADDRESS_PATTERN.test(ENV_MAINNET_ESCROW_ADDRESS)
+  ) {
+    return ENV_MAINNET_ESCROW_ADDRESS as `0x${string}`;
+  }
+  const deployment = (
     DEPLOYED_ADDRESSES as Record<
       number,
-      { protectedPaymentEscrow: `0x${string}` }
+      { protectedPaymentEscrow?: `0x${string}` }
     >
   )[chainId];
-  return chain?.protectedPaymentEscrow;
+  return deployment?.protectedPaymentEscrow;
 }
