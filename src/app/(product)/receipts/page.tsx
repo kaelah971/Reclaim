@@ -1,18 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Button from "@/components/ui/Button";
 import ReceiptFilters, {
   type ReceiptFilterValue,
 } from "@/components/receipt/ReceiptFilters";
 import StatusBadge, { type BadgeVariant } from "@/components/ui/StatusBadge";
 import Notice from "@/components/ui/Notice";
+import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import {
   useClientPaymentIds,
   useWorkerPaymentIds,
 } from "@/hooks/contracts";
+import { CELO_CHAIN_ID, getChainName } from "@/lib/web3/chains";
+import { getPaymentTokenConfig } from "@/lib/web3/tokens";
+import { CELO_MAINNET_CHAIN_ID } from "@/lib/web3/chains";
 import type { ReceiptData } from "@/lib/receipt/types";
 
 // ---------------------------------------------------------------------------
@@ -20,11 +25,16 @@ import type { ReceiptData } from "@/lib/receipt/types";
 //
 // Discovers canonical payment receipts for the connected wallet (client or
 // worker) using the SAME read model as /receipts/[receiptId]:
-//   GET /api/payments/[paymentId]/receipt
+//   GET /api/payments/[paymentId]/receipt[?chainId=]
 // Candidate payment IDs come from read-only contract calls
-// (getClientPaymentIds / getWorkerPaymentIds). A candidate is listed only
-// when the canonical receipt endpoint returns found:true — nothing is
-// fabricated, nothing is mutated.
+// (getClientPaymentIds / getWorkerPaymentIds) on the ACTIVE chain. A
+// candidate is listed only when the canonical receipt endpoint returns
+// found:true — nothing is fabricated, nothing is mutated.
+//
+// CHAIN-AWARE (P4.4b): ?chainId= mirrors the room pattern. Absent preserves
+// Sepolia default behavior; explicit 42220/11142220 threads into the
+// contract reads + receipt fetches + detail links. Malformed or unsupported
+// values fail closed (no silent fallback, no receipts shown).
 // ---------------------------------------------------------------------------
 
 interface EligibleReceipt {
@@ -96,6 +106,24 @@ function formatReceiptDate(iso: string | null | undefined): string {
   });
 }
 
+/**
+ * Display token for a receipt chain: "USA₮" on Celo Mainnet, legacy symbol
+ * (USDC) elsewhere. Used for the card fallback when the API amount is
+ * missing; otherwise the canonical amountHuman from the receipt is shown
+ * with its technical symbol translated to the product display form.
+ */
+function displayCardAmount(
+  amountHuman: string | null | undefined,
+  chainId: number,
+): string {
+  const token = getPaymentTokenConfig(chainId);
+  const display = chainId === CELO_MAINNET_CHAIN_ID ? token.name : token.symbol;
+  if (!amountHuman) return `— ${display}`;
+  const parts = amountHuman.split(" ");
+  if (parts.length < 2) return amountHuman;
+  return `${parts.slice(0, -1).join(" ")} ${display}`;
+}
+
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -121,10 +149,12 @@ function ReceiptCard({
   paymentId,
   data,
   userAddress,
+  chainQuery,
 }: {
   paymentId: string;
   data: ReceiptData;
   userAddress: string;
+  chainQuery: string;
 }) {
   const pp = data.receipt?.protectedPayment;
   const finalState = pp?.finalState ?? "Pending";
@@ -132,10 +162,13 @@ function ReceiptCard({
   const isClient =
     !!pp?.client && pp.client.toLowerCase() === userAddress.toLowerCase();
   const role = isClient ? "Client" : "Worker";
+  // Resolve the display chain from the verified receipt (eip155:ID) with the
+  // URL chain available via the card amount fallback path in the parent.
+  const network = pp?.network ?? null;
 
   return (
     <Link
-      href={`/receipts/${paymentId}`}
+      href={`/receipts/${paymentId}${chainQuery}`}
       className="block rounded-[--radius-card] border border-border bg-surface px-6 py-5 transition-colors hover:border-primary/30 hover:bg-input/50"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -144,7 +177,9 @@ function ReceiptCard({
             Payment #{paymentId}
           </span>
           <span className="font-[family-name:var(--font-georama)] text-[15px] font-semibold text-ink">
-            {pp?.amountHuman ?? "— USDC"}
+            {pp?.amountHuman
+              ? displayCardAmount(pp.amountHuman, chainIdFromReceipt(pp.chainId))
+              : displayCardAmount(null, CELO_CHAIN_ID)}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -157,6 +192,18 @@ function ReceiptCard({
           </div>
         </div>
       </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        {network ? (
+          <span className="text-[12px] uppercase tracking-[0.08em] text-muted">
+            {network}
+          </span>
+        ) : null}
+        {pp?.chainId ? (
+          <span className="font-[family-name:var(--font-ibm-plex-mono)] text-[12px] text-muted">
+            {pp.chainId}
+          </span>
+        ) : null}
+      </div>
       {outcome && outcome !== finalState ? (
         <p className="mt-2 text-[13px] text-muted">{outcome}</p>
       ) : null}
@@ -164,29 +211,73 @@ function ReceiptCard({
   );
 }
 
+/** Parse "eip155:42220" → 42220; unknown → Sepolia default for display only. */
+function chainIdFromReceipt(chainId: string | undefined): number {
+  if (!chainId) return CELO_CHAIN_ID;
+  const match = chainId.match(/^eip155:(\d+)$/);
+  if (!match) return CELO_CHAIN_ID;
+  const parsed = Number(match[1]);
+  return Number.isSafeInteger(parsed) ? parsed : CELO_CHAIN_ID;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
 export default function ReceiptsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <ReceiptRowSkeleton key={i} />
+            ))}
+          </div>
+        </div>
+      }
+    >
+      <ReceiptsContent />
+    </Suspense>
+  );
+}
+
+function ReceiptsContent() {
+  const searchParams = useSearchParams();
   const { address, isConnected } = useWalletState();
   const [activeFilter, setActiveFilter] = useState<ReceiptFilterValue>("all");
   const [eligible, setEligible] = useState<EligibleReceipt[]>([]);
   const [loadingReceipts, setLoadingReceipts] = useState(false);
+
+  // ---- Chain resolution from ?chainId= (mirrors the room pattern) ----
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const isChainInvalid = chainResolution.status === "invalid";
+  const chainInvalidRaw =
+    chainResolution.status === "invalid" ? chainResolution.raw : "";
+  const explicitChainId =
+    chainResolution.status === "explicit" ? chainResolution.chainId : undefined;
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+  const chainDisplayName = getChainName(activeChainId);
 
   const {
     data: clientIds,
     isLoading: clientLoading,
     isError: clientError,
     refetch: refetchClient,
-  } = useClientPaymentIds(isConnected ? address : undefined);
+  } = useClientPaymentIds(isConnected ? address : undefined, activeChainId);
 
   const {
     data: workerIds,
     isLoading: workerLoading,
     isError: workerError,
     refetch: refetchWorker,
-  } = useWorkerPaymentIds(isConnected ? address : undefined);
+  } = useWorkerPaymentIds(isConnected ? address : undefined, activeChainId);
 
   const allPaymentIds = useMemo(() => {
     const seen = new Set<string>();
@@ -211,7 +302,7 @@ export default function ReceiptsPage() {
       // Yield first so no state is set synchronously within the effect.
       await Promise.resolve();
       if (cancelled) return;
-      if (!isConnected || allPaymentIds.length === 0) {
+      if (!isConnected || isChainInvalid || allPaymentIds.length === 0) {
         setEligible([]);
         setLoadingReceipts(false);
         return;
@@ -219,7 +310,7 @@ export default function ReceiptsPage() {
       setLoadingReceipts(true);
       const results = await Promise.allSettled(
         allPaymentIds.map(async (id) => {
-          const res = await fetch(`/api/payments/${id}/receipt`);
+          const res = await fetch(`/api/payments/${id}/receipt${chainQuery}`);
           if (!res.ok) throw new Error(`Failed to load receipt (HTTP ${res.status})`);
           const json = (await res.json()) as ReceiptData;
           return { paymentId: id, data: json } as EligibleReceipt;
@@ -245,7 +336,7 @@ export default function ReceiptsPage() {
     return () => {
       cancelled = true;
     };
-  }, [isConnected, allPaymentIds]);
+  }, [isConnected, isChainInvalid, allPaymentIds, chainQuery]);
 
   const idsLoading = clientLoading || workerLoading;
   const idsError = clientError || workerError;
@@ -260,6 +351,28 @@ export default function ReceiptsPage() {
     [eligible, activeFilter],
   );
 
+  // ---- Fail closed on malformed/unsupported ?chainId= ----
+  if (isChainInvalid) {
+    return (
+      <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
+        <div className="flex flex-col items-center justify-center gap-4 py-14 text-center">
+          <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Unsupported network
+          </h1>
+          <p className="text-[15px] text-muted">
+            This receipts link uses an unsupported network (chainId
+            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+            (42220) and Celo Sepolia (11142220). Ask the sender for a link
+            with a supported chainId.
+          </p>
+          <Link href="/receipts">
+            <Button variant="secondary">Return to receipts</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
       <div>
@@ -268,6 +381,7 @@ export default function ReceiptsPage() {
         </h1>
         <p className="mt-1 text-[15px] text-muted">
           Plain-language records of protected payments from terms through outcome.
+          {explicitChainId !== undefined ? ` Showing ${chainDisplayName}.` : null}
         </p>
       </div>
 
@@ -302,6 +416,7 @@ export default function ReceiptsPage() {
                     paymentId={r.paymentId}
                     data={r.data}
                     userAddress={address!}
+                    chainQuery={chainQuery}
                   />
                 ))}
               </div>

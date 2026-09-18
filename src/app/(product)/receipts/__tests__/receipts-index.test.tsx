@@ -14,6 +14,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(),
   Link: ({ href, children }: { href: string; children: React.ReactNode }) => (
     <a href={href}>{children}</a>
   ),

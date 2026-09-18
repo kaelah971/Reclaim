@@ -1,8 +1,9 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSignMessage } from "wagmi";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import LoadingSkeleton from "@/components/ui/LoadingSkeleton";
@@ -17,7 +18,19 @@ import TransactionReference from "@/components/receipt/TransactionReference";
 import type { TransactionRef } from "@/components/receipt/TransactionReference";
 import VerificationSummary from "@/components/receipt/VerificationSummary";
 import PrintReceiptButton from "@/components/receipt/PrintReceiptButton";
+import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
+import { useWalletState } from "@/hooks/wallet/useWalletState";
 import type { ReceiptData } from "@/lib/receipt/types";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  getChainName,
+} from "@/lib/web3/chains";
+import { getPaymentTokenConfig } from "@/lib/web3/tokens";
+import {
+  readPartyEvidence,
+  type PartyEvidence,
+} from "@/lib/evidence/partyRead";
 
 // ---------------------------------------------------------------------------
 // /receipts/[receiptId] — PAYMENT RECEIPT (read-only, durable)
@@ -25,10 +38,26 @@ import type { ReceiptData } from "@/lib/receipt/types";
 // The receipt of a payment in any escrow state, composed from durable
 // verified sources only: on-chain escrow state + release/evidence tx proofs,
 // verified evidence metadata, and the resolution agent's durable review
-// packet (incl. recorded QC-vs-verified-evidence inconsistencies).
+// packet.
 //
-// READ-ONLY BY DESIGN: no wallet connection, no signing, no mutation.
-// Missing sources render as "Pending" — nothing is fabricated.
+// PUBLIC VIEW IS SANITIZED (P4.3D): the canonical
+// GET /api/payments/[paymentId]/receipt endpoint returns hash-only evidence
+// (title/claim/date/pastedText → null, QC free-text arrays → []). Plaintext
+// delivery evidence is NEVER rendered publicly.
+//
+// PARTY VIEW (P4.4b): the connected client/worker may reveal delivery
+// plaintext via the SAME P4.3D wallet-challenge flow used by the Room
+// (src/lib/evidence/partyRead.ts → .../evidence/challenge +
+// .../evidence/plaintext). Anonymous and unrelated wallets stay redacted.
+// No second auth model is introduced here.
+//
+// CHAIN-AWARE (P4.4b): ?chainId= mirrors the room pattern. Absent preserves
+// Sepolia default behavior; explicit 42220/11142220 threads into the receipt
+// fetch + party challenge + explorer/token labels. Malformed or unsupported
+// values fail closed (no silent fallback, no receipt data shown).
+//
+// READ-ONLY BY DESIGN: no mutation. Missing sources render as "Pending" —
+// nothing is fabricated.
 // ---------------------------------------------------------------------------
 
 const accordStageLabels = [
@@ -39,6 +68,39 @@ const accordStageLabels = [
   "Resolution",
   "Receipt",
 ] as const;
+
+/**
+ * Display token for a receipt chain: "USA₮" on Celo Mainnet (technical
+ * contract symbol is USAT), legacy symbol (USDC) elsewhere. Mirrors the
+ * new-payment display rule so the receipt, wizard and preflight agree.
+ */
+export function getReceiptTokenDisplay(chainId: number): string {
+  const token = getPaymentTokenConfig(chainId);
+  return chainId === CELO_MAINNET_CHAIN_ID ? token.name : token.symbol;
+}
+
+/**
+ * Map a receipt amountHuman ("0.05 USAT" / "0.01 USDC") to its product
+ * display form ("0.05 USA₮" on Mainnet). The numeric amount is authoritative
+ * from the API; only the trailing technical symbol is translated.
+ */
+export function displayReceiptAmount(
+  amountHuman: string | null | undefined,
+  chainId: number,
+): string | undefined {
+  if (!amountHuman) return undefined;
+  const display = getReceiptTokenDisplay(chainId);
+  const parts = amountHuman.split(" ");
+  if (parts.length < 2) return amountHuman;
+  const numeric = parts.slice(0, -1).join(" ");
+  return `${numeric} ${display}`;
+}
+
+/** Numeric portion of an amountHuman string ("0.05 USA₮" → "0.05"). */
+function amountNumber(amountHuman: string | null | undefined): string | undefined {
+  if (!amountHuman) return undefined;
+  return amountHuman.split(" ")[0] ?? undefined;
+}
 
 /** Keep the ledger line honest for both terminal and in-progress receipts. */
 function buildAccordStages(
@@ -111,8 +173,40 @@ function receiptActivityDate(
 }
 
 export default function ReceiptDetailPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+          <LoadingSkeleton />
+        </div>
+      }
+    >
+      <ReceiptDetailContent />
+    </Suspense>
+  );
+}
+
+function ReceiptDetailContent() {
   const params = useParams<{ receiptId: string }>();
+  const searchParams = useSearchParams();
   const paymentIdStr = params?.receiptId ?? "";
+
+  // ---- Chain resolution from ?chainId= (mirrors the room pattern) ----
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const isChainInvalid = chainResolution.status === "invalid";
+  const chainInvalidRaw =
+    chainResolution.status === "invalid" ? chainResolution.raw : "";
+  const explicitChainId =
+    chainResolution.status === "explicit" ? chainResolution.chainId : undefined;
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  // Preserve-or-propagate ?chainId=: only when explicitly present (keeps
+  // default/Sepolia URLs byte-identical when absent).
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -121,11 +215,11 @@ export default function ReceiptDetailPage() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      if (!paymentIdStr) return;
+      if (!paymentIdStr || isChainInvalid) return;
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/payments/${paymentIdStr}/receipt`);
+        const res = await fetch(`/api/payments/${paymentIdStr}/receipt${chainQuery}`);
         if (!res.ok) throw new Error(`Failed to load receipt (HTTP ${res.status})`);
         const json = (await res.json()) as ReceiptData;
         if (!cancelled) setData(json);
@@ -140,7 +234,29 @@ export default function ReceiptDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [paymentIdStr]);
+  }, [paymentIdStr, chainQuery, isChainInvalid]);
+
+  // ---- Fail closed on malformed/unsupported ?chainId= ----
+  if (isChainInvalid) {
+    return (
+      <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+        <div className="flex flex-col items-center justify-center gap-4 text-center">
+          <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Unsupported network
+          </h1>
+          <p className="text-[15px] text-muted">
+            This receipt link uses an unsupported network (chainId
+            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+            (42220) and Celo Sepolia (11142220). Ask the sender for a link
+            with a supported chainId.
+          </p>
+          <Link href="/receipts">
+            <Button variant="secondary">Return to receipts</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -192,10 +308,10 @@ export default function ReceiptDetailPage() {
             </p>
           </Notice>
           <div className="mt-8 flex justify-center gap-3">
-            <Link href="/receipts">
+            <Link href={`/receipts${chainQuery}`}>
               <Button variant="secondary">Return to receipts</Button>
             </Link>
-            <Link href={`/payments/${paymentIdStr}`}>
+            <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
               <Button>Return to Payment Room</Button>
             </Link>
           </div>
@@ -204,22 +320,31 @@ export default function ReceiptDetailPage() {
     );
   }
 
+  // Chain-aware network label for escrow-chain transactions. The canonical
+  // network comes from the verified receipt; the URL chain is the fallback
+  // before the receipt loads (receipt is loaded here, so pp.network wins).
+  const escrowNetworkLabel =
+    pp?.network ?? getChainName(activeChainId);
+  const tokenDisplay = getReceiptTokenDisplay(activeChainId);
+  const amountDisplay = displayReceiptAmount(pp?.amountHuman, activeChainId);
+  const amountNumeric = amountNumber(amountDisplay ?? pp?.amountHuman);
+
   const txRefs: TransactionRef[] = [
     {
-      label: "Evidence submission (Sepolia)",
+      label: `Evidence submission (${escrowNetworkLabel})`,
       reference: ev?.submissionTxHash ?? undefined,
     },
     ...(pp?.finalState === "Released"
-      ? [{ label: "Release transaction (Sepolia)", reference: decision?.txHash ?? undefined }]
+      ? [{ label: `Release transaction (${escrowNetworkLabel})`, reference: decision?.txHash ?? undefined }]
       : []),
     ...(links?.resolutionTransaction
-      ? [{ label: "Resolution transaction (Sepolia)", reference: links.resolutionTransaction }]
+      ? [{ label: `Resolution transaction (${escrowNetworkLabel})`, reference: links.resolutionTransaction }]
       : []),
     ...(links?.disputeTransaction
-      ? [{ label: "Dispute transaction (Sepolia)", reference: links.disputeTransaction }]
+      ? [{ label: `Dispute transaction (${escrowNetworkLabel})`, reference: links.disputeTransaction }]
       : []),
     ...(links?.cancellationTransaction
-      ? [{ label: "Cancellation transaction (Sepolia)", reference: links.cancellationTransaction }]
+      ? [{ label: `Cancellation transaction (${escrowNetworkLabel})`, reference: links.cancellationTransaction }]
       : []),
     {
       label: "x402 QC settlement (Mainnet)",
@@ -255,7 +380,7 @@ export default function ReceiptDetailPage() {
       <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
         <nav className="mb-6">
           <Link
-            href={`/payments/${paymentIdStr}`}
+            href={`/payments/${paymentIdStr}${chainQuery}`}
             className="text-[13px] text-muted hover:text-ink transition-colors"
           >
             &larr; Back to Payment Room
@@ -289,12 +414,12 @@ export default function ReceiptDetailPage() {
                         ? "The payment is disputed and funds remain locked while awaiting a resolution."
                         : pp?.financialOutcome === "Resolved"
                           ? "The payment is resolved on-chain; allocation details are pending transaction proof."
-                        : pp?.financialOutcome === "Released to worker" &&
-                            pp?.finalState === "Resolved"
-                          ? "The dispute was resolved with the protected amount released to the worker."
-                          : pp?.finalState === "Released"
-                            ? "The protected amount was released to the worker after the client approved the release. The resolution agent prepared the case; a person made the final decision."
-                            : "The payment has not reached a final settlement outcome."
+                          : pp?.financialOutcome === "Released to worker" &&
+                              pp?.finalState === "Resolved"
+                            ? "The dispute was resolved with the protected amount released to the worker."
+                            : pp?.finalState === "Released"
+                              ? "The protected amount was released to the worker after the client approved the release. The resolution agent prepared the case; a person made the final decision."
+                              : "The payment has not reached a final settlement outcome."
                 }
               </p>
               <p className="mt-2 text-[13px] text-muted">
@@ -304,20 +429,24 @@ export default function ReceiptDetailPage() {
 
             <div className="mt-8 grid gap-6 md:grid-cols-2">
               <AllocationBreakdown
-                protectedAmount={pp?.amountHuman?.split(" ")[0] ?? undefined}
-                asset={pp?.asset ?? "USDC"}
+                protectedAmount={amountNumeric}
+                asset={tokenDisplay}
                 clientAllocation={
                   pp?.finalState === "Released"
                     ? "0.00"
                     : pp?.finalState === "Resolved"
-                      ? decision?.clientAmountHuman ?? undefined
+                      ? decision?.clientAmountHuman
+                        ? (amountNumber(displayReceiptAmount(decision.clientAmountHuman, activeChainId) ?? decision.clientAmountHuman) ?? undefined)
+                        : undefined
                       : undefined
                 }
                 workerAllocation={
                   pp?.finalState === "Released"
-                    ? pp?.amountHuman?.split(" ")[0] ?? undefined
+                    ? amountNumeric
                     : pp?.finalState === "Resolved"
-                      ? decision?.workerAmountHuman ?? undefined
+                      ? decision?.workerAmountHuman
+                        ? (amountNumber(displayReceiptAmount(decision.workerAmountHuman, activeChainId) ?? decision.workerAmountHuman) ?? undefined)
+                        : undefined
                       : undefined
                 }
               />
@@ -350,7 +479,10 @@ export default function ReceiptDetailPage() {
               />
             </div>
 
-            {/* Evidence record */}
+            {/* Evidence record — PUBLIC view is hash-only (P4.3D). Plaintext
+                title/claim/date/pastedText arrive as null from the sanitized
+                receipt and render as "—". Parties use the private section
+                below (same wallet-challenge flow as the Room). */}
             <div className="mt-8">
               <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted mb-4">
                 Evidence record
@@ -368,6 +500,14 @@ export default function ReceiptDetailPage() {
                 <Row label="Reference" value={ev?.evidenceReference ?? null} mono breakAll />
               </dl>
             </div>
+
+            {/* Party-authenticated private delivery evidence (P4.4b). */}
+            <PartyEvidenceSection
+              paymentIdStr={paymentIdStr}
+              activeChainId={activeChainId}
+              client={pp?.client}
+              worker={pp?.worker}
+            />
 
             {/* Resolution record — agent + x402 QC + human decision */}
             <div className="mt-8 rounded-[--radius-card] border border-border bg-surface p-6">
@@ -465,22 +605,22 @@ export default function ReceiptDetailPage() {
                 </h3>
                 <div className="space-y-1 text-[13px]">
                   {links.releaseTransaction ? (
-                    <AuditLink label="Release transaction (Sepolia)" href={links.releaseTransaction} />
+                    <AuditLink label={`Release transaction (${escrowNetworkLabel})`} href={links.releaseTransaction} />
                   ) : null}
                   {links.evidenceSubmissionTransaction ? (
-                    <AuditLink label="Evidence submission (Sepolia)" href={links.evidenceSubmissionTransaction} />
+                    <AuditLink label={`Evidence submission (${escrowNetworkLabel})`} href={links.evidenceSubmissionTransaction} />
                   ) : null}
                   {links.x402SettlementTransaction ? (
                     <AuditLink label="x402 QC settlement (Mainnet)" href={links.x402SettlementTransaction} />
                   ) : null}
                   {links.disputeTransaction ? (
-                    <AuditLink label="Dispute transaction (Sepolia)" href={links.disputeTransaction} />
+                    <AuditLink label={`Dispute transaction (${escrowNetworkLabel})`} href={links.disputeTransaction} />
                   ) : null}
                   {links.resolutionTransaction ? (
-                    <AuditLink label="Resolution transaction (Sepolia)" href={links.resolutionTransaction} />
+                    <AuditLink label={`Resolution transaction (${escrowNetworkLabel})`} href={links.resolutionTransaction} />
                   ) : null}
                   {links.cancellationTransaction ? (
-                    <AuditLink label="Cancellation transaction (Sepolia)" href={links.cancellationTransaction} />
+                    <AuditLink label={`Cancellation transaction (${escrowNetworkLabel})`} href={links.cancellationTransaction} />
                   ) : null}
                   {links.escrowContract ? (
                     <AuditLink label="Escrow contract" href={links.escrowContract} />
@@ -498,6 +638,142 @@ export default function ReceiptDetailPage() {
         </div>
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Party-authenticated private delivery evidence (P4.4b).
+//
+// Reuses the SAME P4.3D wallet-challenge flow as the Room
+// (readPartyEvidence → .../evidence/challenge + .../evidence/plaintext).
+// No second auth model: challenge, signature recovery, live on-chain
+// client/worker check, expiry and single-use consume all live server-side.
+//
+// Anonymous and unrelated wallets stay redacted — the reveal control is only
+// offered to the connected client/worker, and plaintext is only rendered
+// after a successful authenticated read. Signatures, challenges and nonces
+// are never rendered.
+// ---------------------------------------------------------------------------
+
+function PartyEvidenceSection({
+  paymentIdStr,
+  activeChainId,
+  client,
+  worker,
+}: {
+  paymentIdStr: string;
+  activeChainId: number;
+  client?: string | null;
+  worker?: string | null;
+}) {
+  const wallet = useWalletState();
+  const { signMessageAsync } = useSignMessage();
+  const [status, setStatus] = useState<"idle" | "loading" | "revealed" | "error">("idle");
+  const [evidence, setEvidence] = useState<PartyEvidence | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const address = wallet.address;
+  const isParty = useMemo(() => {
+    if (!wallet.isConnected || !address || (!client && !worker)) return false;
+    const lower = address.toLowerCase();
+    return (
+      (client != null && client.toLowerCase() === lower) ||
+      (worker != null && worker.toLowerCase() === lower)
+    );
+  }, [wallet.isConnected, address, client, worker]);
+
+  const handleReveal = useCallback(async () => {
+    if (!address || !isParty) return;
+    setStatus("loading");
+    setError(null);
+    try {
+      const result = await readPartyEvidence({
+        paymentId: paymentIdStr,
+        chainId: activeChainId,
+        wallet: address,
+        signMessage: (message: string) => signMessageAsync({ message }),
+      });
+      setEvidence(result);
+      setStatus("revealed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reveal the delivery evidence.");
+      setStatus("error");
+    }
+  }, [address, isParty, paymentIdStr, activeChainId, signMessageAsync]);
+
+  // Anonymous or unrelated — stay redacted, no reveal control, no fetch.
+  if (!isParty) {
+    return (
+      <div
+        data-testid="party-evidence-locked"
+        className="mt-8 rounded-[--radius-card] border border-border bg-page p-5"
+      >
+        <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
+          Private delivery evidence
+        </h3>
+        <p className="mt-3 text-[14px] leading-relaxed text-muted">
+          Delivery plaintext is visible only to the client and worker of this
+          payment. Connect the client or worker wallet and sign a short-lived
+          challenge to reveal it here. The public receipt stays hash-only.
+        </p>
+      </div>
+    );
+  }
+
+  if (status === "revealed" && evidence) {
+    return (
+      <div
+        data-testid="party-evidence-plaintext"
+        className="mt-8 rounded-[--radius-card] border border-border bg-page p-5"
+      >
+        <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
+          Private delivery evidence
+        </h3>
+        <dl className="mt-4 space-y-2 text-[14px]">
+          <Row label="Title" value={evidence.title} />
+          <Row label="Claim" value={evidence.claim} />
+          <Row label="Description" value={evidence.description} />
+          <Row label="Pasted text" value={evidence.pastedText} />
+          <Row label="Date" value={evidence.date} />
+          <Row label="External ref" value={evidence.externalRef} mono breakAll />
+          <Row label="Evidence type" value={evidence.evidenceType} />
+          <Row label="File hash" value={evidence.fileHash} mono breakAll />
+          <Row label="Reference" value={evidence.evidenceReference} mono breakAll />
+        </dl>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="party-evidence-gate"
+      className="mt-8 rounded-[--radius-card] border border-border bg-page p-5"
+    >
+      <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
+        Private delivery evidence
+      </h3>
+      <p className="mt-3 text-[14px] leading-relaxed text-muted">
+        You are a party to this payment. Reveal the delivery plaintext with a
+        short-lived wallet signature. Nothing is written on-chain.
+      </p>
+      {error ? (
+        <div className="mt-3">
+          <Notice variant="warning">
+            <p className="text-[13px] leading-relaxed">{error}</p>
+          </Notice>
+        </div>
+      ) : null}
+      <div className="mt-4">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={handleReveal}
+          disabled={status === "loading"}
+        >
+          {status === "loading" ? "Revealing…" : "Reveal delivery evidence"}
+        </Button>
+      </div>
+    </div>
   );
 }
 

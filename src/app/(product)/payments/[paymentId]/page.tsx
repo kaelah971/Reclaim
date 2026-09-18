@@ -18,6 +18,9 @@ import EvidenceMap, {
 import SharePaymentLink from "@/components/payment/SharePaymentLink";
 import FreelancerLanding from "@/components/payment/FreelancerLanding";
 import WorkerGasNotice from "@/components/payment/WorkerGasNotice";
+import SecureEvidenceViewer from "@/components/payment/SecureEvidenceViewer";
+import ReleasePreflight from "@/components/payment/ReleasePreflight";
+import ReleasedSummary from "@/components/payment/ReleasedSummary";
 import {
   getPaymentLifecycleLabel,
   parseChainIdParam,
@@ -629,19 +632,29 @@ function PaymentRoomContent() {
       </div>
     );
   } else if (payment.state === "Released") {
+    // Canonical settlement: ReleasedSummary renders "Payment released" for
+    // clients and "Payment received" for the worker from the fresh on-chain
+    // read. View receipt link targets the receipt route /receipts/${paymentIdStr}.
+    const releasedAtLabel =
+      payment.releasedAt > BigInt(0)
+        ? new Date(Number(payment.releasedAt) * 1000).toISOString()
+        : "";
     primaryActionContent = (
-      <div className="space-y-4">
-        <Notice variant="success">
-          <p className="text-[14px] leading-relaxed">
-            Payment released. Funds have been transferred to the worker.
-          </p>
-        </Notice>
-        <Link href={`/receipts/${paymentIdStr}`}>
-          <Button variant="primary" size="lg" className="w-full">
-            View receipt
-          </Button>
-        </Link>
-      </div>
+      <ReleasedSummary
+        amountLabel={formatUSDC(payment.amount)}
+        tokenSymbol={token.symbol}
+        workerAddress={payment.worker}
+        networkName={chainDisplayName}
+        paymentId={paymentIdStr ?? ""}
+        chainId={activeChainId}
+        txHash={approveRelease.txHash}
+        releasedAtLabel={releasedAtLabel}
+        role={role === "client" || role === "worker" ? role : "viewer"}
+        receiptHref={`/receipts/${paymentIdStr}`}
+        receiptLabel="View receipt"
+        sharePaymentId={paymentIdStr ?? ""}
+        shareChainId={activeChainId}
+      />
     );
   } else if (payment.state === "Cancelled") {
     primaryActionContent = (
@@ -963,39 +976,90 @@ function PaymentRoomContent() {
     payment.state === "DeliverySubmitted" &&
     role === "client"
   ) {
+    const deliveryDateLabel =
+      payment.deliveryAt > BigInt(0)
+        ? new Date(Number(payment.deliveryAt) * 1000).toISOString()
+        : "Not recorded";
     primaryActionContent = (
       <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-5">
         <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
           Review delivery
         </h3>
-        <p className="text-[14px] text-muted">
-          Approve the release or open a dispute if the work is
-          unsatisfactory.
+        <p className="text-[14px] leading-relaxed text-muted">
+          The worker has submitted delivery. Review the details and the
+          delivery evidence below before deciding to release or open a
+          dispute.
         </p>
-        <p className="text-[13px] text-muted">
-          This sends the protected funds to the worker and completes the
-          payment. Release {formatUSDC(payment.amount)} {token.symbol} to{" "}
-          {shortenAddress(payment.worker)}.
-        </p>
-        <Button
-          variant="primary"
-          size="lg"
-          className="w-full"
-          onClick={() =>
-            wrapAction(() => approveRelease.action(payment.id))
+        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 text-[14px]">
+          <div>
+            <dt className="text-[13px] text-muted">Amount</dt>
+            <dd className="mt-0.5 font-[family-name:var(--font-ibm-plex-mono)] tabular-nums font-medium text-ink">
+              {formatUSDC(payment.amount)} {token.symbol}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Freelancer</dt>
+            <dd className="mt-0.5 break-all font-[family-name:var(--font-ibm-plex-mono)] text-ink">
+              {payment.worker}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Network</dt>
+            <dd className="mt-0.5 text-ink">{chainDisplayName}</dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Status</dt>
+            <dd className="mt-0.5 text-ink">{lifecycleLabel}</dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-[13px] text-muted">Terms</dt>
+            <dd className="mt-0.5 text-ink">
+              {payment.deliverableSummary || payment.releaseRule || "As agreed"}
+              {payment.evidenceExpectation
+                ? ` · ${payment.evidenceExpectation}`
+                : ""}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Delivered</dt>
+            <dd className="mt-0.5 font-[family-name:var(--font-ibm-plex-mono)] tabular-nums text-ink">
+              {deliveryDateLabel}
+            </dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-[13px] text-muted">Evidence hash</dt>
+            <dd className="mt-0.5 break-all font-[family-name:var(--font-ibm-plex-mono)] text-[13px] text-ink">
+              {payment.evidenceReference || "Not submitted"}
+            </dd>
+          </div>
+        </dl>
+        <SecureEvidenceViewer
+          paymentId={paymentIdStr ?? ""}
+          chainId={activeChainId}
+          walletAddress={wallet.address}
+          isConnected={wallet.isConnected}
+          evidenceReference={payment.evidenceReference}
+        />
+        <ReleasePreflight
+          amountLabel={formatUSDC(payment.amount)}
+          tokenSymbol={token.symbol}
+          workerAddress={payment.worker}
+          networkName={chainDisplayName}
+          targetChainId={activeChainId}
+          chainId={activeChainId}
+          canonicalState={payment.state}
+          isWrongNetwork={isWrongNetwork}
+          isEligible={
+            wallet.isConnected && role === "client" && !isWrongNetwork
           }
-          disabled={approveRelease.isPending}
-        >
-          {approveRelease.isPending ? "Approving…" : "Approve release"}
-        </Button>
-        <TxStatus
           isPending={approveRelease.isPending}
           isSuccess={approveRelease.isSuccess}
           error={approveRelease.error}
           txHash={approveRelease.txHash}
-          onDismiss={() => approveRelease.reset()}
-          label="Approve release"
-          chainId={activeChainId}
+          onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
+          onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
+          onRefresh={() => refetchPayment()}
+          onDismissError={() => approveRelease.reset()}
         />
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
@@ -1008,38 +1072,89 @@ function PaymentRoomContent() {
     payment.state === "ReleaseRequested" &&
     role === "client"
   ) {
+    const deliveryDateLabel =
+      payment.deliveryAt > BigInt(0)
+        ? new Date(Number(payment.deliveryAt) * 1000).toISOString()
+        : "Not recorded";
     primaryActionContent = (
       <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-5">
         <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
-          Approve release
+          Review delivery
         </h3>
-        <p className="text-[14px] text-muted">
-          The worker has requested release. Approve it or open a dispute.
+        <p className="text-[14px] leading-relaxed text-muted">
+          The worker has requested release. Review the delivery and evidence
+          below, then release the payment or open a dispute.
         </p>
-        <p className="text-[13px] text-muted">
-          This sends the protected funds to the worker and completes the
-          payment. Release {formatUSDC(payment.amount)} {token.symbol} to{" "}
-          {shortenAddress(payment.worker)}.
-        </p>
-        <Button
-          variant="primary"
-          size="lg"
-          className="w-full"
-          onClick={() =>
-            wrapAction(() => approveRelease.action(payment.id))
+        <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2 text-[14px]">
+          <div>
+            <dt className="text-[13px] text-muted">Amount</dt>
+            <dd className="mt-0.5 font-[family-name:var(--font-ibm-plex-mono)] tabular-nums font-medium text-ink">
+              {formatUSDC(payment.amount)} {token.symbol}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Freelancer</dt>
+            <dd className="mt-0.5 break-all font-[family-name:var(--font-ibm-plex-mono)] text-ink">
+              {payment.worker}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Network</dt>
+            <dd className="mt-0.5 text-ink">{chainDisplayName}</dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Status</dt>
+            <dd className="mt-0.5 text-ink">{lifecycleLabel}</dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-[13px] text-muted">Terms</dt>
+            <dd className="mt-0.5 text-ink">
+              {payment.deliverableSummary || payment.releaseRule || "As agreed"}
+              {payment.evidenceExpectation
+                ? ` · ${payment.evidenceExpectation}`
+                : ""}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-[13px] text-muted">Delivered</dt>
+            <dd className="mt-0.5 font-[family-name:var(--font-ibm-plex-mono)] tabular-nums text-ink">
+              {deliveryDateLabel}
+            </dd>
+          </div>
+          <div className="sm:col-span-2">
+            <dt className="text-[13px] text-muted">Evidence hash</dt>
+            <dd className="mt-0.5 break-all font-[family-name:var(--font-ibm-plex-mono)] text-[13px] text-ink">
+              {payment.evidenceReference || "Not submitted"}
+            </dd>
+          </div>
+        </dl>
+        <SecureEvidenceViewer
+          paymentId={paymentIdStr ?? ""}
+          chainId={activeChainId}
+          walletAddress={wallet.address}
+          isConnected={wallet.isConnected}
+          evidenceReference={payment.evidenceReference}
+        />
+        <ReleasePreflight
+          amountLabel={formatUSDC(payment.amount)}
+          tokenSymbol={token.symbol}
+          workerAddress={payment.worker}
+          networkName={chainDisplayName}
+          targetChainId={activeChainId}
+          chainId={activeChainId}
+          canonicalState={payment.state}
+          isWrongNetwork={isWrongNetwork}
+          isEligible={
+            wallet.isConnected && role === "client" && !isWrongNetwork
           }
-          disabled={approveRelease.isPending}
-        >
-          {approveRelease.isPending ? "Approving…" : "Approve release"}
-        </Button>
-        <TxStatus
           isPending={approveRelease.isPending}
           isSuccess={approveRelease.isSuccess}
           error={approveRelease.error}
           txHash={approveRelease.txHash}
-          onDismiss={() => approveRelease.reset()}
-          label="Approve release"
-          chainId={activeChainId}
+          onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
+          onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
+          onRefresh={() => refetchPayment()}
+          onDismissError={() => approveRelease.reset()}
         />
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">

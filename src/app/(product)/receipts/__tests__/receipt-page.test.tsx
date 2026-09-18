@@ -24,9 +24,29 @@ vi.mock("@/components/ui/LoadingSkeleton", () => ({
 }));
 vi.mock("next/navigation", () => ({
   useParams: () => ({ receiptId: "1" }),
+  useSearchParams: () => new URLSearchParams(),
   Link: ({ href, children }: { href: string; children: React.ReactNode }) => (
     <a href={href}>{children}</a>
   ),
+}));
+vi.mock("@/hooks/wallet/useWalletState", () => ({
+  useWalletState: () => ({
+    address: undefined,
+    isConnected: false,
+    shortAddress: "",
+    connectionState: "disconnected",
+    isConnecting: false,
+    isReconnecting: false,
+    chainId: undefined,
+    chainSupported: false,
+    disconnect: () => {},
+  }),
+  shortenAddress: (a?: string) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : ""),
+}));
+vi.mock("wagmi", () => ({
+  useSignMessage: () => ({
+    signMessageAsync: async () => "0xsig",
+  }),
 }));
 
 import ReceiptDetailPage from "../[receiptId]/page";
