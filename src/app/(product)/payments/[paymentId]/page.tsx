@@ -1,8 +1,8 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import StatusBadge, { type BadgeVariant } from "@/components/ui/StatusBadge";
@@ -15,6 +15,13 @@ import PaymentTimeline, {
 import EvidenceMap, {
   type EvidenceItemData,
 } from "@/components/payment/EvidenceMap";
+import SharePaymentLink from "@/components/payment/SharePaymentLink";
+import FreelancerLanding from "@/components/payment/FreelancerLanding";
+import WorkerGasNotice from "@/components/payment/WorkerGasNotice";
+import {
+  getPaymentLifecycleLabel,
+  parseChainIdParam,
+} from "@/components/payment/paymentLifecycle";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useTokenApproval } from "@/hooks/contracts/useTokenApproval";
 import {
@@ -27,8 +34,14 @@ import {
 } from "@/hooks/contracts/useEscrowActions";
 import { useWalletState, shortenAddress } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
-import { formatUSDC, type PaymentData, type PaymentState, PAYMENT_STATE_LABELS } from "@/lib/contracts/types";
-import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
+import { formatUSDC, type PaymentData, type PaymentState } from "@/lib/contracts/types";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  getCeloExplorerTxUrl,
+  getCeloMainnetExplorerTxUrl,
+  getChainName,
+} from "@/lib/web3/chains";
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +50,9 @@ import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 
 type UserRole = "client" | "worker" | "viewer";
 
+// Roles are derived from canonical on-chain payment data (client/worker
+// addresses as stored by the contract). The contract is the final authority
+// on who may act — never trust URL params or client state for roles.
 function getUserRole(
   payment: PaymentData,
   address: string | undefined,
@@ -74,6 +90,12 @@ function unixToDateStr(ts: bigint): string {
   return d.toISOString().split("T")[0];
 }
 
+function explorerTxUrlForChain(chainId: number, txHash: string): string {
+  return chainId === CELO_MAINNET_CHAIN_ID
+    ? getCeloMainnetExplorerTxUrl(txHash)
+    : getCeloExplorerTxUrl(txHash);
+}
+
 // ---------------------------------------------------------------------------
 // Transaction status helper component
 // ---------------------------------------------------------------------------
@@ -85,6 +107,7 @@ interface TxStatusProps {
   txHash: `0x${string}` | undefined;
   onDismiss: () => void;
   label: string;
+  chainId: number;
 }
 
 function TxStatus({
@@ -94,6 +117,7 @@ function TxStatus({
   txHash,
   onDismiss,
   label,
+  chainId,
 }: TxStatusProps) {
   if (error) {
     return (
@@ -172,7 +196,7 @@ function TxStatus({
       <Notice variant="success">
         <p className="text-[14px] leading-relaxed">{label} confirmed.</p>
         <a
-          href={getCeloExplorerTxUrl(txHash)}
+          href={explorerTxUrlForChain(chainId, txHash)}
           target="_blank"
           rel="noopener noreferrer"
           className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
@@ -187,11 +211,28 @@ function TxStatus({
 }
 
 // ---------------------------------------------------------------------------
-// Page
+// Page (Suspense wrapper for useSearchParams)
 // ---------------------------------------------------------------------------
 
 export default function PaymentRoomPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+          <div className="flex flex-col items-center justify-center gap-4">
+            <p className="text-[15px] text-muted">Loading payment data…</p>
+          </div>
+        </div>
+      }
+    >
+      <PaymentRoomContent />
+    </Suspense>
+  );
+}
+
+function PaymentRoomContent() {
   const params = useParams<{ paymentId: string }>();
+  const searchParams = useSearchParams();
   const paymentIdStr = params?.paymentId;
   const paymentId = useMemo(() => {
     if (!paymentIdStr) return undefined;
@@ -202,11 +243,37 @@ export default function PaymentRoomPage() {
     }
   }, [paymentIdStr]);
 
-  const { requireWallet } = useRequireWallet();
-  const wallet = useWalletState();
-  const token = getPaymentTokenConfig();
+  // ---- Chain resolution from ?chainId= (P4.3a) ----
+  // Absent → preserve existing default behavior (Sepolia default chain).
+  // Present → parse → validate via isSupportedChain/canonical mapping.
+  // Malformed or unsupported → fail closed with an explicit notice (no
+  // silent Sepolia fallback; no payment data is shown).
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const isChainInvalid = chainResolution.status === "invalid";
+  const chainInvalidRaw =
+    chainResolution.status === "invalid" ? chainResolution.raw : "";
+  const explicitChainId =
+    chainResolution.status === "explicit"
+      ? chainResolution.chainId
+      : undefined;
+  // Preserve default (Sepolia) when absent; explicit 42220/11142220 threads
+  // through every read + write below.
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  // Preserve-or-propagate ?chainId=: only when explicitly present in the URL
+  // (keeps default/Sepolia links byte-identical when absent).
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+  const chainDisplayName = getChainName(activeChainId);
 
-  // ---- Fetch payment data ----
+  const { requireWallet, requestNetworkSwitch } = useRequireWallet();
+  const wallet = useWalletState();
+  const token = getPaymentTokenConfig(activeChainId);
+
+  // ---- Fetch payment data (explicit chain) ----
   const {
     data: payment,
     isLoading,
@@ -214,9 +281,9 @@ export default function PaymentRoomPage() {
     notFound,
     error: readError,
     refetch: refetchPayment,
-  } = usePayment(paymentId);
+  } = usePayment(paymentId, activeChainId);
 
-  // ---- Token approval ----
+  // ---- Token approval (explicit chain) ----
   const {
     allowance,
     isLoadingAllowance,
@@ -228,17 +295,18 @@ export default function PaymentRoomPage() {
     approveTxHash,
     refetchAllowance,
     resetApprove,
-  } = useTokenApproval();
+  } = useTokenApproval(activeChainId);
 
-  // ---- Escrow actions ----
-  const fundPayment = useFundPayment();
-  const acceptPayment = useAcceptPayment();
-  const requestRelease = useRequestRelease();
-  const approveRelease = useApproveRelease();
-  const openDispute = useOpenDispute();
-  const cancelUnfunded = useCancelUnfunded();
+  // ---- Escrow actions (explicit chain; simulate-before-write +
+  // attribution live inside these hooks — never bypassed) ----
+  const fundPayment = useFundPayment(activeChainId);
+  const acceptPayment = useAcceptPayment(activeChainId);
+  const requestRelease = useRequestRelease(activeChainId);
+  const approveRelease = useApproveRelease(activeChainId);
+  const openDispute = useOpenDispute(activeChainId);
+  const cancelUnfunded = useCancelUnfunded(activeChainId);
 
-  // ---- Refetch on action success ----
+  // ---- Refetch on action success (confirmed receipt → state refresh) ----
   useEffect(() => {
     if (
       fundPayment.isSuccess ||
@@ -271,7 +339,9 @@ export default function PaymentRoomPage() {
     async function checkPacket() {
       if (!paymentIdStr) return;
       try {
-        const res = await fetch(`/api/payments/${paymentIdStr}/review-packet`);
+        const res = await fetch(
+          `/api/payments/${paymentIdStr}/review-packet${chainQuery}`,
+        );
         if (!res.ok) return;
         const data = (await res.json()) as { found?: boolean };
         if (!cancelled && data.found) setHasReviewPacket(true);
@@ -283,9 +353,9 @@ export default function PaymentRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [paymentIdStr]);
+  }, [paymentIdStr, chainQuery]);
 
-  // ---- Derived values ----
+  // ---- Derived values (hooks must stay above all early returns) ----
   const role = useMemo(
     () => (payment ? getUserRole(payment, wallet.address) : "viewer"),
     [payment, wallet.address],
@@ -296,6 +366,11 @@ export default function PaymentRoomPage() {
     return allowance >= payment.amount;
   }, [allowance, payment]);
 
+  const isWrongNetwork =
+    wallet.isConnected &&
+    wallet.chainId !== undefined &&
+    wallet.chainId !== activeChainId;
+
   // ---- Action wrappers with wallet gating ----
   const wrapAction = useCallback(
     (fn: () => void) => {
@@ -303,6 +378,28 @@ export default function PaymentRoomPage() {
     },
     [requireWallet],
   );
+
+  // ---- Fail closed on malformed/unsupported ?chainId= ----
+  if (isChainInvalid) {
+    return (
+      <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+        <div className="flex flex-col items-center justify-center gap-4 text-center">
+          <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Unsupported network
+          </h1>
+          <p className="text-[15px] text-muted">
+            This payment link uses an unsupported network (chainId
+            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+            (42220) and Celo Sepolia (11142220). Ask the sender for a link
+            with a supported chainId.
+          </p>
+          <Link href="/payments">
+            <Button variant="secondary">Return to payments</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   // ---- Loading state ----
   if (isLoading) {
@@ -368,7 +465,9 @@ export default function PaymentRoomPage() {
     );
   }
 
-  // ---- Build timeline ----
+  const lifecycleLabel = getPaymentLifecycleLabel(payment.state);
+
+  // ---- Build timeline (lifecycle-accurate labels) ----
   const timeline: TimelineEntryData[] = [
     {
       id: "created",
@@ -387,7 +486,7 @@ export default function PaymentRoomPage() {
       date: unixToDateStr(payment.fundedAt),
       actor: payment.client,
       statusVariant: "protected",
-      statusLabel: "Funded",
+      statusLabel: "Protected",
     });
   }
 
@@ -412,7 +511,7 @@ export default function PaymentRoomPage() {
         ? `Reference hash: ${payment.evidenceReference}`
         : undefined,
       statusVariant: "protected",
-      statusLabel: "Submitted",
+      statusLabel: "Delivered",
     });
   }
 
@@ -423,7 +522,7 @@ export default function PaymentRoomPage() {
       date: unixToDateStr(payment.releaseRequestedAt),
       actor: payment.worker,
       statusVariant: "protected",
-      statusLabel: "Pending",
+      statusLabel: "Release requested",
     });
   }
 
@@ -434,7 +533,7 @@ export default function PaymentRoomPage() {
       date: unixToDateStr(payment.releasedAt),
       actor: payment.worker,
       statusVariant: "settled",
-      statusLabel: "Settled",
+      statusLabel: "Released",
     });
   }
 
@@ -475,10 +574,61 @@ export default function PaymentRoomPage() {
     });
   }
 
-  // ---- Primary action content ----
+  // ---- Wrong-network banner (explicit targetable switch) ----
+  const wrongNetworkBanner = isWrongNetwork ? (
+    <Notice variant="warning">
+      <p className="text-[14px] leading-relaxed">
+        Your wallet is on {wallet.chainId !== undefined ? getChainName(wallet.chainId) : "an unknown network"}. This
+        payment lives on {chainDisplayName}.
+      </p>
+      <Button
+        size="sm"
+        variant="secondary"
+        className="mt-3"
+        onClick={() => requestNetworkSwitch(activeChainId)}
+      >
+        Switch to {chainDisplayName}
+      </Button>
+    </Notice>
+  ) : null;
+
+  // ---- Primary action content (role-gated; contract is final authority) ----
   let primaryActionContent: React.ReactNode;
 
-  if (payment.state === "Released") {
+  if (!wallet.isConnected) {
+    // Anonymous → safe read-only freelancer landing. No privileged controls.
+    primaryActionContent = (
+      <FreelancerLanding
+        payment={payment}
+        amountLabel={formatUSDC(payment.amount)}
+        tokenSymbol={token.symbol}
+        networkName={chainDisplayName}
+      />
+    );
+  } else if (role === "viewer") {
+    // Connected but unrelated wallet → read-only, no privileged controls.
+    primaryActionContent = (
+      <div className="space-y-4">
+        <Notice variant="info">
+          <p className="text-[14px] leading-relaxed">
+            You are viewing this payment as read-only. Only the client (
+            {shortenAddress(payment.client)}) or the worker (
+            {shortenAddress(payment.worker)}) can take action. The on-chain
+            contract is the final authority.
+          </p>
+        </Notice>
+        <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-3">
+          <p className="text-[14px] text-muted">
+            {formatUSDC(payment.amount)} {token.symbol} on {chainDisplayName} ·{" "}
+            {lifecycleLabel}
+          </p>
+          <p className="text-[14px] leading-relaxed text-muted">
+            Connect with the client or worker wallet to act on this payment.
+          </p>
+        </div>
+      </div>
+    );
+  } else if (payment.state === "Released") {
     primaryActionContent = (
       <div className="space-y-4">
         <Notice variant="success">
@@ -525,9 +675,12 @@ export default function PaymentRoomPage() {
         {insufficientBalance && (
           <Notice variant="warning">
             <p className="text-[14px] leading-relaxed">
-              Your USDC balance ({formatUSDC(balance as bigint)} USDC) is less
-              than the protected amount ({formatUSDC(payment.amount)} USDC). Add
-              Celo Sepolia USDC to your wallet before depositing.
+              Your {token.symbol} balance ({formatUSDC(balance as bigint)} {token.symbol}) is less
+              than the protected amount ({formatUSDC(payment.amount)} {token.symbol}). Add
+              {activeChainId === CELO_MAINNET_CHAIN_ID
+                ? ` ${token.symbol} on ${chainDisplayName}`
+                : " Celo Sepolia USDC"}{" "}
+              to your wallet before depositing.
             </p>
           </Notice>
         )}
@@ -568,6 +721,7 @@ export default function PaymentRoomPage() {
                 refetchAllowance();
               }}
               label={`${token.symbol} approval`}
+              chainId={activeChainId}
             />
 
             {hasAllowance && (
@@ -603,6 +757,7 @@ export default function PaymentRoomPage() {
               txHash={fundPayment.txHash}
               onDismiss={() => fundPayment.reset()}
               label="Deposit"
+              chainId={activeChainId}
             />
           </>
         )}
@@ -629,16 +784,23 @@ export default function PaymentRoomPage() {
           txHash={cancelUnfunded.txHash}
           onDismiss={() => cancelUnfunded.reset()}
           label="Cancel"
+          chainId={activeChainId}
         />
       </div>
     );
   } else if (payment.state === "Created" && role === "worker") {
     primaryActionContent = (
-      <Notice variant="info">
-        <p className="text-[14px] leading-relaxed">
-          Waiting for the client to fund this payment.
-        </p>
-      </Notice>
+      <div className="space-y-4">
+        <Notice variant="info">
+          <p className="text-[14px] leading-relaxed">
+            Waiting for the client to fund this payment.
+          </p>
+        </Notice>
+        <WorkerGasNotice
+          chainId={activeChainId}
+          address={wallet.address as `0x${string}` | undefined}
+        />
+      </div>
     );
   } else if (payment.state === "Funded" && role === "worker") {
     primaryActionContent = (
@@ -649,6 +811,10 @@ export default function PaymentRoomPage() {
         <p className="text-[14px] text-muted">
           Review the terms and accept this agreement to begin work.
         </p>
+        <WorkerGasNotice
+          chainId={activeChainId}
+          address={wallet.address as `0x${string}` | undefined}
+        />
         <Button
           variant="primary"
           size="lg"
@@ -667,8 +833,9 @@ export default function PaymentRoomPage() {
           txHash={acceptPayment.txHash}
           onDismiss={() => acceptPayment.reset()}
           label="Accept terms"
+          chainId={activeChainId}
         />
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
             Open dispute
           </Button>
@@ -680,7 +847,7 @@ export default function PaymentRoomPage() {
       <div className="space-y-4">
         <Notice variant="success">
           <p className="text-[14px] leading-relaxed">
-            Funds protected. {formatUSDC(payment.amount)} USDC is held in
+            Funds protected. {formatUSDC(payment.amount)} {token.symbol} is held in
             escrow under the agreed terms.
           </p>
         </Notice>
@@ -689,7 +856,13 @@ export default function PaymentRoomPage() {
             Waiting for the worker to accept the terms.
           </p>
         </Notice>
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <div className="rounded-[--radius-card] border border-border bg-surface p-6">
+          <SharePaymentLink
+            paymentId={paymentIdStr ?? ""}
+            chainId={activeChainId}
+          />
+        </div>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
             Open dispute
           </Button>
@@ -705,12 +878,16 @@ export default function PaymentRoomPage() {
         <p className="text-[14px] text-muted">
           Submit your delivery evidence to move the payment forward.
         </p>
-        <Link href={`/payments/${paymentIdStr}/evidence`}>
+        <WorkerGasNotice
+          chainId={activeChainId}
+          address={wallet.address as `0x${string}` | undefined}
+        />
+        <Link href={`/payments/${paymentIdStr}/evidence${chainQuery}`}>
           <Button variant="primary" size="lg" className="w-full">
             Submit delivery evidence
           </Button>
         </Link>
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
             Open dispute
           </Button>
@@ -725,7 +902,7 @@ export default function PaymentRoomPage() {
             Waiting for the worker to submit delivery evidence.
           </p>
         </Notice>
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
             Open dispute
           </Button>
@@ -744,6 +921,10 @@ export default function PaymentRoomPage() {
         <p className="text-[14px] text-muted">
           Request the client to release funds for this delivery.
         </p>
+        <WorkerGasNotice
+          chainId={activeChainId}
+          address={wallet.address as `0x${string}` | undefined}
+        />
         <Button
           variant="primary"
           size="lg"
@@ -762,15 +943,16 @@ export default function PaymentRoomPage() {
           txHash={requestRelease.txHash}
           onDismiss={() => requestRelease.reset()}
           label="Release request"
+          chainId={activeChainId}
         />
         <div className="pt-2 border-t border-border">
-          <Link href={`/payments/${paymentIdStr}/evidence`}>
+          <Link href={`/payments/${paymentIdStr}/evidence${chainQuery}`}>
             <Button variant="secondary" size="sm">
               Update evidence
             </Button>
           </Link>
         </div>
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
             Open dispute
           </Button>
@@ -792,7 +974,7 @@ export default function PaymentRoomPage() {
         </p>
         <p className="text-[13px] text-muted">
           This sends the protected funds to the worker and completes the
-          payment. Release {formatUSDC(payment.amount)} USDC to{" "}
+          payment. Release {formatUSDC(payment.amount)} {token.symbol} to{" "}
           {shortenAddress(payment.worker)}.
         </p>
         <Button
@@ -813,8 +995,9 @@ export default function PaymentRoomPage() {
           txHash={approveRelease.txHash}
           onDismiss={() => approveRelease.reset()}
           label="Approve release"
+          chainId={activeChainId}
         />
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
             Open dispute
           </Button>
@@ -835,7 +1018,7 @@ export default function PaymentRoomPage() {
         </p>
         <p className="text-[13px] text-muted">
           This sends the protected funds to the worker and completes the
-          payment. Release {formatUSDC(payment.amount)} USDC to{" "}
+          payment. Release {formatUSDC(payment.amount)} {token.symbol} to{" "}
           {shortenAddress(payment.worker)}.
         </p>
         <Button
@@ -856,8 +1039,9 @@ export default function PaymentRoomPage() {
           txHash={approveRelease.txHash}
           onDismiss={() => approveRelease.reset()}
           label="Approve release"
+          chainId={activeChainId}
         />
-        <Link href={`/payments/${paymentIdStr}/dispute`}>
+        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
             Open dispute
           </Button>
@@ -869,11 +1053,17 @@ export default function PaymentRoomPage() {
     role === "worker"
   ) {
     primaryActionContent = (
-      <Notice variant="info">
-        <p className="text-[14px] leading-relaxed">
-          Waiting for the client to approve the release.
-        </p>
-      </Notice>
+      <div className="space-y-4">
+        <Notice variant="info">
+          <p className="text-[14px] leading-relaxed">
+            Waiting for the client to approve the release.
+          </p>
+        </Notice>
+        <WorkerGasNotice
+          chainId={activeChainId}
+          address={wallet.address as `0x${string}` | undefined}
+        />
+      </div>
     );
   } else {
     primaryActionContent = (
@@ -892,7 +1082,7 @@ export default function PaymentRoomPage() {
         <MoneyStateStrip
           amount={formatUSDC(payment.amount)}
           asset={token.symbol}
-          state={PAYMENT_STATE_LABELS[payment.state]}
+          state={lifecycleLabel}
           stateVariant={mapStateToBadgeVariant(payment.state)}
           deadline={payment.deliveryDeadline > BigInt(0)
             ? `Deadline: ${unixToDateStr(payment.deliveryDeadline)}`
@@ -950,7 +1140,7 @@ export default function PaymentRoomPage() {
       primaryAction={
         <div className="space-y-4">
           {/* Role badge */}
-          {role !== "viewer" && (
+          {role !== "viewer" && wallet.isConnected && (
             <StatusBadge
               variant={role === "client" ? "pending" : "protected"}
               label={role === "client" ? "You: Client" : "You: Worker"}
@@ -959,15 +1149,16 @@ export default function PaymentRoomPage() {
           {role === "viewer" && wallet.isConnected && (
             <StatusBadge variant="pending" label="Viewer" />
           )}
+          {wrongNetworkBanner}
           {primaryActionContent}
           {hasReviewPacket && (
-            <Link href={`/payments/${paymentIdStr}/review`}>
+            <Link href={`/payments/${paymentIdStr}/review${chainQuery}`}>
               <Button variant="ghost" size="sm">
                 Review case
               </Button>
             </Link>
           )}
-          <Link href={`/payments/${paymentIdStr}/agent`}>
+          <Link href={`/payments/${paymentIdStr}/agent${chainQuery}`}>
             <Button variant="ghost" size="sm">
               Open Resolution Agent
             </Button>

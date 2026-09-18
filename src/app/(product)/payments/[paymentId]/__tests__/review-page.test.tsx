@@ -57,6 +57,7 @@ vi.mock("@/components/ui/Notice", () => ({
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ paymentId: "1" }),
+  useSearchParams: () => ({ get: () => null }),
   Link: ({ href, children }: { href: string; children: React.ReactNode }) => (
     <a href={href}>{children}</a>
   ),

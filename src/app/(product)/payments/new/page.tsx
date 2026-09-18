@@ -13,6 +13,7 @@ import AgreementPreview from "@/components/payment/AgreementPreview";
 import NewPaymentStepper from "@/components/payment/NewPaymentStepper";
 import ProtectPreflight from "@/components/payment/ProtectPreflight";
 import WalletButton from "@/components/ui/WalletButton";
+import SharePaymentLink from "@/components/payment/SharePaymentLink";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import {
   useProtectPaymentFlow,
@@ -693,6 +694,15 @@ export default function CreatePaymentPage() {
                       ` · Payment ID ${flow.createdPaymentId.toString()}`}.
                     Taking you to the Payment Room…
                   </p>
+                  {flow.createdPaymentId !== undefined &&
+                    isSupportedChain(targetChainId) && (
+                      <div className="mt-4">
+                        <SharePaymentLink
+                          paymentId={flow.createdPaymentId.toString()}
+                          chainId={targetChainId}
+                        />
+                      </div>
+                    )}
                 </Notice>
               )}
 

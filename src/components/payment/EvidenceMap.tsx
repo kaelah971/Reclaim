@@ -1,4 +1,12 @@
+"use client";
+
+import { useMemo } from "react";
 import StatusBadge, { type BadgeVariant } from "../ui/StatusBadge";
+import {
+  EVIDENCE_DEFAULT_CHAIN_ID,
+  parseEvidenceChainId,
+  readEvidenceChainRaw,
+} from "@/lib/evidence/chainScope";
 
 export type EvidenceStatus = "submitted" | "missing" | "disputed" | "verified";
 
@@ -68,11 +76,73 @@ export function EvidenceItem({ evidence }: EvidenceItemProps) {
 interface EvidenceMapProps {
   items: readonly EvidenceItemData[];
   className?: string;
+  /**
+   * P4.3b (optional): explicit escrow chain scope for this map. Validated
+   * against the canonical supported-chain mapping; invalid values fail
+   * closed to the Sepolia default. When omitted, the validated ?chainId=
+   * URL param is used; otherwise Sepolia. Backward compatible — existing
+   * callers pass `items` (+ optionally `className`) unchanged.
+   */
+  chainId?: number | string | null;
+  /** P4.3b (optional): escrow payment this map belongs to (future wiring). */
+  paymentId?: string | number | bigint | null;
 }
 
-export default function EvidenceMap({ items, className = "" }: EvidenceMapProps) {
+/**
+ * Resolve the map's escrow chain scope without requiring room-page changes:
+ * explicit prop first, then the validated ?chainId= URL param, then the
+ * Sepolia default. Invalid values fail closed to the default.
+ */
+export function resolveEvidenceMapChainId(
+  chainIdProp: EvidenceMapProps["chainId"],
+  search?: string,
+): number {
+  try {
+    const fromProp = parseEvidenceChainId(chainIdProp ?? null);
+    if (fromProp !== null) return fromProp;
+  } catch {
+    // Invalid explicit prop — fail closed to the default below.
+  }
+  if (typeof search === "string") {
+    try {
+      const fromUrl = parseEvidenceChainId(readEvidenceChainRaw(search));
+      if (fromUrl !== null) return fromUrl;
+    } catch {
+      // Invalid URL chain — fail closed to the default below.
+    }
+  }
+  return EVIDENCE_DEFAULT_CHAIN_ID;
+}
+
+export default function EvidenceMap({
+  items,
+  className = "",
+  chainId,
+  paymentId,
+}: EvidenceMapProps) {
+  // P4.3b D3 privacy: the Room stays hash-only for everyone. This component
+  // never fetches evidence plaintext — it renders only the verification
+  // reference hashes handed down via `items`. Party-authorized plaintext
+  // reads are intentionally NOT wired here (no durable challenge store
+  // exists in this slice; see the P4.3b report).
+  //
+  // The URL chain is read synchronously during render (SSR-safe via the
+  // typeof-window guard). On the rare first-load mismatch (SSR default vs.
+  // an explicit ?chainId=), React patches this single data attribute —
+  // rendered items never differ, so there is no content mismatch.
+  const urlSearch =
+    typeof window === "undefined" ? undefined : window.location.search;
+  const resolvedChainId = useMemo(
+    () => resolveEvidenceMapChainId(chainId, urlSearch),
+    [chainId, urlSearch],
+  );
+
   return (
-    <div className={className}>
+    <div
+      className={className}
+      data-escrow-chain-id={resolvedChainId}
+      data-payment-id={paymentId === null || paymentId === undefined ? undefined : String(paymentId)}
+    >
       <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
         Evidence map
       </h3>

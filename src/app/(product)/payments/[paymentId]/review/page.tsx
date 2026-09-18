@@ -1,13 +1,14 @@
 "use client";
 
-import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
 import LoadingSkeleton from "@/components/ui/LoadingSkeleton";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
+import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
 
 // ---------------------------------------------------------------------------
 // /payments/[paymentId]/review — HUMAN review of the prepared case
@@ -77,8 +78,30 @@ interface ReviewPacketData {
 type ConfirmKind = "approve" | "dispute" | null;
 
 export default function ReviewPage() {
+  return (
+    <Suspense fallback={<LoadingSkeleton />}>
+      <ReviewContent />
+    </Suspense>
+  );
+}
+
+function ReviewContent() {
   const params = useParams<{ paymentId: string }>();
+  const searchParams = useSearchParams();
   const paymentIdStr = params?.paymentId ?? "";
+  // Preserve-or-propagate ?chainId=: only when explicitly present in the URL
+  // (keeps default/Sepolia links byte-identical when absent).
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const explicitChainId =
+    chainResolution.status === "explicit"
+      ? chainResolution.chainId
+      : undefined;
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
   const wallet = useWalletState();
   const { data: payment, isLoading } = usePayment(
     paymentIdStr ? BigInt(paymentIdStr) : undefined,
@@ -96,7 +119,9 @@ export default function ReviewPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/payments/${paymentIdStr}/review-packet`);
+        const res = await fetch(
+          `/api/payments/${paymentIdStr}/review-packet${chainQuery}`,
+        );
         if (!res.ok) throw new Error(`Failed to load review packet (HTTP ${res.status})`);
         const data = (await res.json()) as ReviewPacketData;
         if (!cancelled) setPacketData(data);
@@ -110,7 +135,7 @@ export default function ReviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [paymentIdStr]);
+  }, [paymentIdStr, chainQuery]);
 
   const packet = packetData?.packet;
   const qc = packet?.qualityCheck;
@@ -141,7 +166,7 @@ export default function ReviewPage() {
         <Notice variant="warning">
           <p className="text-[14px] leading-relaxed">{error}</p>
         </Notice>
-        <Link href={`/payments/${paymentIdStr}`}>
+        <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
           <Button variant="secondary" className="mt-4">
             Return to Payment Room
           </Button>
@@ -158,7 +183,7 @@ export default function ReviewPage() {
             No review packet has been prepared for this payment yet.
           </p>
         </Notice>
-        <Link href={`/payments/${paymentIdStr}`}>
+        <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
           <Button variant="secondary" className="mt-4">
             Return to Payment Room
           </Button>
@@ -173,7 +198,7 @@ export default function ReviewPage() {
     <div className="mx-auto max-w-[1200px] px-4 py-8 md:px-6 md:py-10">
       <nav className="mb-6">
         <Link
-          href={`/payments/${paymentIdStr}`}
+          href={`/payments/${paymentIdStr}${chainQuery}`}
           className="text-[13px] text-muted hover:text-ink transition-colors"
         >
           &larr; Back to Payment Room
@@ -192,7 +217,7 @@ export default function ReviewPage() {
             </span>
           </p>
         </div>
-        <Link href={`/payments/${paymentIdStr}`}>
+        <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
           <Button variant="secondary" size="sm">
             Return to Payment Room
           </Button>
@@ -388,7 +413,7 @@ export default function ReviewPage() {
             signed on this page.
           </p>
           <div className="mt-4 flex items-center gap-3">
-            <Link href={`/payments/${paymentIdStr}`}>
+            <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
               <Button variant="primary">Continue in Payment Room</Button>
             </Link>
             <Button variant="ghost" onClick={() => setConfirm(null)}>
@@ -410,7 +435,7 @@ export default function ReviewPage() {
             page.
           </p>
           <div className="mt-4 flex items-center gap-3">
-            <Link href={`/payments/${paymentIdStr}/dispute`}>
+            <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
               <Button variant="primary">Continue to dispute flow</Button>
             </Link>
             <Button variant="ghost" onClick={() => setConfirm(null)}>

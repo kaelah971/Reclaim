@@ -63,27 +63,61 @@ function getRpcForChain(chainId: number): string {
  * (chainId / escrowChainId / chain_id). Defaults to Celo Sepolia to preserve
  * behavior. Validates against the canonical supported-chain mapping — the URL
  * chain alone is never trusted; the escrow address must resolve canonically.
+ *
+ * P4.3b hardening: when BOTH the query string and the body carry an explicit
+ * chain and they disagree, the request is rejected with CONFLICTING_CHAIN
+ * instead of silently preferring one binding — metadata must never be tied
+ * to an ambiguous canonical payment+chain.
  */
 function resolveEvidenceChain(
   request: NextRequest,
   body: unknown,
 ): { chainId: number; escrowAddress: `0x${string}` } | { error: Response } {
-  let raw: unknown = null;
+  let queryRaw: unknown = null;
   try {
     const url = new URL(request.url);
-    raw =
+    queryRaw =
       url.searchParams.get("chainId") ??
       url.searchParams.get("chain_id") ??
       url.searchParams.get("escrowChainId") ??
       null;
   } catch {
-    raw = null;
+    queryRaw = null;
   }
-  if (raw === null && body !== null && typeof body === "object") {
+  let bodyRaw: unknown = null;
+  if (body !== null && typeof body === "object") {
     const b = body as Record<string, unknown>;
-    raw = b.chainId ?? b.escrowChainId ?? b.chain_id ?? b.escrow_chain_id ?? null;
+    bodyRaw = b.chainId ?? b.escrowChainId ?? b.chain_id ?? b.escrow_chain_id ?? null;
   }
-  let chainId: number = CELO_CHAIN_ID; // Sepolia default preserves existing behavior.
+  // Fail closed on ambiguous bindings: both sources explicit but different.
+  const normalizedQuery =
+    queryRaw === null || String(queryRaw).trim() === "" ? null : String(queryRaw).trim();
+  const normalizedBody =
+    bodyRaw === null ||
+    bodyRaw === undefined ||
+    (typeof bodyRaw === "string" && bodyRaw.trim() === "")
+      ? null
+      : bodyRaw;
+  if (normalizedQuery !== null && normalizedBody !== null) {
+    const queryNum = Number(normalizedQuery);
+    const bodyNum =
+      typeof normalizedBody === "number"
+        ? normalizedBody
+        : Number(String(normalizedBody).trim());
+    if (
+      Number.isSafeInteger(queryNum) &&
+      Number.isSafeInteger(bodyNum) &&
+      queryNum !== bodyNum
+    ) {
+      return {
+        error: NextResponse.json(
+          { error: "Conflicting chain scope in query and body.", code: "CONFLICTING_CHAIN" },
+          { status: 400 },
+        ),
+      };
+    }
+  }
+  const raw: unknown = normalizedQuery ?? normalizedBody;  let chainId: number = CELO_CHAIN_ID; // Sepolia default preserves existing behavior.
   if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
     const parsed = typeof raw === "number" ? raw : Number(String(raw).trim());
     if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -155,6 +189,15 @@ export async function POST(
 
   try {
     const { paymentId } = await params;
+
+    // P4.3b hardening: reject non-numeric payment ids with 400 instead of
+    // surfacing a 500 from the on-chain BigInt conversion.
+    if (!paymentId || !/^\d+$/.test(paymentId)) {
+      return NextResponse.json(
+        { error: "Invalid payment id.", code: "INVALID_PAYMENT_ID" },
+        { status: 400 },
+      );
+    }
 
     // Parse body
     let body: unknown;

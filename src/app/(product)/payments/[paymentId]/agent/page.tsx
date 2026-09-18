@@ -1,7 +1,7 @@
 "use client";
 
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSignMessage } from "wagmi";
 import AgentHeader from "@/components/agent/AgentHeader";
@@ -18,6 +18,7 @@ import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { buildAgentDetailsMessage } from "@/lib/resolution-agent/api/auth";
 import { encodeWalletAuthMessage } from "@/lib/x402/walletAuth";
+import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,8 +87,37 @@ interface EvidenceRequest {
 // ---------------------------------------------------------------------------
 
 export default function AgentControlRoomPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-8 md:px-6 md:py-10">
+          <LoadingSkeleton />
+        </div>
+      }
+    >
+      <AgentControlRoomContent />
+    </Suspense>
+  );
+}
+
+function AgentControlRoomContent() {
   const params = useParams<{ paymentId: string }>();
+  const searchParams = useSearchParams();
   const paymentId = params?.paymentId ?? "";
+
+  // Preserve-or-propagate ?chainId=: only when explicitly present in the URL
+  // (keeps default/Sepolia links byte-identical when absent).
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const explicitChainId =
+    chainResolution.status === "explicit"
+      ? chainResolution.chainId
+      : undefined;
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
 
   // Safe bigint conversion for the on-chain payment state read — only pure
   // numeric payment IDs are accepted (hyphen/space-formatted IDs are not).
@@ -187,7 +217,9 @@ export default function AgentControlRoomPage() {
     async function checkPacket() {
       if (!paymentId) return;
       try {
-        const res = await fetch(`/api/payments/${paymentId}/review-packet`);
+        const res = await fetch(
+          `/api/payments/${paymentId}/review-packet${chainQuery}`,
+        );
         if (!res.ok) return;
         const data = (await res.json()) as { found?: boolean };
         if (!cancelled && data.found) setHasReviewPacket(true);
@@ -199,7 +231,7 @@ export default function AgentControlRoomPage() {
     return () => {
       cancelled = true;
     };
-  }, [paymentId]);
+  }, [paymentId, chainQuery]);
 
   // Loading state
   if (loading) {
@@ -227,7 +259,7 @@ export default function AgentControlRoomPage() {
           title="No Resolution Agent"
           description="A resolution agent has not been created for this payment yet."
           actionLabel="Return to Payment Room"
-          actionHref={`/payments/${paymentId}`}
+          actionHref={`/payments/${paymentId}${chainQuery}`}
         />
       </div>
     );
@@ -239,13 +271,13 @@ export default function AgentControlRoomPage() {
       {/* Breadcrumb */}
       <nav className="mb-6 flex items-center gap-3">
         <Link
-          href={`/payments/${paymentId}`}
+          href={`/payments/${paymentId}${chainQuery}`}
           className="text-[13px] text-muted hover:text-ink transition-colors"
         >
           &larr; Back to Payment Room
         </Link>
         <Link
-          href={`/payments/${paymentId}/review`}
+          href={`/payments/${paymentId}/review${chainQuery}`}
           className="text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
         >
           Review case
@@ -268,7 +300,7 @@ export default function AgentControlRoomPage() {
             toolExecutions={toolExecutions}
             evidenceRequests={evidenceRequests}
             hasReviewPacket={hasReviewPacket}
-            reviewHref={`/payments/${paymentId}/review`}
+            reviewHref={`/payments/${paymentId}/review${chainQuery}`}
           />
 
           <AgentEvidenceRequests requests={evidenceRequests} />

@@ -7,6 +7,7 @@ import {
   type EvidenceFormData,
 } from "@/lib/evidence/manifest";
 import { useSubmitEvidenceHash } from "@/hooks/contracts/useEscrowActions";
+import { getEscrowChainId } from "@/lib/contracts/config";
 import type { EscrowChainReference } from "@/lib/contracts/config";
 import { celoChain } from "@/lib/web3/chains";
 
@@ -92,6 +93,12 @@ export function useSubmitEvidenceFlow(
 
   // After the tx receipt confirms, persist the metadata. Success is only
   // presented once the metadata POST itself succeeded.
+  //
+  // P4.3b: the POST body carries the explicit escrow chain so the server
+  // verifies the manifest hash against the canonical payment+chain (never
+  // the Sepolia default for a Mainnet submission). The URL is unchanged for
+  // backward compatibility; the server also accepts ?chainId=.
+  const escrowChainId = String(getEscrowChainId(chain));
   useEffect(() => {
     if (!isTxConfirmed || !txHash || !submittedRef.current) return;
     if (metadataState !== "idle") return;
@@ -111,6 +118,8 @@ export function useSubmitEvidenceFlow(
         externalRef: stored.externalRef,
         pastedText: stored.pastedText,
         fileHash: stored.fileHash,
+        chainId: Number(escrowChainId),
+        escrowChainId,
       }),
     })
       .then(async (res) => {
@@ -138,7 +147,7 @@ export function useSubmitEvidenceFlow(
     return () => {
       cancelled = true;
     };
-  }, [isTxConfirmed, txHash, paymentIdStr, metadataState, submitSeq]);
+  }, [isTxConfirmed, txHash, paymentIdStr, metadataState, submitSeq, escrowChainId]);
 
   const retryMetadata = useCallback(() => {
     setMetadataError(null);

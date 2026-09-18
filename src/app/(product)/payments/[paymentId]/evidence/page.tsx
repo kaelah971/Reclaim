@@ -1,7 +1,7 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useMemo, useState, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
 import {
   useSignTypedData,
@@ -20,9 +20,11 @@ import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";
-import SwitchToSepoliaButton from "@/components/ui/SwitchToSepoliaButton";
-import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
-import { normalizeForJson } from "@/lib/x402/jsonSafe";
+import { getCeloExplorerTxUrl, getCeloMainnetExplorerTxUrl, getChainName, CELO_CHAIN_ID } from "@/lib/web3/chains";
+import {
+  readEvidenceChainRaw,
+  resolveEvidenceChainId,
+} from "@/lib/evidence/chainScope";import { normalizeForJson } from "@/lib/x402/jsonSafe";
 import {
   X402_NETWORK,
   X402_PAY_TO_ADDRESS,
@@ -94,7 +96,24 @@ function humanToAtomic(price: string): bigint {
 }
 
 export default function EvidencePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+          <div className="flex flex-col items-center justify-center gap-4">
+            <p className="text-[15px] text-muted">Loading payment data…</p>
+          </div>
+        </div>
+      }
+    >
+      <EvidencePageInner />
+    </Suspense>
+  );
+}
+
+function EvidencePageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const params = useParams<{ paymentId: string }>();
   const paymentIdStr = params?.paymentId;
   const paymentId = useMemo(() => {
@@ -106,10 +125,30 @@ export default function EvidencePage() {
     }
   }, [paymentIdStr]);
 
-  const { requireWallet } = useRequireWallet();
+  const { requireWallet, requestNetworkSwitch } = useRequireWallet();
   const wallet = useWalletState();
 
-  const { data: payment, isLoading, isError, notFound } = usePayment(paymentId);
+  // -----------------------------------------------------------------------
+  // P4.3b chain scope — explicit, validated ?chainId= (Sepolia default
+  // preserves behavior). Unsupported values fail closed (null) and render
+  // an explicit error instead of binding to the wrong canonical escrow.
+  // useSearchParams (Suspense boundary above) keeps SSR and hydration in
+  // agreement — no window reads during render.
+  // -----------------------------------------------------------------------
+  const targetChainId: number | null = useMemo(() => {
+    try {
+      return resolveEvidenceChainId([
+        readEvidenceChainRaw(searchParams.toString()),
+      ]);
+    } catch {
+      return null;
+    }
+  }, [searchParams]);
+
+  const { data: payment, isLoading, isError, notFound } = usePayment(
+    targetChainId === null ? undefined : paymentId,
+    targetChainId ?? CELO_CHAIN_ID,
+  );
   const {
     submit: submitEvidence,
     isPending,
@@ -121,7 +160,7 @@ export default function EvidencePage() {
     metadataError,
     retryMetadata,
     reset,
-  } = useSubmitEvidenceFlow(paymentId, paymentIdStr);
+  } = useSubmitEvidenceFlow(paymentId, paymentIdStr, targetChainId ?? CELO_CHAIN_ID);
 
   // -----------------------------------------------------------------------
   // Evidence quality check state
@@ -598,6 +637,32 @@ export default function EvidencePage() {
     wallet.address &&
     payment.worker.toLowerCase() === wallet.address.toLowerCase();
 
+  // P4.3b fail-closed: an unsupported ?chainId= never binds to an escrow.
+  if (targetChainId === null) {
+    return (
+      <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+        <div className="flex flex-col items-center justify-center gap-4 text-center">
+          <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Unsupported network
+          </h1>
+          <p className="text-[15px] text-muted">
+            This delivery evidence form supports Celo Sepolia and Celo Mainnet.
+            The network in the page URL is not supported.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() => requestNetworkSwitch(CELO_CHAIN_ID)}
+          >
+            Switch to Celo Sepolia
+          </Button>
+          <Link href={`/payments/${paymentIdStr}`}>
+            <Button variant="secondary">Return to Payment Room</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   if (!isWorker) {
     return (
       <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
@@ -640,7 +705,7 @@ export default function EvidencePage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-[32px] leading-[1.1] tracking-[-0.02em] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[44px]">
-            Submit evidence
+            Add delivery evidence
           </h1>
           <p className="mt-1 text-[15px] text-muted">
             {payment.state === "DeliverySubmitted"
@@ -656,13 +721,28 @@ export default function EvidencePage() {
       </div>
 
       <div className="mt-8">
-        {/* Real network action: shown only when the resolved provider chain
-            is NOT Celo Sepolia. Hides itself when already on Sepolia. */}
+        {/* Wrong-network action: shown only when the connected wallet chain
+            differs from this form's explicit escrow chain. Switches to the
+            form's chain (Sepolia default preserves behavior). */}
         {wallet.isConnected &&
           wallet.chainId !== undefined &&
-          wallet.chainId !== 11142220 && (
+          wallet.chainId !== targetChainId && (
             <div className="mb-6">
-              <SwitchToSepoliaButton />
+              <Notice variant="warning">
+                <p className="text-[14px] leading-relaxed">
+                  Your wallet is on {getChainName(wallet.chainId)}. This
+                  delivery evidence will be recorded on{" "}
+                  {getChainName(targetChainId)}.
+                </p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="mt-3"
+                  onClick={() => requestNetworkSwitch(targetChainId)}
+                >
+                  Switch to {getChainName(targetChainId)}
+                </Button>
+              </Notice>
             </div>
           )}
 
@@ -777,7 +857,11 @@ export default function EvidencePage() {
                 </p>
               )}
               <a
-                href={getCeloExplorerTxUrl(txHash)}
+                href={
+                  targetChainId === CELO_MAINNET_CHAIN_ID
+                    ? getCeloMainnetExplorerTxUrl(txHash)
+                    : getCeloExplorerTxUrl(txHash)
+                }
                 target="_blank"
                 rel="noopener noreferrer"
                 className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"

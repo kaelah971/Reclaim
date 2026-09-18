@@ -281,7 +281,7 @@ export default function EvidenceForm({
       </Notice>
 
       <div className="flex items-center gap-3">
-        <Button onClick={handleSubmit}>Add evidence</Button>
+        <Button onClick={handleSubmit}>Add delivery evidence</Button>
 
         {/* ---- Evidence strength check button (state-dependent) ---- */}
         {checkStrengthState === "idle" && (
