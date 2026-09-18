@@ -190,9 +190,18 @@ describe("CeloEscrowCaseReader", () => {
     expect(reader.contractAddress).toBe(CANONICAL_ESCROW_CONTRACT_ADDRESS);
   });
 
-  it("fails closed for mainnet until its escrow address is configured", () => {
-    expect(() => new CeloEscrowCaseReader(42220)).toThrow(
-      /not deployed on chain 42220/i,
+  it("resolves the deployed mainnet escrow without confusing it with Sepolia", () => {
+    const reader = new CeloEscrowCaseReader(42220);
+    expect(reader.chainId).toBe(42220);
+    expect(reader.contractAddress).toBe(
+      "0xE42cF4620DE454bE0De5004255d25683e4F882c4",
+    );
+    expect(reader.contractAddress).not.toBe(CANONICAL_ESCROW_CONTRACT_ADDRESS);
+  });
+
+  it("fails closed for chains without a deployed escrow", () => {
+    expect(() => new CeloEscrowCaseReader(1)).toThrow(
+      /Unsupported escrow chain/i,
     );
   });
 });

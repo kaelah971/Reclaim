@@ -1,0 +1,38 @@
+{
+  "contractName": "ProtectedPaymentEscrow",
+  "network": "celo-mainnet",
+  "chainId": 42220,
+  "rpcUrl": "https://forno.celo.org",
+  "canonicalVersion": "v1",
+  "versions": {
+    "v1": {
+      "address": "0xE42cF4620DE454bE0De5004255d25683e4F882c4",
+      "deploymentTransaction": "0x9f2c79705fc02b60835e37f84caad98b02e17830ec8d3528dc96950387a01ae3",
+      "blockNumber": 77810953,
+      "deployer": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "owner": "0x76D7a718CcDc1c132c52D4C05eA0c2FA8e657486",
+      "constructorArgs": { "_stablecoin": "0xD2ab3C9A02DBBAB236BfEC45D1d755DF4267F771" },
+      "escrowToken": { "address": "0xD2ab3C9A02DBBAB236BfEC45D1d755DF4267F771", "symbol": "USAT", "decimals": 6 },
+      "features": { "resolveDispute": true },
+      "explorer": {
+        "contract": "https://celoscan.io/address/0xE42cF4620DE454bE0De5004255d25683e4F882c4",
+        "deploymentTx": "https://celoscan.io/tx/0x9f2c79705fc02b60835e37f84caad98b02e17830ec8d3528dc96950387a01ae3"
+      },
+      "purpose": "mainnet protected payments with dispute resolution",
+      "deployedAtUtc": "2026-09-18T06:08:31Z",
+      "attribution": "contract-creation transaction is unattributed (no ERC-8021 calldata suffix on create); all later Reclaim-controlled interactions use celo_b7de8bf7e64e"
+    }
+  },
+  "compiler": {
+    "solc": "0.8.28",
+    "evmVersion": "cancun",
+    "optimizer": true,
+    "optimizerRuns": 200,
+    "viaIR": true
+  },
+  "abiExport": {
+    "artifact": "contracts/out/ProtectedPaymentEscrow.sol/ProtectedPaymentEscrow.json",
+    "frontendModule": "src/lib/contracts/ProtectedPaymentEscrow.abi.ts",
+    "regenerate": "forge build (in contracts/) then `npm run abi:export`"
+  }
+}

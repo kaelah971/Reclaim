@@ -30,8 +30,11 @@ export const DEPLOYED_ADDRESSES = {
       "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79" as `0x${string}`,
   },
   [CELO_MAINNET_CHAIN_ID]: {
-    // Deliberately unset until the P3 mainnet deployment is broadcast.
-    protectedPaymentEscrow: undefined,
+    /** P3 mainnet deployment (RA2.3B) — ProtectedPaymentEscrow with resolveDispute.
+     *  Deploy tx: 0x9f2c79705fc02b60835e37f84caad98b02e17830ec8d3528dc96950387a01ae3
+     *  Block: 77810953. Record: contracts/deployments/celo-mainnet.json */
+    protectedPaymentEscrow:
+      "0xE42cF4620DE454bE0De5004255d25683e4F882c4" as `0x${string}`,
   },
 } as const;
 
