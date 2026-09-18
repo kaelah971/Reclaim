@@ -63,6 +63,8 @@ export interface UseProtectPaymentFlowReturn {
   tokenBalance: bigint | undefined;
   /** True while the token balance read is in flight. */
   isLoadingTokenBalance: boolean;
+  /** True while approval is confirmed but allowance is not yet visible (bounded sync). */
+  isSyncingAllowance: boolean;
 }
 
 /**
@@ -94,6 +96,17 @@ export function useProtectPaymentFlow(
   // (request the next transaction) exactly once per step attempt.
   const [started, setStarted] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // Required amount stored on start() for reactivity (drives the
+  // allowance-visibility gate below). Cleared on reset().
+  const [requiredAmount, setRequiredAmount] = useState<bigint | null>(null);
+  // Bounded allowance-visibility barrier: true once the 60s deadline elapses
+  // without observing sufficient allowance.
+  const [syncTimedOut, setSyncTimedOut] = useState(false);
+  const syncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const syncStartRef = useRef<number | null>(null);
+  // Latest refetch without destabilising effect deps (wagmi refetch identity
+  // is stable in prod; the ref keeps the interval stable in tests too).
+  const refetchAllowanceRef = useRef<() => void>(() => {});
   const pendingRef = useRef<{
     params: CreatePaymentParams;
     rawAmount: bigint;
@@ -126,6 +139,29 @@ export function useProtectPaymentFlow(
           ? "approving"
           : "creating";
 
+  // Keep the latest refetch without destabilising the sync effect deps.
+  // Assigned in an effect (never during render).
+  useEffect(() => {
+    refetchAllowanceRef.current = approval.refetchAllowance;
+  });
+
+  // Observed allowance gate: fund may only fire once the RPC visibly reports
+  // allowance >= the exact required amount. This guards the approve→fund
+  // simulateContract (which reverts on stale 0 allowance with NO tx broadcast).
+  const allowanceSufficient =
+    createdPaymentId !== undefined &&
+    approval.isApproveSuccess &&
+    requiredAmount !== null &&
+    approval.allowance !== undefined &&
+    approval.allowance >= requiredAmount;
+
+  const isSyncingAllowance =
+    started &&
+    approval.isApproveSuccess &&
+    !allowanceSufficient &&
+    !syncTimedOut &&
+    !fund.isSuccess;
+
   const start = useCallback(
     (input: ProtectPaymentInput) => {
       if (started) return;
@@ -133,6 +169,7 @@ export function useProtectPaymentFlow(
       pendingRef.current = { params, rawAmount };
       firedApproveRef.current = null;
       firedFundRef.current = null;
+      setRequiredAmount(rawAmount);
       setAttempt(0);
       setStarted(true);
       create.createPayment(params);
@@ -152,16 +189,96 @@ export function useProtectPaymentFlow(
     approval.approve(pending.rawAmount);
   }, [createdPaymentId, attempt, approval]);
 
-  // ---- approve → fund (fired once per attempt) ----
+  // ---- Bounded allowance-visibility barrier ----
+  //
+  // When approval is receipt-confirmed but the observed allowance is still
+  // insufficient (lagging RPC), poll refetchAllowance() on a bounded cadence.
+  // The OBSERVED allowance gate (allowanceSufficient above) is the correctness
+  // mechanism — poll cadence only re-reads; it never forces fund.
+  // Deadline is measured from first entry via syncStartRef so interval
+  // re-creation never extends the 60s bound (no timer-reset loops).
+  useEffect(() => {
+    const needsSync =
+      started &&
+      createdPaymentId !== undefined &&
+      approval.isApproveSuccess &&
+      !allowanceSufficient &&
+      !syncTimedOut &&
+      !fund.isSuccess;
+    if (!needsSync) {
+      if (syncTimerRef.current) {
+        clearInterval(syncTimerRef.current);
+        syncTimerRef.current = null;
+      }
+      syncStartRef.current = null;
+      return;
+    }
+    if (syncStartRef.current === null) {
+      syncStartRef.current = Date.now();
+    }
+    // Stable identity: if already polling, let the observed gate drive
+    // progress instead of resetting the cadence.
+    if (syncTimerRef.current) return;
+    refetchAllowanceRef.current();
+    syncTimerRef.current = setInterval(() => {
+      const startedAt = syncStartRef.current ?? Date.now();
+      if (Date.now() - startedAt >= 60000) {
+        if (syncTimerRef.current) {
+          clearInterval(syncTimerRef.current);
+          syncTimerRef.current = null;
+        }
+        setSyncTimedOut(true);
+        return;
+      }
+      refetchAllowanceRef.current();
+    }, 4000);
+    // Cleanup timer on deps change/unmount. Deadline is preserved via
+    // syncStartRef (only reset when the barrier passes), so re-creation
+    // never extends the bound.
+    return () => {
+      if (syncTimerRef.current) {
+        clearInterval(syncTimerRef.current);
+        syncTimerRef.current = null;
+      }
+    };
+  }, [
+    started,
+    createdPaymentId,
+    approval.isApproveSuccess,
+    allowanceSufficient,
+    syncTimedOut,
+    fund.isSuccess,
+  ]);
+
+  // Unmount safety: never leak the polling timer.
+  useEffect(() => {
+    return () => {
+      if (syncTimerRef.current) {
+        clearInterval(syncTimerRef.current);
+        syncTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // ---- approve → fund (fired once per attempt, gated on observed allowance) ----
   useEffect(() => {
     if (createdPaymentId === undefined) return;
     if (!approval.isApproveSuccess) return;
+    // Barrier not passed: return WITHOUT setting firedFundRef so the
+    // exactly-once key fires later once allowance is observed.
+    if (!allowanceSufficient) return;
     if (fund.isSuccess || fund.isPending) return;
     const key = `${createdPaymentId.toString()}:${attempt}`;
     if (firedFundRef.current === key) return;
     firedFundRef.current = key;
     fund.action(createdPaymentId);
-  }, [createdPaymentId, attempt, approval.isApproveSuccess, fund]);
+  }, [
+    createdPaymentId,
+    attempt,
+    approval.isApproveSuccess,
+    allowanceSufficient,
+    fund,
+  ]);
 
   const retry = useCallback(() => {
     const pending = pendingRef.current;
@@ -176,6 +293,9 @@ export function useProtectPaymentFlow(
     // attempt issues a fresh exactly-once key, so a retry NEVER re-creates
     // (create is only ever called from start/retry-creating) and never
     // re-approves when retrying fund (guarded by isApproveSuccess).
+    // Clear the sync timeout first so a post-timeout retry with now-sufficient
+    // allowance fires fund-only (create/approve never re-fire by design).
+    setSyncTimedOut(false);
     setAttempt((n) => n + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started, phase]);
@@ -184,6 +304,13 @@ export function useProtectPaymentFlow(
     pendingRef.current = null;
     firedApproveRef.current = null;
     firedFundRef.current = null;
+    if (syncTimerRef.current) {
+      clearInterval(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    syncStartRef.current = null;
+    setSyncTimedOut(false);
+    setRequiredAmount(null);
     setAttempt(0);
     setStarted(false);
     create.reset();
@@ -200,7 +327,10 @@ export function useProtectPaymentFlow(
   const error = useMemo(() => {
     if (phase === "creating") return missingIdError ?? create.error;
     if (phase === "approving") return approval.approveError;
-    if (phase === "funding") return fund.error;
+    if (phase === "funding")
+      return syncTimedOut
+        ? "Your approval is confirmed on-chain, but the network has not caught up yet. Wait a moment and retry — your approval will not be sent again."
+        : fund.error;
     return null;
   }, [
     phase,
@@ -208,6 +338,7 @@ export function useProtectPaymentFlow(
     create.error,
     approval.approveError,
     fund.error,
+    syncTimedOut,
   ]);
 
   const progressLabel = useMemo(() => {
@@ -240,5 +371,6 @@ export function useProtectPaymentFlow(
     fundTxHash: fund.txHash,
     tokenBalance: approval.balance,
     isLoadingTokenBalance: approval.isLoadingBalance,
+    isSyncingAllowance,
   };
 }

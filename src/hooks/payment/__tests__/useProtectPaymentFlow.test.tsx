@@ -133,11 +133,20 @@ function setupWagmiLayer() {
   simulateContract = vi.fn(() => Promise.resolve({ request: {} }));
   wagmiMocks.usePublicClient.mockReturnValue({ simulateContract });
 
-  wagmiMocks.useReadContract.mockReturnValue({
-    data: undefined,
+  // Allowance reads resolve immediately sufficient (RAW_AMOUNT) so the
+  // allowance-visibility barrier passes without waiting: these tests cover
+  // orchestration order/attribution/retry, while stale-allowance syncing is
+  // covered in useProtectPaymentFlow-sync.test.tsx. Balance stays undefined
+  // (never asserted here).
+  wagmiMocks.useReadContract.mockImplementation((params: unknown) => ({
+    data:
+      (params as { functionName?: string } | undefined)?.functionName ===
+      "allowance"
+        ? RAW_AMOUNT
+        : undefined,
     isLoading: false,
     refetch: vi.fn(),
-  });
+  }));
 
   wagmiMocks.useWriteContract.mockImplementation(() => {
     const slot = writeSlots[writeCallIndex++ % 3]!;
