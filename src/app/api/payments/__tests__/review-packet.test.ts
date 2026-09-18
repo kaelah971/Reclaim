@@ -83,6 +83,8 @@ describe("GET /api/payments/[paymentId]/review-packet", () => {
     expect(body.packetEventId).toBe("437c351a-5875-4fc5-8574-dacca19595bb");
     expect(body.packet.schemaVersion).toBe("reclaim-review-packet-v1");
     expect(body.packet.qualityCheck.readiness).toBe("needs_improvement");
+    // P4.3D: public review-packet is hash-only — QC free text redacted.
+    expect(body.packet.qualityCheck.reviewerQuestions).toEqual([]);
     // The agent lookup is bound by the canonical escrow identity (no role).
     expect(storeMock.getAgentByCaseIdentity).toHaveBeenCalledWith(
       "11142220",

@@ -4,9 +4,12 @@
 // Public-safe, READ-ONLY: returns the canonical final receipt for a payment.
 // The receipt is composed from DURABLE, VERIFIED sources only:
 //   - live on-chain escrow state + release/evidence tx proofs (read-only)
-//   - verified evidence metadata (evidence_metadata table)
-//   - the resolution agent's durable review packet (QC provenance incl.
-//     recorded QC-vs-verified-evidence inconsistencies)
+//   - verified evidence metadata (evidence_metadata table) — HASH-ONLY (P4.3D)
+//   - the resolution agent's durable review packet (QC provenance hash-only;
+//     QC free text redacted — P4.3D)
+//
+// Plaintext delivery evidence is NEVER returned here; parties use the
+// wallet-challenge .../evidence/plaintext endpoint.
 //
 // No signing, no mutation, no re-execution, no x402 calls.
 // Missing sources produce null fields — nothing is fabricated.
@@ -47,6 +50,10 @@ import {
 } from "@/lib/web3/chains";
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 import { fromBytes32Label } from "@/lib/contracts/types";
+import {
+  sanitizeReceiptEvidenceForPublic,
+  sanitizeReceiptQualityCheckForPublic,
+} from "@/lib/evidence/publicSanitize";
 import { createPublicClient, http } from "viem";
 import { celo } from "viem/chains";
 
@@ -215,9 +222,9 @@ export async function GET(
     const packet = packetEvent?.metadata ?? null;
     const packetEvidence = (packet?.evidence ?? {}) as Record<string, unknown>;
     const packetQc = (packet?.qualityCheck ?? {}) as Record<string, unknown>;
-    const qcInconsistency = Array.isArray(packet?.qcInconsistency)
-      ? (packet.qcInconsistency as string[])
-      : [];
+    // P4.3D: qcInconsistency free text may quote worker content, so it is
+    // redacted from the public receipt (see sanitizeReceiptQualityCheckForPublic).
+    // The durable packet itself is unchanged.
 
     // Older callers/tests may provide a release-only proof bundle. Treat
     // omitted non-release proofs as absent rather than inferring an outcome.
@@ -308,11 +315,12 @@ export async function GET(
       disputeWindowSeconds: proof.state.disputeWindowSeconds,
     };
 
-    const evidence: ReceiptEvidence = {
-      title: (facts.title as string | null) ?? null,
-      claim: (facts.relatedClaim as string | null) ?? null,
-      date: (facts.evidenceDate as string | null) ?? null,
-      pastedText: (facts.pastedText as string | null) ?? null,
+    // P4.3D: public receipt is hash-only. Plaintext delivery evidence
+    // (title/claim/date/pasted text) and QC free text that may quote worker
+    // content are redacted here. Party plaintext reads use the wallet-challenge
+    // .../evidence/plaintext endpoint. Safe fields (hash, availability,
+    // counts, provenance, readiness enum) are preserved.
+    const evidence: ReceiptEvidence = sanitizeReceiptEvidenceForPublic({
       evidenceReference: proof.state.evidenceReference || null,
       availability: facts.substantiveEvidence ? "package_available" : null,
       evidenceType: (facts.evidenceType as string | null) ?? null,
@@ -321,7 +329,7 @@ export async function GET(
         : null,
       submitter: (facts.submitterAddress as string | null) ?? null,
       submissionTxHash: proof.evidenceSubmission.txHash,
-    };
+    });
 
     const resolutionAgent: ReceiptResolutionAgent = {
       agentId: agent?.id ?? null,
@@ -334,28 +342,17 @@ export async function GET(
         qcEvidenceVersionHash,
     };
 
-    const qualityCheck: ReceiptQualityCheck = {
+    const qualityCheck: ReceiptQualityCheck = sanitizeReceiptQualityCheckForPublic({
       toolId: (packetQc.toolId as string | null) ?? TOOL_ID,
       priceHuman: qcPriceAtomic !== null ? `$${fromAtomicUnits(qcPriceAtomic)} USDC` : null,
       network: "Celo Mainnet",
       facilitatorUrl: facilitatorClient.url,
       executionRequestHash: (packetQc.executionRequestHash as string | null) ?? null,
       readiness: (packetQc.readiness as string | null) ?? null,
-      reviewerQuestions: Array.isArray(packetQc.reviewerQuestions)
-        ? (packetQc.reviewerQuestions as string[])
-        : [],
-      ambiguities: Array.isArray(packetQc.ambiguities)
-        ? (packetQc.ambiguities as string[])
-        : [],
-      recommendedImprovements: Array.isArray(packetQc.recommendedImprovements)
-        ? (packetQc.recommendedImprovements as string[])
-        : [],
       settlementTxHash: qcSettlementTxHash,
       paymentReference: qcPaymentReference,
       resultReference: qcResultReference,
-      // Recorded contradictions with verified evidence — never hidden.
-      inconsistencies: qcInconsistency,
-    };
+    });
 
     const actionProof =
       escrowStateLabel === "released"

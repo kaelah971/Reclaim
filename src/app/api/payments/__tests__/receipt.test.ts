@@ -221,9 +221,18 @@ describe("GET /api/payments/[paymentId]/receipt", () => {
     expect(body.receipt.qualityCheck.network).toBe("Celo Mainnet");
     expect(body.receipt.qualityCheck.facilitatorUrl).toBe("https://api.x402.celo.org");
     expect(body.receipt.qualityCheck.settlementTxHash).toBe(X402_TX);
-    expect(body.receipt.qualityCheck.inconsistencies).toContain(
-      "QC states there is no pasted text, but verified evidence contains pasted text.",
-    );
+    // P4.3D: public receipt is hash-only — QC free text (which may quote
+    // worker content) is redacted. Party plaintext reads use the
+    // wallet-challenge .../evidence/plaintext endpoint.
+    expect(body.receipt.qualityCheck.inconsistencies).toEqual([]);
+    expect(body.receipt.qualityCheck.reviewerQuestions).toEqual([]);
+    expect(body.receipt.qualityCheck.ambiguities).toEqual([]);
+    expect(body.receipt.qualityCheck.recommendedImprovements).toEqual([]);
+    // Plaintext delivery evidence is redacted from the public receipt.
+    expect(body.receipt.evidence.title).toBeNull();
+    expect(body.receipt.evidence.claim).toBeNull();
+    expect(body.receipt.evidence.pastedText).toBeNull();
+    expect(body.receipt.evidence.date).toBeNull();
 
     // Human decision attribution (sender == client)
     expect(body.receipt.humanDecision.decision).toBe("Approve release");

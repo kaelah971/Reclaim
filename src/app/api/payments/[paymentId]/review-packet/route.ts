@@ -3,8 +3,9 @@
 //
 // Public-safe, read-only: returns the latest durable human-review packet
 // (the resolution agent's review_packet_prepared event) for the given
-// escrow payment. All content is case data already public to the parties;
-// no secrets, private keys, or internal state are exposed.
+// escrow payment. P4.3D: the packet is returned HASH-ONLY — plaintext delivery
+// evidence and QC free text are redacted (see publicSanitize). No secrets,
+// private keys, or internal state are exposed.
 //
 // Response:
 //   200 { found: true,  agentId, packetEventId, packet } — packet metadata
@@ -15,6 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supabase";
 import { getSupabaseClient } from "@/lib/supabase/client";
+import { sanitizeReviewPacketForPublic } from "@/lib/evidence/publicSanitize";
 import {
   CeloEscrowCaseReader,
   CeloSepoliaEscrowCaseReader,
@@ -111,6 +113,11 @@ export async function GET(
       | Record<string, unknown>
       | null;
 
+    // P4.3D: public review-packet is hash-only. Plaintext delivery evidence
+    // and QC free text that may quote worker content are redacted. Party
+    // plaintext reads use the wallet-challenge .../evidence/plaintext endpoint.
+    const publicPacket = sanitizeReviewPacketForPublic(packet);
+
     return NextResponse.json(
       {
         found: true,
@@ -118,7 +125,7 @@ export async function GET(
         agentId: agent.id,
         packetEventId: (latest as Record<string, unknown>).id,
         packetCreatedAt: (latest as Record<string, unknown>).created_at,
-        packet,
+        packet: publicPacket,
       },
       { status: 200 },
     );
