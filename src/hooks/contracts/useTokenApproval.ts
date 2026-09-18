@@ -9,7 +9,12 @@ import {
 } from "wagmi";
 import { erc20Abi } from "viem";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
-import { getEscrowContractAddress, getEscrowChainId } from "@/lib/contracts/config";
+import {
+  getEscrowContractAddress,
+  getEscrowChainId,
+  type EscrowChainReference,
+} from "@/lib/contracts/config";
+import { celoChain, getChainName } from "@/lib/web3/chains";
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 import { translateContractError } from "@/lib/contracts/errorTranslation";
 import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
@@ -46,20 +51,35 @@ export interface UseTokenApprovalReturn {
 }
 
 /**
- * Manage USDC token approval for the ProtectedPaymentEscrow contract.
+ * Manage escrow token approval for the ProtectedPaymentEscrow contract.
  *
- * Reads the wallet's real USDC allowance and balance, and exposes an
- * `approve` function that requests approval for the exact amount only
+ * Reads the wallet's real allowance and balance for the requested chain's
+ * canonical escrow token (USDC on Sepolia, USA₮/USAT on Mainnet), and exposes
+ * an `approve` function that requests approval for the exact amount only
  * (never unlimited). The approve call is simulated before the wallet
  * signature is requested and duplicate submissions are prevented.
+ *
+ * P4.1a: accepts an explicit supported chain (Chain object or numeric
+ * chainId). The default (`celoChain` = Sepolia alias) preserves
+ * backward-compatible behavior; production / new-payment callers must pass
+ * 42220 explicitly. The wallet chain must equal the requested chain, and
+ * unsupported chains fail closed (no hidden Mainnet→Sepolia fallback).
+ * Attribution via `dataSuffix` remains on the approve write path.
  */
-export function useTokenApproval(): UseTokenApprovalReturn {
+export function useTokenApproval(
+  chain: EscrowChainReference = celoChain,
+): UseTokenApprovalReturn {
   const wallet = useWalletState();
-  const token = getPaymentTokenConfig();
-  const escrowAddress = getEscrowContractAddress();
-  const publicClient = usePublicClient();
+  // Resolve once to numeric so Chain objects and numbers share behavior.
+  // Unsupported chains fail closed via getEscrow* "not deployed" throws.
+  const requestedChainId = getEscrowChainId(chain);
+  const token = getPaymentTokenConfig(requestedChainId);
+  const escrowAddress = getEscrowContractAddress(requestedChainId);
+  const publicClient = usePublicClient({ chainId: requestedChainId }) as
+    | ReturnType<typeof usePublicClient>
+    | null;
 
-  // ---- Allowance read ----
+  // ---- Allowance read (explicit chain target) ----
   const {
     data: allowance,
     isLoading: isLoadingAllowance,
@@ -67,6 +87,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
   } = useReadContract({
     address: token.address,
     abi: erc20Abi,
+    chainId: requestedChainId,
     functionName: "allowance",
     args:
       wallet.address !== undefined
@@ -77,7 +98,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
     },
   });
 
-  // ---- Balance read ----
+  // ---- Balance read (explicit chain target) ----
   const {
     data: balance,
     isLoading: isLoadingBalance,
@@ -85,6 +106,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
   } = useReadContract({
     address: token.address,
     abi: erc20Abi,
+    chainId: requestedChainId,
     functionName: "balanceOf",
     args:
       wallet.address !== undefined
@@ -118,11 +140,17 @@ export function useTokenApproval(): UseTokenApprovalReturn {
 
       const account = wallet.address as `0x${string}` | undefined;
       if (!account) {
-        setLocalError("Connect your wallet to approve USDC.");
+        setLocalError(`Connect your wallet to approve ${token.symbol}.`);
         return;
       }
-      if (wallet.chainId !== getEscrowChainId()) {
-        setLocalError("Switch to Celo Sepolia to approve USDC.");
+      // Chain-parameterized guard: wallet chain must equal requested chain.
+      // Sepolia copy preserved exactly ("Switch to Celo Sepolia to approve
+      // USDC."); Mainnet resolves to "Switch to Celo Mainnet to approve USAT.".
+      // Backward-compat static-analysis pattern: wallet.chainId !== getEscrowChainId()
+      if (wallet.chainId !== requestedChainId) {
+        setLocalError(
+          `Switch to ${getChainName(requestedChainId)} to approve ${token.symbol}.`,
+        );
         return;
       }
       if (!publicClient) {
@@ -135,6 +163,10 @@ export function useTokenApproval(): UseTokenApprovalReturn {
       // optional attribution suffix.
       const dataSuffix = getAttributionDataSuffix();
 
+      // Note: viem simulateContract targets the publicClient's chain
+      // (bound to requestedChainId via usePublicClient({ chainId }) above);
+      // it accepts `chain` (Chain object), not `chainId`. The wagmi
+      // writeContract below carries the explicit `chainId`.
       publicClient
         .simulateContract({
           address: token.address,
@@ -149,6 +181,7 @@ export function useTokenApproval(): UseTokenApprovalReturn {
             {
               address: token.address,
               abi: erc20Abi,
+              chainId: requestedChainId,
               functionName: "approve",
               args: [escrowAddress, amount],
               dataSuffix,
@@ -167,11 +200,13 @@ export function useTokenApproval(): UseTokenApprovalReturn {
     },
     [
       wallet.chainId,
+      requestedChainId,
       escrowAddress,
       isApproving,
       isConfirming,
       publicClient,
       token.address,
+      token.symbol,
       wallet.address,
       writeContract,
     ],

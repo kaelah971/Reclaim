@@ -15,9 +15,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supabase";
 import { getSupabaseClient } from "@/lib/supabase/client";
-import { CeloSepoliaEscrowCaseReader } from "@/lib/resolution-agent/api/escrow-reader";
+import {
+  CeloEscrowCaseReader,
+  CeloSepoliaEscrowCaseReader,
+} from "@/lib/resolution-agent/api/escrow-reader";
 import { SupabaseEvidenceReader } from "@/lib/evidence/reader";
-import { CeloSepoliaChainFinalProofReader } from "@/lib/evidence/chainProvenance";
+import {
+  CeloChainFinalProofReader,
+  CeloSepoliaChainFinalProofReader,
+} from "@/lib/evidence/chainProvenance";
 import {
   buildFinalReceipt,
   AGENT_STATEMENT,
@@ -31,14 +37,41 @@ import {
 } from "@/lib/evidence/finalReceipt";
 import { fromAtomicUnits, facilitatorClient } from "@/lib/x402/config";
 import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
   getCeloExplorerTxUrl,
   getCeloExplorerAddressUrl,
+  getCeloMainnetExplorerAddressUrl,
   getCeloMainnetExplorerTxUrl,
+  isSupportedChain,
 } from "@/lib/web3/chains";
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 import { fromBytes32Label } from "@/lib/contracts/types";
 import { createPublicClient, http } from "viem";
 import { celo } from "viem/chains";
+
+/**
+ * Resolve an explicit chainId (?chainId=). Defaults to Celo Sepolia to
+ * preserve behavior. Validated against the canonical supported-chain mapping;
+ * unsupported values are rejected (never trust the URL chain alone).
+ */
+function resolveReceiptChainId(request: NextRequest): number | null {
+  let raw: string | null = null;
+  try {
+    const url = new URL(request.url);
+    raw =
+      url.searchParams.get("chainId") ??
+      url.searchParams.get("chain_id") ??
+      url.searchParams.get("escrowChainId");
+  } catch {
+    raw = null;
+  }
+  if (raw === null || raw.trim() === "") return CELO_CHAIN_ID;
+  const parsed = Number(raw.trim());
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  if (!isSupportedChain(parsed)) return null;
+  return parsed;
+}
 
 const PACKET_EVENT_TYPE = "review_packet_prepared";
 const TOOL_ID = "evidence-quality-check";
@@ -134,20 +167,42 @@ export async function GET(
       );
     }
 
+    // ---- 0. Chain scope (explicit ?chainId=, Sepolia default) -------------
+    const chainId = resolveReceiptChainId(request);
+    if (chainId === null) {
+      return NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      );
+    }
+    const isMainnet = chainId === CELO_MAINNET_CHAIN_ID;
+
     // ---- 1. On-chain final state + release/evidence proofs (read-only) ----
-    const proofReader = new CeloSepoliaChainFinalProofReader();
+    // Sepolia default path is preserved exactly; Mainnet verifies against the
+    // canonical Mainnet escrow via the chain-aware reader.
+    const proofReader = isMainnet
+      ? new CeloChainFinalProofReader(chainId)
+      : new CeloSepoliaChainFinalProofReader();
     const proof = await proofReader.readFinalProof(BigInt(paymentId));
     if (!proof) {
       return NextResponse.json({ found: false, paymentId }, { status: 200 });
     }
 
-    const escrowReader = new CeloSepoliaEscrowCaseReader(
-      process.env.CELO_SEPOLIA_RPC_URL,
-    );
+    const escrowReader = isMainnet
+      ? new CeloEscrowCaseReader(
+          chainId,
+          process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL,
+        )
+      : new CeloSepoliaEscrowCaseReader(
+          process.env.CELO_SEPOLIA_RPC_URL,
+        );
 
     // ---- 2. Verified evidence metadata -------------------------------------
     const evidenceReader = new SupabaseEvidenceReader();
-    const facts = await evidenceReader.getEvidenceMetadata(paymentId);
+    const facts = await evidenceReader.getEvidenceMetadata(
+      paymentId,
+      String(chainId),
+    );
 
     // ---- 3. Resolution agent + durable review packet -----------------------
     const store = new SupabaseResolutionAgentStore();
@@ -207,7 +262,7 @@ export async function GET(
     }
 
     // ---- 5. Human decision attribution -------------------------------------
-    const token = getPaymentTokenConfig();
+    const token = getPaymentTokenConfig(chainId);
     const amountHuman = fromAtomicUnits(
       BigInt(proof.state.amount),
       token.decimals,
@@ -362,26 +417,42 @@ export async function GET(
 
     const audit: ReceiptAudit = {
       explorerLinks: {
-        escrowContract: getCeloExplorerAddressUrl(escrowReader.contractAddress),
-        client: getCeloExplorerAddressUrl(proof.state.client),
-        worker: getCeloExplorerAddressUrl(proof.state.worker),
+        escrowContract: isMainnet
+          ? getCeloMainnetExplorerAddressUrl(escrowReader.contractAddress)
+          : getCeloExplorerAddressUrl(escrowReader.contractAddress),
+        client: isMainnet
+          ? getCeloMainnetExplorerAddressUrl(proof.state.client)
+          : getCeloExplorerAddressUrl(proof.state.client),
+        worker: isMainnet
+          ? getCeloMainnetExplorerAddressUrl(proof.state.worker)
+          : getCeloExplorerAddressUrl(proof.state.worker),
         releaseTransaction: escrowStateLabel === "released" && proof.release.txHash
-          ? getCeloExplorerTxUrl(proof.release.txHash)
+          ? isMainnet
+            ? getCeloMainnetExplorerTxUrl(proof.release.txHash)
+            : getCeloExplorerTxUrl(proof.release.txHash)
           : null,
         evidenceSubmissionTransaction: proof.evidenceSubmission.txHash
-          ? getCeloExplorerTxUrl(proof.evidenceSubmission.txHash)
+          ? isMainnet
+            ? getCeloMainnetExplorerTxUrl(proof.evidenceSubmission.txHash)
+            : getCeloExplorerTxUrl(proof.evidenceSubmission.txHash)
           : null,
         x402SettlementTransaction: qualityCheck.settlementTxHash
           ? getCeloMainnetExplorerTxUrl(qualityCheck.settlementTxHash)
           : null,
         disputeTransaction: disputeProof.txHash
-          ? getCeloExplorerTxUrl(disputeProof.txHash)
+          ? isMainnet
+            ? getCeloMainnetExplorerTxUrl(disputeProof.txHash)
+            : getCeloExplorerTxUrl(disputeProof.txHash)
           : null,
         resolutionTransaction: resolutionProof.txHash
-          ? getCeloExplorerTxUrl(resolutionProof.txHash)
+          ? isMainnet
+            ? getCeloMainnetExplorerTxUrl(resolutionProof.txHash)
+            : getCeloExplorerTxUrl(resolutionProof.txHash)
           : null,
         cancellationTransaction: cancellationProof.txHash
-          ? getCeloExplorerTxUrl(cancellationProof.txHash)
+          ? isMainnet
+            ? getCeloMainnetExplorerTxUrl(cancellationProof.txHash)
+            : getCeloExplorerTxUrl(cancellationProof.txHash)
           : null,
       },
       timestamps: {

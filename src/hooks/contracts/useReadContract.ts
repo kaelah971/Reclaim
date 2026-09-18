@@ -2,12 +2,29 @@
 
 import { useMemo } from "react";
 import { useReadContract } from "wagmi";
-import { getEscrowContractConfig } from "@/lib/contracts/config";
+import {
+  getEscrowContractConfig,
+  type EscrowChainReference,
+} from "@/lib/contracts/config";
+import { celoChain } from "@/lib/web3/chains";
 import {
   parsePaymentData,
   type PaymentData,
   type RawPaymentStruct,
 } from "@/lib/contracts/types";
+
+// ---------------------------------------------------------------------------
+// P4.1a — explicit chain plumbing.
+//
+// Every read accepts an explicit supported chain (Chain object or numeric
+// chainId) and threads it into getEscrowContractConfig so the wagmi read
+// targets address+abi+chainId explicitly. The default (`celoChain` = Sepolia
+// alias) preserves backward-compatible behavior for callers that have not
+// been migrated; migrated callers (production / new-payment) must pass
+// 42220 explicitly. Unsupported chains fail closed via
+// getEscrowContractConfig's "not deployed on chain X" throw — there is no
+// hidden Mainnet→Sepolia fallback.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // usePaymentCount
@@ -21,9 +38,11 @@ export interface UsePaymentCountReturn {
   refetch: () => void;
 }
 
-export function usePaymentCount(): UsePaymentCountReturn {
+export function usePaymentCount(
+  chain: EscrowChainReference = celoChain,
+): UsePaymentCountReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "paymentCount",
   });
 
@@ -50,9 +69,12 @@ export interface UsePaymentReturn {
  * The contract reverts with `PaymentNotFound` for unknown IDs; that revert
  * is surfaced as `notFound: true` with `data: null` (not as a generic error).
  */
-export function usePayment(paymentId: bigint | undefined): UsePaymentReturn {
+export function usePayment(
+  paymentId: bigint | undefined,
+  chain: EscrowChainReference = celoChain,
+): UsePaymentReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "getPayment",
     args: paymentId !== undefined ? [paymentId] : undefined,
     query: {
@@ -104,9 +126,10 @@ export interface UsePaymentIdsReturn {
  */
 export function useClientPaymentIds(
   address: string | undefined,
+  chain: EscrowChainReference = celoChain,
 ): UsePaymentIdsReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "getClientPaymentIds",
     args: address !== undefined ? [address as `0x${string}`] : undefined,
     query: {
@@ -126,9 +149,10 @@ export function useClientPaymentIds(
  */
 export function useWorkerPaymentIds(
   address: string | undefined,
+  chain: EscrowChainReference = celoChain,
 ): UsePaymentIdsReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "getWorkerPaymentIds",
     args: address !== undefined ? [address as `0x${string}`] : undefined,
     query: {
@@ -154,9 +178,11 @@ export interface UseIsPausedReturn {
 /**
  * Check whether the escrow contract is currently paused.
  */
-export function useIsPaused(): UseIsPausedReturn {
+export function useIsPaused(
+  chain: EscrowChainReference = celoChain,
+): UseIsPausedReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "paused",
   });
 
@@ -178,9 +204,11 @@ export interface UseEscrowTokenReturn {
 /**
  * Read the ERC-20 token address the escrow contract accepts.
  */
-export function useEscrowToken(): UseEscrowTokenReturn {
+export function useEscrowToken(
+  chain: EscrowChainReference = celoChain,
+): UseEscrowTokenReturn {
   const { data, isLoading, isError, error, refetch } = useReadContract({
-    ...getEscrowContractConfig(),
+    ...getEscrowContractConfig(chain),
     functionName: "escrowToken",
   });
 

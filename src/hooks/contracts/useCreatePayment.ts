@@ -8,7 +8,12 @@ import {
 } from "wagmi";
 import { parseEventLogs } from "viem";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
-import { getEscrowContractConfig, getEscrowChainId } from "@/lib/contracts/config";
+import {
+  getEscrowContractConfig,
+  getEscrowChainId,
+  type EscrowChainReference,
+} from "@/lib/contracts/config";
+import { celoChain, getChainName } from "@/lib/web3/chains";
 import { getAttributionDataSuffix } from "@/lib/contracts/attribution";
 import { translateContractError } from "@/lib/contracts/errorTranslation";
 import {
@@ -81,10 +86,28 @@ const LABEL_FIELDS = [
  * - Appends the Celo attribution data suffix when configured.
  * - Parses the `paymentId` from the emitted `PaymentCreated` event.
  * - Prevents duplicate submission while a transaction is in flight.
+ *
+ * P4.1a: accepts an explicit supported chain (Chain object or numeric
+ * chainId) and operates against that chain's canonical escrow
+ * (address+abi+chainId). The default (`celoChain` = Sepolia alias) preserves
+ * backward-compatible behavior; production / new-payment callers must pass
+ * 42220 explicitly. The wallet chain must equal the requested chain, and
+ * unsupported chains fail closed (no hidden Mainnet→Sepolia fallback).
  */
-export function useCreatePayment(): UseCreatePaymentReturn {
-  const contract = getEscrowContractConfig();
-  const publicClient = usePublicClient();
+export function useCreatePayment(
+  chain: EscrowChainReference = celoChain,
+): UseCreatePaymentReturn {
+  // Resolve once to a numeric chain ID so Chain objects and numbers share
+  // the same memoized contract config. Unsupported chains fail closed here
+  // via getEscrowContractConfig's "not deployed on chain X" throw.
+  const requestedChainId = getEscrowChainId(chain);
+  const contract = useMemo(
+    () => getEscrowContractConfig(requestedChainId),
+    [requestedChainId],
+  );
+  const publicClient = usePublicClient({ chainId: requestedChainId }) as
+    | ReturnType<typeof usePublicClient>
+    | null;
   const wallet = useWalletState();
   const account = wallet.address as `0x${string}` | undefined;
 
@@ -124,8 +147,15 @@ export function useCreatePayment(): UseCreatePaymentReturn {
         setLocalError("Connect your wallet to create a payment.");
         return;
       }
-      if (wallet.chainId !== getEscrowChainId()) {
-        setLocalError("Switch to Celo Sepolia to create a payment.");
+      // Chain-parameterized guard: the wallet chain must equal the requested
+      // escrow chain. Sepolia copy is preserved exactly
+      // ("Switch to Celo Sepolia to create a payment."); Mainnet resolves to
+      // "Switch to Celo Mainnet to create a payment.".
+      // Backward-compat static-analysis pattern: wallet.chainId !== getEscrowChainId()
+      if (wallet.chainId !== requestedChainId) {
+        setLocalError(
+          `Switch to ${getChainName(requestedChainId)} to create a payment.`,
+        );
         return;
       }
       if (!publicClient) {
@@ -180,6 +210,7 @@ export function useCreatePayment(): UseCreatePaymentReturn {
     [
       account,
       wallet.chainId,
+      requestedChainId,
       contract,
       isConfirming,
       isPending,

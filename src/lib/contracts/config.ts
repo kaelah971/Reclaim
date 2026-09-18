@@ -3,6 +3,7 @@ import {
   celoMainnetChain,
   CELO_CHAIN_ID,
   CELO_MAINNET_CHAIN_ID,
+  PRODUCTION_ESCROW_CHAIN_ID,
 } from "@/lib/web3/chains";
 import { getEscrowAddress } from "./addresses";
 import { protectedPaymentEscrowABI } from "./ProtectedPaymentEscrow.abi";
@@ -75,4 +76,32 @@ export function getEscrowChainId(
   chain: EscrowChainReference = celoChain,
 ): number {
   return resolveChainId(chain);
+}
+
+// ---------------------------------------------------------------------------
+// P4.1a — explicit production defaults (D1 = Celo Mainnet 42220).
+// Backward-compat defaults above intentionally remain Sepolia (`celoChain`);
+// production / new-payment callers must pass an explicit chainId
+// (PRODUCTION_ESCROW_CHAIN_ID) instead of relying on silent defaults.
+// ---------------------------------------------------------------------------
+
+/** Production escrow chain ID (Celo Mainnet 42220). Re-exported for callers. */
+export { PRODUCTION_ESCROW_CHAIN_ID };
+
+/** Alias for the new-payment default chain (D1 = Celo Mainnet 42220). */
+export const DEFAULT_NEW_PAYMENT_CHAIN_ID = PRODUCTION_ESCROW_CHAIN_ID;
+
+/** Production escrow chain ID accessor (Celo Mainnet 42220). */
+export function getProductionEscrowChainId(): number {
+  return PRODUCTION_ESCROW_CHAIN_ID;
+}
+
+/** Production escrow contract config (explicit Celo Mainnet 42220). */
+export function getProductionEscrowContractConfig() {
+  return getEscrowContractConfig(PRODUCTION_ESCROW_CHAIN_ID);
+}
+
+/** Production escrow contract address (explicit Celo Mainnet 42220). */
+export function getProductionEscrowContractAddress(): `0x${string}` {
+  return getEscrowContractAddress(PRODUCTION_ESCROW_CHAIN_ID);
 }

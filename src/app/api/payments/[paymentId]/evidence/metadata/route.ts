@@ -11,6 +11,9 @@
 //
 // Body (JSON):
 //   { title, description, type, relatedClaim, date, externalRef, pastedText, fileHash }
+//   Optional chain scope: ?chainId= query param or body chainId/escrowChainId.
+//   Defaults to Celo Sepolia (11142220); 42220 verifies against the Mainnet
+//   escrow. Unsupported chains are rejected with UNSUPPORTED_CHAIN.
 //
 // Responses:
 //   201 — metadata persisted
@@ -22,20 +25,116 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import {
   persistVerifiedEvidenceMetadata,
   type EvidenceMetadataChainReader,
 } from "@/lib/evidence/persistEvidenceMetadata";
 import type { EvidenceFormData } from "@/lib/evidence/manifest";
-import { CANONICAL_ESCROW_CONTRACT_ADDRESS } from "@/lib/resolution-agent/api/escrow-reader";
-import { CELO_CHAIN_ID } from "@/lib/web3/chains";
+import { getEscrowAddress } from "@/lib/contracts/addresses";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  celoMainnetChain,
+  celoSepoliaChain,
+  getCeloChain,
+  isSupportedChain,
+} from "@/lib/web3/chains";
 
-const chainReader: EvidenceMetadataChainReader = createPublicClient({
-  chain: celoSepolia,
-  transport: http("https://rpc.ankr.com/celo_sepolia", { timeout: 10000 }),
-});
+/** Legacy Sepolia RPC preserved exactly for the default path. */
+const LEGACY_SEPOLIA_RPC = "https://rpc.ankr.com/celo_sepolia";
+const MAINNET_RPC_DEFAULT = "https://forno.celo.org";
+
+function getRpcForChain(chainId: number): string {
+  if (chainId === CELO_MAINNET_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || MAINNET_RPC_DEFAULT;
+  }
+  // Sepolia default path preserves the exact legacy endpoint when no env
+  // override is set; env overrides remain supported for operators.
+  return (
+    process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+    process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+    LEGACY_SEPOLIA_RPC
+  );
+}
+
+/**
+ * Resolve an explicit chainId from query (?chainId=) or body
+ * (chainId / escrowChainId / chain_id). Defaults to Celo Sepolia to preserve
+ * behavior. Validates against the canonical supported-chain mapping — the URL
+ * chain alone is never trusted; the escrow address must resolve canonically.
+ */
+function resolveEvidenceChain(
+  request: NextRequest,
+  body: unknown,
+): { chainId: number; escrowAddress: `0x${string}` } | { error: Response } {
+  let raw: unknown = null;
+  try {
+    const url = new URL(request.url);
+    raw =
+      url.searchParams.get("chainId") ??
+      url.searchParams.get("chain_id") ??
+      url.searchParams.get("escrowChainId") ??
+      null;
+  } catch {
+    raw = null;
+  }
+  if (raw === null && body !== null && typeof body === "object") {
+    const b = body as Record<string, unknown>;
+    raw = b.chainId ?? b.escrowChainId ?? b.chain_id ?? b.escrow_chain_id ?? null;
+  }
+  let chainId: number = CELO_CHAIN_ID; // Sepolia default preserves existing behavior.
+  if (raw !== null && raw !== undefined && String(raw).trim() !== "") {
+    const parsed = typeof raw === "number" ? raw : Number(String(raw).trim());
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      return {
+        error: NextResponse.json(
+          { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+          { status: 400 },
+        ),
+      };
+    }
+    chainId = parsed;
+  }
+  if (!isSupportedChain(chainId)) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  const escrowAddress = getEscrowAddress(chainId);
+  if (!escrowAddress) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  // Validate the chain resolves in the canonical mapping (never trust URL alone).
+  const chainDefinition = getCeloChain(chainId);
+  if (!chainDefinition) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { chainId, escrowAddress };
+}
+
+function createChainReader(chainId: number): EvidenceMetadataChainReader {
+  const chainDefinition =
+    getCeloChain(chainId) ??
+    (chainId === CELO_MAINNET_CHAIN_ID ? celoMainnetChain : celoSepoliaChain);
+  return createPublicClient({
+    chain: chainDefinition,
+    transport: http(getRpcForChain(chainId), { timeout: 10000 }),
+  }) as unknown as EvidenceMetadataChainReader;
+}
 
 function isValidEvidenceFormData(body: unknown): body is EvidenceFormData {
   if (!body || typeof body !== "object") return false;
@@ -67,11 +166,16 @@ export async function POST(
       return NextResponse.json({ error: "Invalid evidence form data.", code: "VALIDATION_ERROR" }, { status: 400 });
     }
 
+    const chainResolution = resolveEvidenceChain(request, body);
+    if ("error" in chainResolution) return chainResolution.error;
+    const { chainId, escrowAddress } = chainResolution;
+    const chainReader = createChainReader(chainId);
+
     const result = await persistVerifiedEvidenceMetadata({
       chainReader,
       store: getSupabaseClient(),
-      escrowAddress: CANONICAL_ESCROW_CONTRACT_ADDRESS,
-      escrowChainId: String(CELO_CHAIN_ID),
+      escrowAddress,
+      escrowChainId: String(chainId),
       paymentId,
       data: body,
     });

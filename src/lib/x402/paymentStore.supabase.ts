@@ -2,7 +2,7 @@
 // Durable Supabase implementation of the x402 payment store.
 // ---------------------------------------------------------------------------
 
-import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { getSupabaseClient, isSupabaseConfigured, assertSupabaseConfiguredForDurableWrites } from "@/lib/supabase/client";
 import type { SettlementReceipt } from "./types";
 import type { DisputeBrief } from "./disputeBrief";
 import {
@@ -497,6 +497,33 @@ let cachedStore: PaymentStore | undefined;
 
 export function getPaymentStore(): PaymentStore {
   if (cachedStore) return cachedStore;
+  // Fail closed in facilitator/mainnet mode: never silently fall back to
+  // volatile memory when durable persistence is required. Test/local paths
+  // (X402_SETTLEMENT_MODE !== "celo-facilitator") keep the in-memory fallback.
+  assertSupabaseConfiguredForDurableWrites("x402 payment store");
   cachedStore = isSupabaseConfigured() ? new SupabasePaymentStore() : new InMemoryPaymentStore();
   return cachedStore;
+}
+
+/**
+ * Strict durable-store accessor for production facilitator/mainnet paths.
+ * Always requires Supabase; throws loudly when unconfigured instead of
+ * returning the in-memory fallback.
+ */
+export function getDurablePaymentStore(): PaymentStore {
+  if (!isSupabaseConfigured()) {
+    throw new Error(
+      "[SupabasePaymentStore] Durable persistence is required but Supabase is not configured. " +
+        "Set SUPABASE_URL and SUPABASE_SECRET_KEY. Refusing in-memory fallback " +
+        "to avoid silent data loss.",
+    );
+  }
+  if (cachedStore instanceof SupabasePaymentStore) return cachedStore;
+  cachedStore = new SupabasePaymentStore();
+  return cachedStore;
+}
+
+/** Test-only: reset the cached store between isolated tests. */
+export function __resetPaymentStoreCacheForTests(): void {
+  cachedStore = undefined;
 }

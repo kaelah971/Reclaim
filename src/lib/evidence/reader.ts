@@ -74,17 +74,41 @@ export function extractManifestField(manifest: string, key: string): string | nu
 }
 
 export class SupabaseEvidenceReader implements CaseEvidenceReader {
-  async getEvidenceMetadata(escrowPaymentId: string): Promise<DurableEvidenceMetadata> {
+  /**
+   * Read the current verified evidence for a payment case.
+   *
+   * @param escrowPaymentId — numeric escrow payment identifier (string).
+   * @param escrowChainId — optional chain scope (e.g. "11142220" / 42220).
+   *   When omitted, the legacy behavior is preserved (no chain filter) so
+   *   existing Sepolia/test callers are unaffected. When provided, the read
+   *   is scoped to that chain so Mainnet and Sepolia rows never conflate.
+   */
+  async getEvidenceMetadata(
+    escrowPaymentId: string,
+    escrowChainId?: string | number | null,
+  ): Promise<DurableEvidenceMetadata> {
     const client = getSupabaseClient();
 
-    const { data, error } = await client
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query: any = client
       .from("evidence_metadata")
       .select(
         "evidence_reference, title, description, evidence_type, file_hash, file_count, submitted_at, submitter_address, manifest",
       )
       .eq("escrow_payment_id", escrowPaymentId)
-      .eq("is_current", true)
-      .maybeSingle();
+      .eq("is_current", true);
+
+    const normalizedChain =
+      escrowChainId === null ||
+      escrowChainId === undefined ||
+      String(escrowChainId).trim() === ""
+        ? null
+        : String(escrowChainId).trim();
+    if (normalizedChain !== null) {
+      query = query.eq("escrow_chain_id", normalizedChain);
+    }
+
+    const { data, error } = await query.maybeSingle();
 
     if (error || !data) {
       return {

@@ -15,9 +15,39 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supabase";
 import { getSupabaseClient } from "@/lib/supabase/client";
-import { CeloSepoliaEscrowCaseReader } from "@/lib/resolution-agent/api/escrow-reader";
+import {
+  CeloEscrowCaseReader,
+  CeloSepoliaEscrowCaseReader,
+} from "@/lib/resolution-agent/api/escrow-reader";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  isSupportedChain,
+} from "@/lib/web3/chains";
 
 const PACKET_EVENT_TYPE = "review_packet_prepared";
+
+/**
+ * Resolve an explicit chainId (?chainId=). Defaults to Celo Sepolia to
+ * preserve behavior. Validated against the canonical supported-chain mapping.
+ */
+function resolveReviewPacketChainId(request: NextRequest): number | null {
+  let raw: string | null = null;
+  try {
+    const url = new URL(request.url);
+    raw =
+      url.searchParams.get("chainId") ??
+      url.searchParams.get("chain_id") ??
+      url.searchParams.get("escrowChainId");
+  } catch {
+    raw = null;
+  }
+  if (raw === null || raw.trim() === "") return CELO_CHAIN_ID;
+  const parsed = Number(raw.trim());
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  if (!isSupportedChain(parsed)) return null;
+  return parsed;
+}
 
 export async function GET(
   request: NextRequest,
@@ -33,9 +63,24 @@ export async function GET(
     }
 
     const store = new SupabaseResolutionAgentStore();
-    const escrowReader = new CeloSepoliaEscrowCaseReader(
-      process.env.CELO_SEPOLIA_RPC_URL,
-    );
+    // Chain-aware escrow identity (Sepolia default preserves behavior;
+    // ?chainId=42220 binds to the canonical Mainnet escrow).
+    const chainId = resolveReviewPacketChainId(request);
+    if (chainId === null) {
+      return NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      );
+    }
+    const escrowReader =
+      chainId === CELO_MAINNET_CHAIN_ID
+        ? new CeloEscrowCaseReader(
+            chainId,
+            process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL,
+          )
+        : new CeloSepoliaEscrowCaseReader(
+            process.env.CELO_SEPOLIA_RPC_URL,
+          );
 
     const agent = await store.getAgentByCaseIdentity(
       String(escrowReader.chainId),

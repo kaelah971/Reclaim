@@ -15,9 +15,16 @@
 // ---------------------------------------------------------------------------
 
 import { createPublicClient, http } from "viem";
-import { celoSepolia } from "viem/chains";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
-import { CANONICAL_ESCROW_CONTRACT_ADDRESS } from "@/lib/resolution-agent/api/escrow-reader";
+import { getEscrowAddress } from "@/lib/contracts/addresses";
+import {
+  CELO_MAINNET_CHAIN_ID,
+  CELO_SEPOLIA_CHAIN_ID,
+  celoMainnetChain,
+  celoSepoliaChain,
+  getCeloChain,
+  isSupportedChain,
+} from "@/lib/web3/chains";
 
 /**
  * Minimal structural view of the public client used here. Kept loose on
@@ -42,6 +49,55 @@ export interface ChainReadClient {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SEPOLIA_RPC = "https://rpc.ankr.com/celo_sepolia";
+const DEFAULT_MAINNET_RPC = "https://forno.celo.org";
+
+/** Resolve the default read-only RPC for a supported escrow chain. */
+function getDefaultRpcForChain(chainId: number): string {
+  if (chainId === CELO_MAINNET_CHAIN_ID) {
+    return process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL || DEFAULT_MAINNET_RPC;
+  }
+  return (
+    process.env.NEXT_PUBLIC_CELO_SEPOLIA_RPC_URL ||
+    process.env.NEXT_PUBLIC_CELO_RPC_URL ||
+    DEFAULT_SEPOLIA_RPC
+  );
+}
+
+/**
+ * Resolve and validate a chain-aware provenance config.
+ *
+ * Never trusts a URL chain alone: the chain must be in the canonical
+ * supported mapping and must have a deployed escrow address.
+ *
+ * @throws when the chain is unsupported or has no deployed escrow.
+ */
+export function resolveChainProvenanceConfig(chainId: number): {
+  chainId: number;
+  contractAddress: `0x${string}`;
+} {
+  if (!isSupportedChain(chainId)) {
+    throw new Error(`Unsupported escrow chain ${chainId}.`);
+  }
+  const contractAddress = getEscrowAddress(chainId);
+  if (!contractAddress) {
+    throw new Error(
+      `ProtectedPaymentEscrow is not deployed on chain ${chainId}.`,
+    );
+  }
+  return { chainId, contractAddress };
+}
+
+/** Parse an explicit chainId input, defaulting to Celo Sepolia. */
+export function parseProvenanceChainId(raw: unknown): number {
+  if (raw === null || raw === undefined || String(raw).trim() === "") {
+    return CELO_SEPOLIA_CHAIN_ID;
+  }
+  const parsed = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`Unsupported escrow chain ${String(raw)}.`);
+  }
+  return resolveChainProvenanceConfig(parsed).chainId;
+}
 
 const PAYMENT_RELEASED_EVENT = {
   type: "event",
@@ -229,6 +285,7 @@ interface FoundLog {
 /** Find the latest event log for a payment within the estimated window. */
 async function findLatestLog(
   client: ChainReadClient,
+  contractAddress: `0x${string}`,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   event: any,
   paymentId: bigint,
@@ -236,7 +293,7 @@ async function findLatestLog(
 ): Promise<FoundLog | null> {
   const { fromBlock, toBlock } = await estimateLogWindow(client, targetUnix);
   const logs = await client.getLogs({
-    address: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+    address: contractAddress,
     event,
     args: { paymentId },
     fromBlock,
@@ -286,27 +343,77 @@ async function readEventProof(
 }
 
 // ---------------------------------------------------------------------------
-// Production reader
+// Production reader — chain-aware (Sepolia default, Mainnet supported)
 // ---------------------------------------------------------------------------
 
-export class CeloSepoliaChainFinalProofReader {
+export interface CeloChainFinalProofReaderOptions {
+  chainId?: number;
+  rpcUrl?: string;
+  client?: ChainReadClient;
+}
+
+/**
+ * Chain-aware final-proof reader.
+ *
+ * Contract address + RPC resolve from the canonical per-chain config
+ * (src/lib/contracts/addresses.ts + src/lib/web3/chains.ts). Sepolia is the
+ * default to preserve existing behavior; pass 42220 for Celo Mainnet.
+ */
+export class CeloChainFinalProofReader {
   private readonly client: ChainReadClient;
 
-  /** Chain label for the canonical escrow (Celo Sepolia). */
-  public readonly network = "Celo Sepolia";
+  /** Canonical escrow chain ID for this reader. */
+  public readonly chainId: number;
 
-  constructor(rpcUrl?: string, client?: ChainReadClient) {
-    this.client = client ?? createPublicClient({
-      chain: celoSepolia,
-      transport: http(rpcUrl ?? DEFAULT_SEPOLIA_RPC, { timeout: 15000 }),
-    });
+  /** Canonical escrow contract address for this reader's chain. */
+  public readonly contractAddress: `0x${string}`;
+
+  /** Human-readable chain label for receipts. */
+  public readonly network: string;
+
+  constructor(
+    chainIdOrOptions?: number | CeloChainFinalProofReaderOptions,
+    rpcUrl?: string,
+    client?: ChainReadClient,
+  ) {
+    let chainId: number = CELO_SEPOLIA_CHAIN_ID;
+    let resolvedRpcUrl = rpcUrl;
+    let resolvedClient = client;
+    if (
+      typeof chainIdOrOptions === "object" &&
+      chainIdOrOptions !== null
+    ) {
+      if (chainIdOrOptions.chainId !== undefined) chainId = chainIdOrOptions.chainId;
+      if (chainIdOrOptions.rpcUrl !== undefined) resolvedRpcUrl = chainIdOrOptions.rpcUrl;
+      if (chainIdOrOptions.client !== undefined) resolvedClient = chainIdOrOptions.client;
+    } else if (typeof chainIdOrOptions === "number") {
+      chainId = chainIdOrOptions;
+    }
+
+    const { contractAddress } = resolveChainProvenanceConfig(chainId);
+    const chainDefinition =
+      getCeloChain(chainId) ??
+      (chainId === CELO_MAINNET_CHAIN_ID ? celoMainnetChain : celoSepoliaChain);
+
+    this.chainId = chainId;
+    this.contractAddress = contractAddress;
+    this.network =
+      chainId === CELO_MAINNET_CHAIN_ID ? "Celo Mainnet" : "Celo Sepolia";
+    this.client =
+      resolvedClient ??
+      createPublicClient({
+        chain: chainDefinition,
+        transport: http(resolvedRpcUrl ?? getDefaultRpcForChain(chainId), {
+          timeout: 15000,
+        }),
+      });
   }
 
   /** Read the authoritative final state via getPayment(paymentId). */
   async getFinalState(paymentId: bigint): Promise<ChainFinalState | null> {
     try {
       const payment = (await this.client.readContract({
-        address: CANONICAL_ESCROW_CONTRACT_ADDRESS,
+        address: this.contractAddress,
         abi: protectedPaymentEscrowABI,
         functionName: "getPayment",
         args: [paymentId],
@@ -354,7 +461,7 @@ export class CeloSepoliaChainFinalProofReader {
   /** Prove the approveRelease transaction for a released payment. */
   async getReleaseProof(paymentId: bigint, releasedAtUnix: number): Promise<ChainReleaseProof> {
     try {
-      const log = await findLatestLog(this.client, PAYMENT_RELEASED_EVENT, paymentId, releasedAtUnix);
+      const log = await findLatestLog(this.client, this.contractAddress, PAYMENT_RELEASED_EVENT, paymentId, releasedAtUnix);
       if (!log) return { txHash: null, status: null, sender: null, blockNumber: null, blockTime: null };
 
       const receipt = await this.client.getTransactionReceipt({ hash: log.transactionHash });
@@ -375,7 +482,7 @@ export class CeloSepoliaChainFinalProofReader {
   /** Prove the PaymentDisputed transaction for a disputed payment. */
   async getDisputeProof(paymentId: bigint, disputedAtUnix = 0): Promise<ChainDisputeProof> {
     try {
-      const log = await findLatestLog(this.client, PAYMENT_DISPUTED_EVENT, paymentId, disputedAtUnix);
+      const log = await findLatestLog(this.client, this.contractAddress, PAYMENT_DISPUTED_EVENT, paymentId, disputedAtUnix);
       if (!log) return { ...emptyEventProof(), disputeReference: null };
       const proof = await readEventProof(this.client, log);
       return {
@@ -390,7 +497,7 @@ export class CeloSepoliaChainFinalProofReader {
   /** Prove the PaymentResolved transaction and its client/worker allocations. */
   async getResolutionProof(paymentId: bigint, resolvedAtUnix: number): Promise<ChainResolutionProof> {
     try {
-      const log = await findLatestLog(this.client, PAYMENT_RESOLVED_EVENT, paymentId, resolvedAtUnix);
+      const log = await findLatestLog(this.client, this.contractAddress, PAYMENT_RESOLVED_EVENT, paymentId, resolvedAtUnix);
       if (!log) return { ...emptyEventProof(), clientAmount: null, workerAmount: null };
       const proof = await readEventProof(this.client, log);
       return {
@@ -406,7 +513,7 @@ export class CeloSepoliaChainFinalProofReader {
   /** Prove the PaymentCancelled transaction for an unfunded payment. */
   async getCancellationProof(paymentId: bigint, createdAtUnix = 0): Promise<ChainCancellationProof> {
     try {
-      const log = await findLatestLog(this.client, PAYMENT_CANCELLED_EVENT, paymentId, createdAtUnix);
+      const log = await findLatestLog(this.client, this.contractAddress, PAYMENT_CANCELLED_EVENT, paymentId, createdAtUnix);
       if (!log) return emptyEventProof();
       return readEventProof(this.client, log);
     } catch {
@@ -420,7 +527,7 @@ export class CeloSepoliaChainFinalProofReader {
     deliveryAtUnix: number,
   ): Promise<ChainEvidenceProof> {
     try {
-      const log = await findLatestLog(this.client, EVIDENCE_SUBMITTED_EVENT, paymentId, deliveryAtUnix);
+      const log = await findLatestLog(this.client, this.contractAddress, EVIDENCE_SUBMITTED_EVENT, paymentId, deliveryAtUnix);
       if (!log) return { txHash: null, blockNumber: null, blockTime: null };
       const block = await this.client.getBlock({ blockNumber: log.blockNumber });
       return {
@@ -479,6 +586,17 @@ export class CeloSepoliaChainFinalProofReader {
     const n = Number(unixBigint);
     if (n <= 0) return null;
     return new Date(n * 1000).toISOString();
+  }
+}
+
+/**
+ * Backward-compatible Celo Sepolia reader. Existing callers intentionally
+ * keep using Sepolia when no chain is specified. Preserves the exact legacy
+ * default RPC when no override is given (no env lookup on this path).
+ */
+export class CeloSepoliaChainFinalProofReader extends CeloChainFinalProofReader {
+  constructor(rpcUrl?: string, client?: ChainReadClient) {
+    super({ chainId: CELO_SEPOLIA_CHAIN_ID, rpcUrl: rpcUrl ?? DEFAULT_SEPOLIA_RPC, client });
   }
 }
 

@@ -7,6 +7,8 @@ import {
   type EvidenceFormData,
 } from "@/lib/evidence/manifest";
 import { useSubmitEvidenceHash } from "@/hooks/contracts/useEscrowActions";
+import type { EscrowChainReference } from "@/lib/contracts/config";
+import { celoChain } from "@/lib/web3/chains";
 
 // ---------------------------------------------------------------------------
 // useSubmitEvidenceFlow — evidence submission lifecycle
@@ -51,6 +53,10 @@ export interface SubmitEvidenceFlow {
 export function useSubmitEvidenceFlow(
   paymentId: bigint | undefined,
   paymentIdStr: string | undefined,
+  // P4.1a: explicit escrow chain threading (default Sepolia for backward
+  // compat; production callers must pass 42220 explicitly). Manifest, hash,
+  // and metadata logic below are unchanged.
+  chain: EscrowChainReference = celoChain,
 ): SubmitEvidenceFlow {
   const {
     action: submitEvidenceTx,
@@ -59,7 +65,7 @@ export function useSubmitEvidenceFlow(
     error,
     txHash,
     reset: resetTx,
-  } = useSubmitEvidenceHash();
+  } = useSubmitEvidenceHash(chain);
 
   const submittedRef = useRef<EvidenceFormData | null>(null);
   const [lastReference, setLastReference] = useState<`0x${string}` | null>(null);

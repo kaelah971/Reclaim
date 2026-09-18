@@ -80,6 +80,19 @@ function isDryRun(): boolean {
   return process.env.ESCROW_EXECUTION_DRY_RUN === "true";
 }
 
+/**
+ * P4.1b mainnet safety guard (additive, fail-closed).
+ *
+ * ESCROW_EXECUTION_DRY_RUN must never masquerade as a real execution on
+ * Mainnet paths. Dry-run remains useful for Sepolia/test validation, but when
+ * the bound decision targets Celo Mainnet (42220) the dry-run is explicitly
+ * refused with a dedicated error code — the caller must unset the flag to
+ * execute for real, or target Sepolia for dry-run validation.
+ */
+export function isDryRunRefusedOnMainnet(chainId: number): boolean {
+  return isDryRun() && chainId === CELO_MAINNET_CHAIN_ID;
+}
+
 function getExecutorKey(): `0x${string}` | null {
   const key = process.env.ESCROW_EXECUTOR_PRIVATE_KEY || "";
   if (!key) return null;
@@ -380,6 +393,27 @@ export async function executeDisputeResolution(paymentId: string, decisionId: st
 
   const executionId = (executionRow as Record<string, unknown>).id as string;
   const args = { paymentId: escrowPaymentId, clientAmount: decision.clientAmount };
+
+  // Fail-closed Mainnet guard: dry-run must never masquerade as success (or
+  // even as a routine DRY_RUN cancellation) on Mainnet paths. Refuse
+  // explicitly so operators notice the misconfiguration.
+  if (isDryRunRefusedOnMainnet(decision.chainId)) {
+    await sb.from("review_executions").update({
+      status: "cancelled",
+      execution_error_code: "DRY_RUN_REFUSED_ON_MAINNET",
+      execution_error_message: "Dry-run execution is refused on Celo Mainnet (chain 42220). Unset ESCROW_EXECUTION_DRY_RUN to execute for real, or target Sepolia for dry-run validation.",
+      failed_at: new Date().toISOString(),
+    }).eq("id", executionId);
+    return {
+      success: false,
+      status: "cancelled",
+      errorCode: "DRY_RUN_REFUSED_ON_MAINNET",
+      errorMessage: "Dry-run execution is refused on Celo Mainnet (chain 42220). Unset ESCROW_EXECUTION_DRY_RUN to execute for real, or target Sepolia for dry-run validation.",
+      dryRun: true,
+      method: "resolveDispute",
+      args,
+    };
+  }
 
   if (dryRun) {
     await sb.from("review_executions").update({

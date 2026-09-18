@@ -31,5 +31,8 @@ export {
   useApproveRelease,
   useOpenDispute,
   useCancelUnfunded,
+  ESCROW_RECONNECTING_ERROR,
+  ESCROW_SWITCH_CHAIN_ERROR,
+  getEscrowSwitchChainError,
 } from "./useEscrowActions";
 export type { EscrowActionReturn } from "./useEscrowActions";
