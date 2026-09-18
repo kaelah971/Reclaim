@@ -30,7 +30,7 @@ export default function UnsupportedNetworkNotice({
             {wallet.chainId ? ` (Chain ID: ${wallet.chainId})` : ""}.
           </p>
         </div>
-        <Button size="sm" onClick={requestNetworkSwitch}>
+        <Button size="sm" onClick={() => requestNetworkSwitch()}>
           Switch to Celo
         </Button>
       </div>

@@ -3,6 +3,7 @@ import { PAYMENT_TOKEN_SYMBOL } from "@/lib/web3/tokens";
 interface AgreementPreviewProps {
   amount?: string;
   worker?: string;
+  title?: string;
   deliverable?: string;
   deliveryFormat?: string;
   deadline?: string;
@@ -10,6 +11,10 @@ interface AgreementPreviewProps {
   disputeWindow?: string;
   evidenceExpectation?: string;
   fee?: string;
+  /** Display label for the payment token (e.g. "USA₮" on Celo Mainnet). */
+  tokenLabel?: string;
+  /** Display label for the network (e.g. "Celo"). */
+  networkLabel?: string;
   className?: string;
 }
 
@@ -22,6 +27,7 @@ const releaseRuleLabels: Record<string, string> = {
 export default function AgreementPreview({
   amount,
   worker,
+  title,
   deliverable,
   deliveryFormat,
   deadline,
@@ -29,9 +35,12 @@ export default function AgreementPreview({
   disputeWindow,
   evidenceExpectation,
   fee,
+  tokenLabel = PAYMENT_TOKEN_SYMBOL,
+  networkLabel,
   className = "",
 }: AgreementPreviewProps) {
-  const hasContent = amount || worker || deliverable || deliveryFormat || deadline;
+  const hasContent =
+    amount || worker || title || deliverable || deliveryFormat || deadline;
 
   return (
     <div
@@ -54,8 +63,14 @@ export default function AgreementPreview({
             <div>
               <dt className="text-[13px] text-muted">Amount</dt>
               <dd className="mt-0.5 text-[15px] font-[family-name:var(--font-ibm-plex-mono)] font-medium tabular-nums text-ink">
-                {amount} {PAYMENT_TOKEN_SYMBOL}
+                {amount} {tokenLabel}
               </dd>
+            </div>
+          )}
+          {networkLabel && (
+            <div>
+              <dt className="text-[13px] text-muted">Network</dt>
+              <dd className="mt-0.5 text-[15px] text-ink">{networkLabel}</dd>
             </div>
           )}
           {worker && (
@@ -64,6 +79,12 @@ export default function AgreementPreview({
               <dd className="mt-0.5 text-[15px] font-[family-name:var(--font-ibm-plex-mono)] text-ink text-ellipsis overflow-hidden">
                 {worker}
               </dd>
+            </div>
+          )}
+          {title && (
+            <div className="sm:col-span-2">
+              <dt className="text-[13px] text-muted">Agreement</dt>
+              <dd className="mt-0.5 text-[15px] text-ink">{title}</dd>
             </div>
           )}
           {deliverable && (
@@ -88,7 +109,7 @@ export default function AgreementPreview({
           )}
           {releaseRule && (
             <div>
-              <dt className="text-[13px] text-muted">Release rule</dt>
+              <dt className="text-[13px] text-muted">How money is released</dt>
               <dd className="mt-0.5 text-[15px] text-ink">
                 {releaseRuleLabels[releaseRule] || releaseRule}
               </dd>

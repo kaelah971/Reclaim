@@ -11,7 +11,7 @@ import type { WalletErrorCode } from "@/lib/web3/errors";
 export interface RequireWalletAPI {
   requireWallet: (action: () => void) => void;
   openWalletDialog: () => void;
-  requestNetworkSwitch: () => void;
+  requestNetworkSwitch: (targetChainId?: number) => void;
   wallet: WalletState;
   networkStatus: SupportedNetworkState;
   lastError: WalletErrorCode | null;

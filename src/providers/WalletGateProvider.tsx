@@ -30,7 +30,7 @@ export type SupportedNetworkState = "unknown" | "unsupported" | "supported";
 export interface WalletGateContextValue {
   requireWallet: (action: () => void) => void;
   openWalletDialog: () => void;
-  requestNetworkSwitch: () => void;
+  requestNetworkSwitch: (targetChainId?: number) => void;
   walletStatus: WalletConnectionState;
   networkStatus: SupportedNetworkState;
   lastError: WalletErrorCode | null;
@@ -46,6 +46,18 @@ export function useWalletGate(): WalletGateContextValue {
   return context;
 }
 
+/**
+ * Resolve the pending network-switch target. Only supported Celo chains are
+ * accepted; anything else (including an omitted argument) fails closed to
+ * the default escrow chain (Sepolia) so the dialog can never target a wrong
+ * or unsupported network.
+ */
+export function resolveSwitchTarget(targetChainId?: number): number {
+  return targetChainId !== undefined && isSupportedChain(targetChainId)
+    ? targetChainId
+    : celoChain.id;
+}
+
 export default function WalletGateProvider({
   children,
 }: {
@@ -58,6 +70,10 @@ export default function WalletGateProvider({
 
   const [mode, setMode] = useState<WalletDialogMode | null>(null);
   const [lastError, setLastError] = useState<WalletErrorCode | null>(null);
+  // Pending switch target for the SwitchNetworkContent dialog. Defaults to
+  // the Sepolia escrow chain; callers may pass a supported chain ID via
+  // requestNetworkSwitch to retarget it (e.g. Celo Mainnet for new payments).
+  const [pendingChainId, setPendingChainId] = useState<number>(celoChain.id);
   const pendingActionRef = useRef<(() => void) | null>(null);
 
   const walletOptions: ConfiguredWalletOption[] = useMemo(() => {
@@ -81,6 +97,7 @@ export default function WalletGateProvider({
   const closeDialog = useCallback(() => {
     setMode(null);
     setLastError(null);
+    setPendingChainId(celoChain.id);
     pendingActionRef.current = null;
   }, []);
 
@@ -89,6 +106,7 @@ export default function WalletGateProvider({
     pendingActionRef.current = null;
     setMode(null);
     setLastError(null);
+    setPendingChainId(celoChain.id);
     action?.();
   }, []);
 
@@ -100,6 +118,7 @@ export default function WalletGateProvider({
       }
       pendingActionRef.current = action;
       setLastError(null);
+      setPendingChainId(celoChain.id);
       setMode(wallet.isConnected ? "switch" : "connect");
     },
     [wallet.isConnected, wallet.chainSupported]
@@ -108,12 +127,14 @@ export default function WalletGateProvider({
   const openWalletDialog = useCallback(() => {
     pendingActionRef.current = null;
     setLastError(null);
+    setPendingChainId(celoChain.id);
     setMode("connect");
   }, []);
 
-  const requestNetworkSwitch = useCallback(() => {
+  const requestNetworkSwitch = useCallback((targetChainId?: number) => {
     pendingActionRef.current = null;
     setLastError(null);
+    setPendingChainId(resolveSwitchTarget(targetChainId));
     setMode("switch");
   }, []);
 
@@ -151,7 +172,7 @@ export default function WalletGateProvider({
   const handleSwitchNetwork = useCallback(() => {
     setLastError(null);
     switchChain(
-      { chainId: celoChain.id },
+      { chainId: pendingChainId },
       {
         onSuccess: () => {
           runPendingAction();
@@ -161,7 +182,7 @@ export default function WalletGateProvider({
         },
       }
     );
-  }, [switchChain, runPendingAction]);
+  }, [switchChain, runPendingAction, pendingChainId]);
 
   const networkStatus: SupportedNetworkState = !wallet.isConnected
     ? "unknown"
@@ -204,6 +225,7 @@ export default function WalletGateProvider({
         mode={effectiveMode ?? "connect"}
         options={walletOptions}
         currentChainId={wallet.chainId}
+        requiredChainId={pendingChainId}
         isConnecting={isConnectPending}
         isSwitching={isSwitchPending}
         error={lastError}

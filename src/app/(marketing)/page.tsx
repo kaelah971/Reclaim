@@ -45,57 +45,73 @@ export default function LandingPage() {
   return (
     <>
       {/* Hero */}
-      <section className="ledger-field">
+      <section className="ledger-field" data-testid="hero">
         <div className="ledger-content mx-auto max-w-[1440px] px-4 pb-20 pt-16 md:px-6 md:pb-28 md:pt-24">
           <div className="grid items-center gap-12 lg:grid-cols-[0.92fr_1.08fr] lg:gap-16">
             <div className="flex flex-col justify-center">
               <div className="mb-5 flex items-center gap-3 text-[11px] font-medium uppercase tracking-[0.18em] text-muted">
                 <span className="h-px w-10 bg-gold" aria-hidden="true" />
-                The proof ledger
+                Pay with proof.
               </div>
               <h1 className="max-w-[620px] text-[44px] leading-[1.02] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[68px]">
-                Every payment, carried with proof.
+                Protected stablecoin payments for freelance work.
               </h1>
               <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-muted font-[family-name:var(--font-georama)] md:text-base">
-                Protect USDC with clear terms, delivery evidence, fair review,
-                and a readable settlement receipt both sides can trust.
+                Pay with proof. Agree on the work and the price upfront, keep
+                the payment protected while the work gets done, and release it
+                when everyone is happy.
               </p>
+              <ol
+                className="mt-6 max-w-lg space-y-3 border-t border-border pt-5"
+                aria-label="How protection works"
+              >
+                {[
+                  [
+                    "1. Protect the payment",
+                    "Agree on the work, price, and deadline before anything moves.",
+                  ],
+                  [
+                    "2. Freelancer delivers",
+                    "The freelancer does the work and shares what was done.",
+                  ],
+                  [
+                    "3. Release when the work is done",
+                    "Approve the work and the payment is released.",
+                  ],
+                ].map(([title, detail]) => (
+                  <li key={title} className="flex flex-col gap-0.5">
+                    <p className="text-[15px] font-semibold text-ink font-[family-name:var(--font-georama)]">
+                      {title}
+                    </p>
+                    <p className="text-[13px] leading-relaxed text-muted font-[family-name:var(--font-georama)]">
+                      {detail}
+                    </p>
+                  </li>
+                ))}
+              </ol>
               <div className="mt-8 flex flex-wrap gap-3">
                 <Link href="/payments/new">
                   <Button size="lg">Protect a payment</Button>
                 </Link>
-                <Link href="/how-it-works">
-                  <Button variant="secondary" size="lg">
-                    See how it works
-                  </Button>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2">
+                <Link
+                  href="/how-it-works"
+                  className="text-[15px] font-medium text-gold underline-offset-4 transition-colors hover:text-gold/80 hover:underline"
+                >
+                  See how it works
                 </Link>
-                <Link href="/payments/1">
-                  <Button variant="ghost" size="lg">
-                    Explore the live demo case
-                  </Button>
+                <Link
+                  href="/payments/1"
+                  className="text-[15px] font-medium text-gold underline-offset-4 transition-colors hover:text-gold/80 hover:underline"
+                >
+                  Explore the live demo case
                 </Link>
               </div>
               <p className="mt-3 max-w-lg text-[13px] leading-relaxed text-muted font-[family-name:var(--font-georama)]">
-                The live demo is a completed on-chain proof: a real USDC payment that was
-                released on Celo Sepolia, with its receipt, resolution agent, and case
-                review available end-to-end.
+                Take a look at a finished example to see what both sides see,
+                from agreement through to the final record.
               </p>
-              <div className="mt-9 grid max-w-lg grid-cols-3 gap-6 border-t border-border pt-5">
-                {[
-                  ["100.00", "USDC held"],
-                  ["48h", "release rule"],
-                  ["1", "shared room"],
-                ].map(([value, label]) => (
-                  <div key={label}>
-                    <p className="font-[family-name:var(--font-ibm-plex-mono)] text-[18px] font-medium tabular-nums text-ink">
-                      {value}
-                    </p>
-                    <p className="mt-1 text-[11px] leading-snug text-muted">
-                      {label}
-                    </p>
-                  </div>
-                ))}
-              </div>
             </div>
 
             {/* Payment Room preview */}
@@ -124,32 +140,39 @@ export default function LandingPage() {
                   </article>
                 </div>
 
-                <div className="document-card relative z-10 ml-auto w-full min-w-0 max-w-[560px] overflow-hidden rounded-[--radius-card] p-5 md:p-6">
+                <div
+                  className="document-card relative z-10 ml-auto w-full min-w-0 max-w-[560px] overflow-hidden rounded-[--radius-card] p-5 md:p-6"
+                  data-testid="hero-preview"
+                  aria-label="Example preview of a protected payment. Static preview, not interactive."
+                >
                   <div className="mb-5 flex items-start justify-between gap-4">
                     <div>
-                      <p className="text-sm font-[family-name:var(--font-newsreader)] text-ink">
-                        Begin protection
+                      <span className="inline-flex items-center rounded-[--radius-pill] border border-border bg-input px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+                        Example
+                      </span>
+                      <p className="mt-2 text-sm font-[family-name:var(--font-newsreader)] text-ink">
+                        A protected payment, previewed
                       </p>
                       <p className="mt-0.5 text-[12px] text-muted">
-                        Start with the agreement
+                        Preview of sample details — not interactive
                       </p>
                     </div>
                     <StatusBadge variant="protected" label="Funds ready" />
                   </div>
 
-                  <div className="space-y-4">
-                    <label className="block">
-                      <span className="text-[11px] text-muted">Amount</span>
-                      <span className="mt-1 flex h-10 items-center rounded-[--radius-input] border border-border bg-input px-3 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] text-ink">
+                  <dl className="space-y-4">
+                    <div>
+                      <dt className="text-[11px] text-muted">Amount</dt>
+                      <dd className="mt-1 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] tabular-nums text-ink">
                         100.00 USDC
-                      </span>
-                    </label>
-                    <label className="block">
-                      <span className="text-[11px] text-muted">Deadline</span>
-                      <span className="mt-1 flex h-10 items-center rounded-[--radius-input] border border-border bg-input px-3 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] text-ink">
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] text-muted">Deadline</dt>
+                      <dd className="mt-1 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] tabular-nums text-ink">
                         18 Jul 2026
-                      </span>
-                    </label>
+                      </dd>
+                    </div>
 
                     <div className="grid grid-cols-2 gap-2 text-[12px] text-muted">
                       {["Terms", "Release rule", "Evidence", "Receipt"].map((item) => (
@@ -161,18 +184,11 @@ export default function LandingPage() {
                         </span>
                       ))}
                     </div>
-                  </div>
+                  </dl>
 
                   <div className="mt-5">
                     <AccordLine stages={previewStages} />
                   </div>
-
-                  <Link
-                    href="/payments/new"
-                    className="mt-5 flex h-10 items-center justify-center rounded-[--radius-button] bg-primary text-[13px] font-semibold text-page transition-colors hover:bg-utility"
-                  >
-                    Protect payment
-                  </Link>
                 </div>
 
               </div>
@@ -293,8 +309,8 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Final CTA */}
-      <section className="bg-primary">
+      {/* Final CTA — quiet repeat of the single primary action; the hero holds the one dominant CTA */}
+      <section className="bg-primary" data-testid="final-cta">
         <div className="mx-auto max-w-[1440px] px-4 py-20 text-center md:px-6 md:py-28">
           <h2 className="text-[28px] leading-[1.2] tracking-[-0.02em] font-[family-name:var(--font-newsreader)] font-medium text-page md:text-[44px]">
             Protect the agreement behind the payment.
@@ -303,13 +319,11 @@ export default function LandingPage() {
             Clear terms. Protected funds. One shared record from agreement through settlement.
           </p>
           <div className="mt-8">
-            <Link href="/payments/new">
-              <Button
-                size="lg"
-                className="bg-page text-primary hover:bg-hero"
-              >
-                Protect a payment
-              </Button>
+            <Link
+              href="/payments/new"
+              className="inline-flex items-center gap-2 text-[15px] font-medium text-gold-on-dark underline-offset-4 transition-colors hover:text-page hover:underline"
+            >
+              Protect a payment <span aria-hidden="true">&rarr;</span>
             </Link>
           </div>
         </div>

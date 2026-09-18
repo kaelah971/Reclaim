@@ -6,7 +6,7 @@ import Notice from "../ui/Notice";
 import {
   CELO_CHAIN_ID,
   CELO_NETWORK_LABEL,
-  CELO_NETWORK_NAME,
+  getChainName,
 } from "@/lib/web3/chains";
 import {
   walletErrorMessages,
@@ -26,6 +26,8 @@ interface WalletDialogProps {
   mode: WalletDialogMode;
   options: ConfiguredWalletOption[];
   currentChainId: number | undefined;
+  /** Switch target for SwitchNetworkContent. Defaults to Sepolia (backward compatible). */
+  requiredChainId?: number;
   isConnecting: boolean;
   isSwitching: boolean;
   error: WalletErrorCode | null;
@@ -124,6 +126,7 @@ export default function WalletDialog({
   mode,
   options,
   currentChainId,
+  requiredChainId = CELO_CHAIN_ID,
   isConnecting,
   isSwitching,
   error,
@@ -190,6 +193,7 @@ export default function WalletDialog({
         {mode === "switch" ? (
           <SwitchNetworkContent
             currentChainId={currentChainId}
+            requiredChainId={requiredChainId}
             isSwitching={isSwitching}
             errorContent={errorContent}
             onSwitchNetwork={onSwitchNetwork}
@@ -309,6 +313,7 @@ export default function WalletDialog({
 
 interface SwitchNetworkContentProps {
   currentChainId: number | undefined;
+  requiredChainId: number;
   isSwitching: boolean;
   errorContent: { title: string; description: string } | null;
   onSwitchNetwork: () => void;
@@ -317,18 +322,21 @@ interface SwitchNetworkContentProps {
 
 function SwitchNetworkContent({
   currentChainId,
+  requiredChainId,
   isSwitching,
   errorContent,
   onSwitchNetwork,
   onClose,
 }: SwitchNetworkContentProps) {
+  // Canonical chain name from config — never hardcoded per-network strings.
+  const requiredChainName = getChainName(requiredChainId);
   return (
     <>
       <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
-        Switch to Celo to continue.
+        Switch to {requiredChainName} to continue.
       </h2>
       <p className="mt-2 text-[14px] leading-relaxed text-muted">
-        This action requires the {CELO_NETWORK_NAME} network. Your entered
+        This action requires the {requiredChainName} network. Your entered
         details are preserved.
       </p>
 
@@ -345,7 +353,7 @@ function SwitchNetworkContent({
           <div className="flex justify-between gap-4">
             <dt className="text-muted">Required network</dt>
             <dd className="font-[family-name:var(--font-ibm-plex-mono)] text-ink">
-              {CELO_NETWORK_NAME} ({CELO_CHAIN_ID})
+              {requiredChainName} ({requiredChainId})
             </dd>
           </div>
         </dl>
@@ -368,7 +376,7 @@ function SwitchNetworkContent({
       ) : (
         <div className="mt-5 flex gap-3">
           <Button size="sm" onClick={onSwitchNetwork}>
-            {errorContent ? "Retry switch" : `Switch to ${CELO_NETWORK_NAME}`}
+            {errorContent ? "Retry switch" : `Switch to ${requiredChainName}`}
           </Button>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel

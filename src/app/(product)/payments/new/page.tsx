@@ -1,288 +1,251 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useBalance } from "wagmi";
 import Input from "@/components/ui/Input";
 import Textarea from "@/components/ui/Textarea";
 import Button from "@/components/ui/Button";
 import Notice from "@/components/ui/Notice";
-import Dialog from "@/components/ui/Dialog";
 import ProtectionRules from "@/components/payment/ProtectionRules";
 import type { ProtectionRulesData } from "@/components/payment/ProtectionRules";
 import AgreementPreview from "@/components/payment/AgreementPreview";
+import NewPaymentStepper from "@/components/payment/NewPaymentStepper";
+import ProtectPreflight from "@/components/payment/ProtectPreflight";
 import WalletButton from "@/components/ui/WalletButton";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
-import { useCreatePayment } from "@/hooks/contracts/useCreatePayment";
-import { parseUSDC, utf8ByteLength } from "@/lib/contracts/types";
-import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
-import { PAYMENT_TOKEN_SYMBOL } from "@/lib/web3/tokens";
+import {
+  useProtectPaymentFlow,
+  getProtectTokenDisplay,
+  getProtectNetworkDisplay,
+} from "@/hooks/payment/useProtectPaymentFlow";
+import {
+  validatePaymentStep,
+  validateTermsStep,
+  parseAmountToRaw,
+  dateToUnixTimestamp,
+} from "./validation";
+import { formatUSDC } from "@/lib/contracts/types";
+import { DEFAULT_NEW_PAYMENT_CHAIN_ID } from "@/lib/contracts/config";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  getChainName,
+  getCeloExplorerTxUrl,
+  getCeloMainnetExplorerTxUrl,
+  isSupportedChain,
+} from "@/lib/web3/chains";
+import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 
-/** Derive a Unix timestamp (seconds) from a date input value (YYYY-MM-DD). */
-function dateToUnixTimestamp(dateStr: string): number {
-  if (!dateStr) return 0;
-  return Math.floor(new Date(dateStr + "T00:00:00Z").getTime() / 1000);
+const EMPTY_RULES: ProtectionRulesData = {
+  releaseRule: "",
+  autoReleaseHours: "",
+  disputeWindow: "",
+  evidenceExpectation: "",
+};
+
+const RELEASE_RULE_LABELS: Record<string, string> = {
+  "buyer-approval": "You approve every release",
+  "auto-release": "You approve, or it releases after a backup delay",
+  manual: "Only release when you say so",
+};
+
+function explorerTxUrl(chainId: number, txHash: string): string {
+  return chainId === CELO_MAINNET_CHAIN_ID
+    ? getCeloMainnetExplorerTxUrl(txHash)
+    : getCeloExplorerTxUrl(txHash);
 }
+
+type WizardStep = 1 | 2 | 3;
 
 export default function CreatePaymentPage() {
   const router = useRouter();
-  const { requireWallet } = useRequireWallet();
-  const { createPayment, isPending, isSuccess, error, txHash, paymentId, reset } =
-    useCreatePayment();
+  const { requireWallet, requestNetworkSwitch, wallet } = useRequireWallet();
 
-  const [step, setStep] = useState<"form" | "review">("form");
-  const [termsDialogOpen, setTermsDialogOpen] = useState(false);
+  // Mainnet by default (canonical constant); Sepolia only via explicit
+  // selection below so existing Sepolia flows keep working.
+  const [targetChainId, setTargetChainId] = useState<number>(
+    DEFAULT_NEW_PAYMENT_CHAIN_ID,
+  );
+  const token = useMemo(
+    () => getPaymentTokenConfig(targetChainId),
+    [targetChainId],
+  );
+  const tokenDisplay = getProtectTokenDisplay(targetChainId);
+  const networkDisplay = getProtectNetworkDisplay(targetChainId);
+  const isMainnet = targetChainId === CELO_MAINNET_CHAIN_ID;
 
+  const flow = useProtectPaymentFlow(targetChainId);
+
+  const [step, setStep] = useState<WizardStep>(1);
   const [workerWallet, setWorkerWallet] = useState("");
   const [amount, setAmount] = useState("");
   const [title, setTitle] = useState("");
   const [deliverable, setDeliverable] = useState("");
   const [deliveryFormat, setDeliveryFormat] = useState("");
   const [deadline, setDeadline] = useState("");
-  const [protectionRules, setProtectionRules] = useState<ProtectionRulesData>({
-    releaseRule: "",
-    autoReleaseHours: "",
-    disputeWindow: "",
-    evidenceExpectation: "",
+  const [protectionRules, setProtectionRules] =
+    useState<ProtectionRulesData>(EMPTY_RULES);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Native CELO balance for the gas warning (warning only, never blocking;
+  // shown only when determinable).
+  const { data: nativeBalance } = useBalance({
+    address: wallet.address as `0x${string}` | undefined,
+    chainId: targetChainId,
+    query: { enabled: Boolean(wallet.address) },
   });
 
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const clearError = useCallback((field: string) => {
+    setErrors((prev) => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }, []);
 
-  const handleRulesChange = useCallback((data: ProtectionRulesData) => {
-    setProtectionRules(data);
-    if (errors.releaseRule) {
-      setErrors((prev) => {
-        const next = { ...prev };
-        delete next.releaseRule;
-        return next;
-      });
-    }
-  }, [errors.releaseRule]);
+  const handleNetworkChange = useCallback(
+    (chainId: number) => {
+      if (chainId === targetChainId) return;
+      setTargetChainId(chainId);
+      setErrors({});
+      setSubmitError(null);
+      flow.reset();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [targetChainId],
+  );
 
-  // ---- Redirect to payment room on success ----
+  const handleRulesChange = useCallback(
+    (data: ProtectionRulesData) => {
+      setProtectionRules(data);
+      clearError("releaseRule");
+    },
+    [clearError],
+  );
+
+  // ---- Redirect to the Payment Room once funds are protected ----
   useEffect(() => {
-    if (isSuccess && paymentId !== undefined) {
-      router.push(`/payments/${paymentId.toString()}`);
+    if (flow.phase === "done" && flow.createdPaymentId !== undefined) {
+      router.push(`/payments/${flow.createdPaymentId.toString()}`);
     }
-  }, [isSuccess, paymentId, router]);
+  }, [flow.phase, flow.createdPaymentId, router]);
 
-  const validate = (): boolean => {
-    const errs: Record<string, string> = {};
+  const parsedRaw = useMemo(
+    () => parseAmountToRaw(amount, token.decimals),
+    [amount, token.decimals],
+  );
 
-    if (!amount.trim() || isNaN(Number(amount)) || Number(amount) <= 0) {
-      errs.amount = "Enter a valid amount.";
-    } else if (amount.includes(".") && amount.split(".")[1]!.length > 6) {
-      errs.amount = "USDC supports at most 6 decimal places.";
-    }
+  const insufficientBalance =
+    parsedRaw !== null &&
+    flow.tokenBalance !== undefined &&
+    flow.tokenBalance < parsedRaw;
 
-    if (!workerWallet.trim()) {
-      errs.workerWallet = "Worker wallet address is required.";
-    } else if (!/^0x[0-9a-fA-F]{40}$/.test(workerWallet.trim())) {
-      errs.workerWallet = "Enter a valid Celo wallet address (0x\x2026).";
-    }
+  const walletOnTarget =
+    wallet.isConnected &&
+    wallet.chainId !== undefined &&
+    wallet.chainId === targetChainId;
+  const walletMismatched =
+    wallet.isConnected &&
+    wallet.chainId !== undefined &&
+    wallet.chainId !== targetChainId;
 
-    if (!title.trim()) {
-      errs.title = "Agreement title is required.";
-    } else if (utf8ByteLength(title.trim()) > 32) {
-      errs.title = "Keep the title under 32 characters \u2014 it is stored on-chain.";
-    }
-
-    if (!deliverable.trim()) {
-      errs.deliverable = "Deliverable description is required.";
-    } else if (utf8ByteLength(deliverable.trim()) > 32) {
-      errs.deliverable = "Keep the deliverable summary under 32 characters \u2014 it is stored on-chain.";
-    }
-
-    if (deliveryFormat.trim() !== "" && utf8ByteLength(deliveryFormat.trim()) > 32) {
-      errs.deliveryFormat = "Keep the delivery format under 32 characters \u2014 it is stored on-chain.";
-    }
-
-    if (!deadline) {
-      errs.deadline = "Delivery deadline is required.";
-    } else if (dateToUnixTimestamp(deadline) <= Math.floor(Date.now() / 1000)) {
-      errs.deadline = "Deadline must be in the future.";
-    }
-
-    if (!protectionRules.releaseRule) {
-      errs.releaseRule = "Select a release rule.";
-    }
-
+  const goToStep1 = () => setStep(1);
+  const goToStep2 = () => {
+    const errs = validatePaymentStep(
+      { workerWallet, amount },
+      token.decimals,
+      tokenDisplay,
+    );
     setErrors(errs);
-    return Object.keys(errs).length === 0;
+    if (Object.keys(errs).length === 0) setStep(2);
+  };
+  const goToStep3 = () => {
+    const errs = validateTermsStep({
+      title,
+      deliverable,
+      deliveryFormat,
+      deadline,
+      releaseRule: protectionRules.releaseRule,
+    });
+    setErrors(errs);
+    if (Object.keys(errs).length === 0) setStep(3);
   };
 
-  const handleContinueToDeposit = () => {
-    if (!validate()) return;
+  const handleProtect = () => {
+    // Re-validate everything (never trust the step state alone).
+    const step1Errs = validatePaymentStep(
+      { workerWallet, amount },
+      token.decimals,
+      tokenDisplay,
+    );
+    const step2Errs = validateTermsStep({
+      title,
+      deliverable,
+      deliveryFormat,
+      deadline,
+      releaseRule: protectionRules.releaseRule,
+    });
+    const all = { ...step1Errs, ...step2Errs };
+    setErrors(all);
+    if (Object.keys(all).length > 0) {
+      setStep(Object.keys(step1Errs).length > 0 ? 1 : 2);
+      return;
+    }
     requireWallet(() => {
-      const rawAmount = parseUSDC(amount);
-      const autoReleaseSecs = protectionRules.autoReleaseHours
-        ? parseInt(protectionRules.autoReleaseHours, 10) * 3600
-        : 0;
-      const disputeWindowSecs = protectionRules.disputeWindow
-        ? parseInt(protectionRules.disputeWindow, 10) * 3600
-        : 0;
-
-      createPayment({
-        worker: workerWallet as `0x${string}`,
-        amount: rawAmount,
-        agreementLabel: title,
-        deliverableSummary: deliverable,
-        deliveryFormat: deliveryFormat || "",
+      setSubmitError(null);
+      // Fail closed: never submit cross-network.
+      if (wallet.chainId !== targetChainId) {
+        setSubmitError(
+          `Switch to ${networkDisplay} to protect this payment.`,
+        );
+        return;
+      }
+      const raw = parseAmountToRaw(amount, token.decimals);
+      if (raw === null) {
+        setErrors((prev) => ({
+          ...prev,
+          amount: "Enter an amount greater than zero.",
+        }));
+        setStep(1);
+        return;
+      }
+      // Pre-transaction funds check (uses the existing allowance/balance hook).
+      if (flow.tokenBalance !== undefined && flow.tokenBalance < raw) {
+        setSubmitError(
+          `Your ${tokenDisplay} balance is less than ${amount} ${tokenDisplay}. Add funds before protecting this payment.`,
+        );
+        return;
+      }
+      flow.start({
+        worker: workerWallet.trim() as `0x${string}`,
+        amount: raw,
+        rawAmount: raw,
+        agreementLabel: title.trim(),
+        deliverableSummary: deliverable.trim(),
+        deliveryFormat: deliveryFormat.trim(),
         deliveryDeadline: dateToUnixTimestamp(deadline),
         releaseRule: protectionRules.releaseRule,
-        autoReleaseSeconds: autoReleaseSecs,
-        disputeWindowSeconds: disputeWindowSecs,
-        evidenceExpectation: protectionRules.evidenceExpectation || "",
+        autoReleaseSeconds: protectionRules.autoReleaseHours
+          ? parseInt(protectionRules.autoReleaseHours, 10) * 3600
+          : 0,
+        disputeWindowSeconds: protectionRules.disputeWindow
+          ? parseInt(protectionRules.disputeWindow, 10) * 3600
+          : 0,
+        evidenceExpectation: protectionRules.evidenceExpectation.trim(),
       });
     });
   };
 
-  const handleCheckTerms = () => {
-    const hasInput = title.trim() || deliverable.trim() || amount.trim();
-    if (!hasInput) return;
-    requireWallet(() => {
-      setTermsDialogOpen(true);
-    });
-  };
-
-  const handleReview = () => {
-    if (!validate()) return;
-    requireWallet(() => {
-      setStep("review");
-    });
-  };
-
-  if (step === "review") {
-    return (
-      <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
-        <h1 className="text-[32px] leading-[1.1] tracking-[-0.02em] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[44px]">
-          Review your agreement
-        </h1>
-        <p className="mt-1 text-[15px] text-muted">
-          Review the payment terms before creating the protected payment.
-        </p>
-
-        <div className="mt-8 grid gap-8 lg:grid-cols-3">
-          <div className="lg:col-span-2 space-y-6">
-            <AgreementPreview
-              amount={amount}
-              worker={workerWallet}
-              deliverable={deliverable}
-              deliveryFormat={deliveryFormat}
-              deadline={deadline}
-              releaseRule={protectionRules.releaseRule}
-              disputeWindow={protectionRules.disputeWindow}
-              evidenceExpectation={protectionRules.evidenceExpectation}
-            />
-
-            {/* ---- Transaction feedback ---- */}
-            {error && (
-              <Notice variant="warning">
-                <p className="text-[14px] leading-relaxed">{error}</p>
-                <button
-                  type="button"
-                  className="mt-2 text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
-                  onClick={() => reset()}
-                >
-                  Dismiss
-                </button>
-              </Notice>
-            )}
-
-            {isPending && !txHash && (
-              <Notice variant="info">
-                <p className="text-[14px] leading-relaxed">
-                  <span className="inline-flex items-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="30 10" />
-                    </svg>
-                    Waiting for signature in your wallet\u2026
-                  </span>
-                </p>
-              </Notice>
-            )}
-
-            {isPending && txHash && (
-              <Notice variant="info">
-                <p className="text-[14px] leading-relaxed">
-                  <span className="inline-flex items-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="30 10" />
-                    </svg>
-                    Transaction submitted \u2014 confirming on-chain\u2026
-                  </span>
-                </p>
-                <p className="mt-1 text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted break-all">
-                  {txHash}
-                </p>
-              </Notice>
-            )}
-
-            {isSuccess && txHash && (
-              <Notice variant="success">
-                <p className="text-[14px] leading-relaxed">
-                  Payment created successfully. Redirecting to payment room\u2026
-                </p>
-                <a
-                  href={getCeloExplorerTxUrl(txHash)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
-                >
-                  View on Celo Explorer
-                </a>
-              </Notice>
-            )}
-
-            <div className="flex items-center gap-4">
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  reset();
-                  setStep("form");
-                }}
-                disabled={isPending}
-              >
-                Edit terms
-              </Button>
-              <Button onClick={handleContinueToDeposit} disabled={isPending}>
-                {isPending ? "Creating payment\u2026" : "Continue to deposit"}
-              </Button>
-            </div>
-
-            <button
-              type="button"
-              className="text-[14px] font-medium text-gold hover:text-gold/80 transition-colors"
-              onClick={handleCheckTerms}
-            >
-              Check these terms \u2014 0.01 {PAYMENT_TOKEN_SYMBOL}
-            </button>
-          </div>
-
-          <div className="lg:col-span-1">
-            <Notice variant="info">
-              <p className="text-[14px] leading-relaxed">
-                <strong>You will deposit {PAYMENT_TOKEN_SYMBOL} after creation.</strong>
-                {" "}The payment is created first; then you can fund it from the Payment Room.
-              </p>
-              <div className="mt-3">
-                <WalletButton />
-              </div>
-            </Notice>
-          </div>
-        </div>
-
-        <Dialog
-          open={termsDialogOpen}
-          onClose={() => setTermsDialogOpen(false)}
-          title="Terms Risk Check"
-          primaryLabel="Got it"
-          onPrimary={() => setTermsDialogOpen(false)}
-        >
-          <p>Terms Risk Check will be enabled during x402 integration.</p>
-        </Dialog>
-      </div>
-    );
-  }
+  const releaseRuleLabel =
+    RELEASE_RULE_LABELS[protectionRules.releaseRule] ??
+    protectionRules.releaseRule;
+  const today = new Date().toISOString().slice(0, 10);
+  const flowStarted = flow.phase !== "idle";
+  const protectDisabled =
+    flow.isWorking || walletMismatched || flow.phase === "done";
 
   return (
     <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
@@ -290,191 +253,495 @@ export default function CreatePaymentPage() {
         Protect a payment
       </h1>
       <p className="mt-1 text-[15px] text-muted">
-        Define the work, set the protection rules, and review the agreement before depositing {PAYMENT_TOKEN_SYMBOL}.
+        {step === 1 && "Step 1 of 3 — tell us who to pay and how much."}
+        {step === 2 && "Step 2 of 3 — describe the work in plain words."}
+        {step === 3 && "Step 3 of 3 — review, then lock the funds in."}
       </p>
+      <div className="mt-4">
+        <NewPaymentStepper currentStep={step} />
+      </div>
 
-      <div className="mt-8 grid gap-8 lg:grid-cols-3">
-        <div className="lg:col-span-2 space-y-10">
-          <section>
-            <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
-              Payment
-            </h2>
-            <div className="mt-4 space-y-5">
-              <div>
-                <label className="text-[15px] font-medium text-ink">
-                  Client wallet
-                </label>
-                <div className="mt-1.5">
-                  <Notice variant="info">
-                    <div className="flex items-center gap-3">
-                      <span className="text-[14px]">
-                        Connect your wallet before this payment can be funded.
-                      </span>
-                      <WalletButton />
-                    </div>
-                  </Notice>
-                </div>
-              </div>
-
-              <Input
-                label="Worker wallet"
-                placeholder="0x..."
-                value={workerWallet}
-                onChange={(e) => {
-                  setWorkerWallet(e.target.value);
-                  if (errors.workerWallet) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.workerWallet;
-                      return next;
-                    });
-                  }
-                }}
-                error={errors.workerWallet}
-                helper="The Celo wallet address of the worker receiving this payment."
-              />
-
-              <Input
-                label="Amount"
-                placeholder="100.00"
-                value={amount}
-                onChange={(e) => {
-                  setAmount(e.target.value);
-                  if (errors.amount) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.amount;
-                      return next;
-                    });
-                  }
-                }}
-                error={errors.amount}
-                helper={`Payment amount in ${PAYMENT_TOKEN_SYMBOL}.`}
-              />
-
-              <div>
-                <label className="text-[15px] font-medium text-ink">Currency</label>
-                <div className="mt-1.5 h-12 flex items-center rounded-[--radius-input] border border-border bg-input px-4 text-[15px] text-ink">
-                  {PAYMENT_TOKEN_SYMBOL}
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section>
-            <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
-              Work agreement
-            </h2>
-            <div className="mt-4 space-y-5">
-              <Input
-                label="Agreement title"
-                placeholder="Landing page design"
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  if (errors.title) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.title;
-                      return next;
-                    });
-                  }
-                }}
-                error={errors.title}
-                maxLength={32}
-              />
-
-              <Textarea
-                label="Deliverable description"
-                placeholder="Short summary of what will be delivered"
-                value={deliverable}
-                onChange={(e) => {
-                  setDeliverable(e.target.value);
-                  if (errors.deliverable) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.deliverable;
-                      return next;
-                    });
-                  }
-                }}
-                error={errors.deliverable}
-                maxLength={32}
-                helper="Keep the deliverable summary under 32 characters \u2014 it is stored on-chain."
-              />
-
-              <Input
-                label="Delivery format"
-                placeholder="Figma file and exported mobile screens"
-                value={deliveryFormat}
-                onChange={(e) => {
-                  setDeliveryFormat(e.target.value);
-                  if (errors.deliveryFormat) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.deliveryFormat;
-                      return next;
-                    });
-                  }
-                }}
-                maxLength={32}
-                error={errors.deliveryFormat}
-              />
-
-              <Input
-                label="Delivery deadline"
-                type="date"
-                value={deadline}
-                onChange={(e) => {
-                  setDeadline(e.target.value);
-                  if (errors.deadline) {
-                    setErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.deadline;
-                      return next;
-                    });
-                  }
-                }}
-                error={errors.deadline}
-              />
-            </div>
-          </section>
-
-          <ProtectionRules onChange={handleRulesChange} />
-          {errors.releaseRule && (
-            <p className="text-[13px] text-red-600" role="alert">{errors.releaseRule}</p>
-          )}
+      {walletMismatched && (
+        <div className="mt-6">
+          <Notice variant="warning">
+            <p className="text-[14px] leading-relaxed">
+              {wallet.chainId !== undefined &&
+              isSupportedChain(wallet.chainId) ? (
+                <>
+                  Your wallet is on {getChainName(wallet.chainId)}. This
+                  payment will be protected on {networkDisplay}.
+                </>
+              ) : (
+                <>
+                  Your wallet is on an unsupported network. This payment will
+                  be protected on {networkDisplay}.
+                </>
+              )}
+            </p>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-3"
+              onClick={() => requestNetworkSwitch(targetChainId)}
+            >
+              Switch to {networkDisplay}
+            </Button>
+          </Notice>
         </div>
+      )}
 
-        <div className="lg:col-span-1">
-          <div className="sticky top-[8rem] space-y-6">
-            <AgreementPreview
-              amount={amount}
-              worker={workerWallet}
-              deliverable={deliverable}
-              deliveryFormat={deliveryFormat}
-              deadline={deadline}
-              releaseRule={protectionRules.releaseRule}
-              disputeWindow={protectionRules.disputeWindow}
-              evidenceExpectation={protectionRules.evidenceExpectation}
+      {step === 1 && (
+        <div className="mt-8 grid gap-8 lg:grid-cols-3">
+          <div className="lg:col-span-2 space-y-5">
+            <section aria-label="Network">
+              <span
+                id="new-payment-network-label"
+                className="text-[15px] font-medium text-ink"
+              >
+                Network
+              </span>
+              <div
+                role="group"
+                aria-labelledby="new-payment-network-label"
+                className="mt-1.5 flex gap-2"
+              >
+                <button
+                  type="button"
+                  aria-pressed={isMainnet}
+                  disabled={flowStarted}
+                  onClick={() =>
+                    handleNetworkChange(DEFAULT_NEW_PAYMENT_CHAIN_ID)
+                  }
+                  className={`rounded-[--radius-pill] border px-4 py-2 text-[14px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                    isMainnet
+                      ? "border-primary bg-primary text-page"
+                      : "border-border bg-surface text-ink hover:bg-input"
+                  }`}
+                >
+                  Celo <span className="opacity-70">· Live</span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={!isMainnet}
+                  disabled={flowStarted}
+                  onClick={() => handleNetworkChange(CELO_CHAIN_ID)}
+                  className={`rounded-[--radius-pill] border px-4 py-2 text-[14px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                    !isMainnet
+                      ? "border-primary bg-primary text-page"
+                      : "border-border bg-surface text-ink hover:bg-input"
+                  }`}
+                >
+                  Celo Sepolia <span className="opacity-70">· Test</span>
+                </button>
+              </div>
+              <p className="mt-1.5 text-[13px] text-muted">
+                {isMainnet
+                  ? `Live payments on Celo, protected in ${tokenDisplay}.`
+                  : "Test payments on Celo Sepolia, protected in USDC."}
+              </p>
+            </section>
+
+            <div>
+              <span className="text-[15px] font-medium text-ink">
+                Your wallet
+              </span>
+              <div className="mt-1.5">
+                <Notice variant="info">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-[14px]">
+                      {wallet.isConnected
+                        ? `Connected. You will approve 3 transactions: create, approve ${tokenDisplay}, then lock the funds.`
+                        : "Connect your wallet. You will approve 3 transactions: create, approve, then lock the funds."}
+                    </span>
+                    <WalletButton />
+                  </div>
+                </Notice>
+              </div>
+            </div>
+
+            <Input
+              label="Freelancer wallet"
+              placeholder="0x..."
+              value={workerWallet}
+              onChange={(e) => {
+                setWorkerWallet(e.target.value);
+                clearError("workerWallet");
+              }}
+              error={errors.workerWallet}
+              helper="The Celo wallet address of the freelancer receiving this payment."
             />
 
-            <Notice variant="info">
-              <p className="text-[14px] leading-relaxed">
-                <strong>No platform fee on testnet.</strong> The full amount you deposit is held in escrow and released to the worker.
-              </p>
-            </Notice>
+            <Input
+              label="Amount"
+              placeholder="100.00"
+              inputMode="decimal"
+              value={amount}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                clearError("amount");
+              }}
+              error={errors.amount}
+              helper={`Payment amount in ${tokenDisplay}.`}
+            />
 
-            <Button
-              size="lg"
-              className="w-full"
-              onClick={handleReview}
-            >
-              Review agreement
-            </Button>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <div>
+                <label className="text-[15px] font-medium text-ink">
+                  Currency
+                </label>
+                <div className="mt-1.5 h-12 flex items-center rounded-[--radius-input] border border-border bg-input px-4 text-[15px] text-ink">
+                  {tokenDisplay}
+                  <span className="ml-2 text-[13px] text-muted">
+                    {token.symbol}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <label className="text-[15px] font-medium text-ink">
+                  Network
+                </label>
+                <div className="mt-1.5 h-12 flex items-center rounded-[--radius-input] border border-border bg-input px-4 text-[15px] text-ink">
+                  {networkDisplay}
+                </div>
+              </div>
+            </div>
+
+            {wallet.isConnected && (
+              <p className="text-[14px] text-muted" aria-live="polite">
+                Your {tokenDisplay} balance:{" "}
+                {flow.isLoadingTokenBalance ? (
+                  "checking…"
+                ) : flow.tokenBalance !== undefined ? (
+                  <span className="font-[family-name:var(--font-ibm-plex-mono)] tabular-nums text-ink">
+                    {formatUSDC(flow.tokenBalance, token.decimals)}{" "}
+                    {tokenDisplay}
+                  </span>
+                ) : (
+                  "unavailable"
+                )}
+              </p>
+            )}
+            {insufficientBalance && (
+              <Notice variant="warning">
+                <p className="text-[14px] leading-relaxed">
+                  Your {tokenDisplay} balance is less than {amount}{" "}
+                  {tokenDisplay}. Add funds before protecting this payment.
+                </p>
+              </Notice>
+            )}
+
+            {nativeBalance?.value === 0n && (
+              <Notice variant="warning">
+                <p className="text-[14px] leading-relaxed">
+                  You have no CELO on {networkDisplay} for network fees. Add a
+                  small amount of CELO so your transactions can go through.
+                </p>
+              </Notice>
+            )}
+
+            <div className="flex items-center gap-4 pt-2">
+              <Button size="lg" onClick={goToStep2}>
+                Continue to terms
+              </Button>
+            </div>
+          </div>
+
+          <div className="lg:col-span-1">
+            <div className="sticky top-[8rem] space-y-6">
+              <AgreementPreview
+                amount={amount}
+                worker={workerWallet}
+                tokenLabel={tokenDisplay}
+                networkLabel={networkDisplay}
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {step === 2 && (
+        <div className="mt-8 grid gap-8 lg:grid-cols-3">
+          <div className="lg:col-span-2 space-y-5">
+            <section aria-label="Work description">
+              <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
+                Describe the work
+              </h2>
+              <p className="mt-1 text-[14px] text-muted">
+                Short titles work best. These details are saved with the
+                agreement so both sides see the same terms.
+              </p>
+              <div className="mt-4 space-y-5">
+                <Input
+                  label="Agreement title"
+                  placeholder="Landing page design"
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    clearError("title");
+                  }}
+                  error={errors.title}
+                  helper="Keep the title under 32 characters so it fits the agreement record."
+                />
+
+                <Textarea
+                  label="Deliverable description"
+                  placeholder="Short summary of what will be delivered"
+                  value={deliverable}
+                  onChange={(e) => {
+                    setDeliverable(e.target.value);
+                    clearError("deliverable");
+                  }}
+                  error={errors.deliverable}
+                  helper="Keep the deliverable summary under 32 characters so it fits the agreement record."
+                />
+
+                <Input
+                  label="Delivery format (optional)"
+                  placeholder="Figma file and exported mobile screens"
+                  value={deliveryFormat}
+                  onChange={(e) => {
+                    setDeliveryFormat(e.target.value);
+                    clearError("deliveryFormat");
+                  }}
+                  error={errors.deliveryFormat}
+                  helper="Keep the delivery format under 32 characters so it fits the agreement record."
+                />
+
+                <Input
+                  label="Delivery date"
+                  type="date"
+                  min={today}
+                  value={deadline}
+                  onChange={(e) => {
+                    setDeadline(e.target.value);
+                    clearError("deadline");
+                  }}
+                  error={errors.deadline}
+                  helper="When should the work be delivered? Pick a future date."
+                />
+              </div>
+            </section>
+
+            <ProtectionRules
+              value={protectionRules}
+              onChange={handleRulesChange}
+            />
+            {errors.releaseRule && (
+              <p className="text-[13px] text-red-600" role="alert">
+                {errors.releaseRule}
+              </p>
+            )}
+
+            <div className="flex items-center gap-4 pt-2">
+              <Button variant="secondary" onClick={goToStep1}>
+                Back
+              </Button>
+              <Button size="lg" onClick={goToStep3}>
+                Continue to review
+              </Button>
+            </div>
+          </div>
+
+          <div className="lg:col-span-1">
+            <div className="sticky top-[8rem] space-y-6">
+              <AgreementPreview
+                amount={amount}
+                worker={workerWallet}
+                title={title}
+                deliverable={deliverable}
+                deliveryFormat={deliveryFormat}
+                deadline={deadline}
+                releaseRule={protectionRules.releaseRule}
+                disputeWindow={protectionRules.disputeWindow}
+                evidenceExpectation={protectionRules.evidenceExpectation}
+                tokenLabel={tokenDisplay}
+                networkLabel={networkDisplay}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="mt-8 grid gap-8 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <ProtectPreflight
+              amount={amount}
+              tokenDisplay={tokenDisplay}
+              worker={workerWallet}
+              networkDisplay={networkDisplay}
+              terms={{
+                title,
+                deliverable,
+                deliveryFormat,
+                deadline,
+                releaseRuleLabel: releaseRuleLabel,
+                disputeWindow: protectionRules.disputeWindow,
+                evidenceExpectation: protectionRules.evidenceExpectation,
+              }}
+            />
+
+            <div className="mt-6 space-y-4">
+              {(submitError || flow.error) && (
+                <Notice variant="warning">
+                  <p className="text-[14px] leading-relaxed" role="alert">
+                    {submitError ?? flow.error}
+                  </p>
+                  {flow.error && !flow.isWorking && flow.phase !== "done" && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="mt-3"
+                      onClick={flow.retry}
+                    >
+                      Try again
+                    </Button>
+                  )}
+                  {submitError?.startsWith("Switch to ") && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="mt-3"
+                      onClick={() => requestNetworkSwitch(targetChainId)}
+                    >
+                      Switch to {networkDisplay}
+                    </Button>
+                  )}
+                </Notice>
+              )}
+
+              {flowStarted && flow.phase !== "done" && (
+                <Notice variant="info">
+                  <p className="text-[14px] leading-relaxed">
+                    <span className="inline-flex items-center gap-2">
+                      {flow.isWorking && (
+                        <svg
+                          className="animate-spin h-4 w-4"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          aria-hidden="true"
+                        >
+                          <circle
+                            cx="8"
+                            cy="8"
+                            r="6"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeDasharray="30 10"
+                          />
+                        </svg>
+                      )}
+                      <span aria-live="polite">{flow.progressLabel}</span>
+                    </span>
+                  </p>
+                  <ul className="mt-2 space-y-1 text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted break-all">
+                    {flow.createTxHash && (
+                      <li>
+                        Create:{" "}
+                        <a
+                          href={explorerTxUrl(targetChainId, flow.createTxHash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gold hover:text-gold/80 transition-colors"
+                        >
+                          {flow.createTxHash}
+                        </a>
+                      </li>
+                    )}
+                    {flow.approveTxHash && (
+                      <li>
+                        Approve:{" "}
+                        <a
+                          href={explorerTxUrl(targetChainId, flow.approveTxHash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gold hover:text-gold/80 transition-colors"
+                        >
+                          {flow.approveTxHash}
+                        </a>
+                      </li>
+                    )}
+                    {flow.fundTxHash && (
+                      <li>
+                        Protect:{" "}
+                        <a
+                          href={explorerTxUrl(targetChainId, flow.fundTxHash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gold hover:text-gold/80 transition-colors"
+                        >
+                          {flow.fundTxHash}
+                        </a>
+                      </li>
+                    )}
+                  </ul>
+                </Notice>
+              )}
+
+              {flow.phase === "done" && (
+                <Notice variant="success">
+                  <p className="text-[15px] font-semibold text-ink">
+                    Payment protected
+                  </p>
+                  <p className="mt-1 text-[14px] leading-relaxed">
+                    {amount} {tokenDisplay} for{" "}
+                    <span className="font-[family-name:var(--font-ibm-plex-mono)] break-all">
+                      {workerWallet}
+                    </span>{" "}
+                    on {networkDisplay}
+                    {flow.createdPaymentId !== undefined &&
+                      ` · Payment ID ${flow.createdPaymentId.toString()}`}.
+                    Taking you to the Payment Room…
+                  </p>
+                </Notice>
+              )}
+
+              <div className="flex flex-wrap items-center gap-4">
+                <Button
+                  variant="secondary"
+                  onClick={goToStep2}
+                  disabled={flow.isWorking || flow.phase === "done"}
+                >
+                  Back to terms
+                </Button>
+                {flow.phase !== "done" && (
+                  <Button
+                    size="lg"
+                    onClick={handleProtect}
+                    disabled={protectDisabled}
+                  >
+                    Protect payment
+                  </Button>
+                )}
+              </div>
+              {!walletOnTarget && flow.phase === "idle" && (
+                <p className="text-[13px] text-muted">
+                  {wallet.isConnected
+                    ? `You are on ${wallet.chainId !== undefined ? getChainName(wallet.chainId) : "an unknown network"} — switch to ${networkDisplay} to continue.`
+                    : `You will confirm on ${networkDisplay} when you protect this payment.`}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="lg:col-span-1">
+            <div className="sticky top-[8rem]">
+              <Notice variant="info">
+                <p className="text-[14px] leading-relaxed">
+                  <strong>
+                    Your {tokenDisplay} is locked, not sent.
+                  </strong>{" "}
+                  It moves to the freelancer only after you review and
+                  release it — or through a dispute if you disagree.
+                </p>
+                <div className="mt-3">
+                  <WalletButton />
+                </div>
+              </Notice>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
