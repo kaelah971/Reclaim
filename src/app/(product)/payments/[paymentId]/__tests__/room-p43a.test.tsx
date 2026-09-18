@@ -21,7 +21,9 @@ import { buildPaymentSharePath } from "@/components/payment/SharePaymentLink";
 const ROOM_PATH = resolve(__dirname, "..", "page.tsx");
 
 function roomSource(): string {
-  return readFileSync(ROOM_PATH, "utf-8");
+  // Normalize CRLF: Windows checkouts (core.autocrlf) store CRLF on disk
+  // while blobs are LF-only; assertions use LF literals.
+  return readFileSync(ROOM_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 
 describe("room — chain-explicit resolution (?chainId=)", () => {
@@ -145,7 +147,7 @@ describe("room — roles + landing", () => {
     const landingSrc = readFileSync(
       resolve(__dirname, "..", "..", "..", "..", "..", "components", "payment", "FreelancerLanding.tsx"),
       "utf-8",
-    );
+    ).replace(/\r\n/g, "\n");
     expect(landingSrc).toContain(
       "Your payment is protected in the Reclaim contract.",
     );
@@ -220,7 +222,7 @@ describe("room — attribution + receipt-confirm + refresh", () => {
         "useEscrowActions.ts",
       ),
       "utf-8",
-    );
+    ).replace(/\r\n/g, "\n");
     expect(escrowSrc).toContain("getAttributionDataSuffix");
     expect(escrowSrc).toContain("simulateContract");
     // Room calls hooks — never writes directly.
@@ -329,7 +331,7 @@ describe("agent/review — chainId preserve-or-propagate", () => {
     const agentSrc = readFileSync(
       resolve(__dirname, "..", "agent", "page.tsx"),
       "utf-8",
-    );
+    ).replace(/\r\n/g, "\n");
     expect(agentSrc).toContain("parseChainIdParam");
     expect(agentSrc).toContain("const chainQuery");
     expect(agentSrc).toContain(
@@ -346,7 +348,7 @@ describe("agent/review — chainId preserve-or-propagate", () => {
     const reviewSrc = readFileSync(
       resolve(__dirname, "..", "review", "page.tsx"),
       "utf-8",
-    );
+    ).replace(/\r\n/g, "\n");
     expect(reviewSrc).toContain("parseChainIdParam");
     expect(reviewSrc).toContain("const chainQuery");
     expect(reviewSrc).toContain(
@@ -360,7 +362,7 @@ describe("agent/review — chainId preserve-or-propagate", () => {
 
   it("agent/review default to empty suffix when absent (no hardcoded query)", () => {
     for (const rel of ["../agent/page.tsx", "../review/page.tsx"]) {
-      const src = readFileSync(resolve(__dirname, rel), "utf-8");
+      const src = readFileSync(resolve(__dirname, rel), "utf-8").replace(/\r\n/g, "\n");
       expect(src).toContain(': ""');
       expect(src).not.toContain("/review?chainId=");
       expect(src).not.toContain("/dispute?chainId=");

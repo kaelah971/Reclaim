@@ -62,19 +62,19 @@ const ESCROW_HOOK_PATH = resolve(
 );
 
 function roomSource(): string {
-  return readFileSync(ROOM_PATH, "utf-8");
+  return readFileSync(ROOM_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 function viewerSource(): string {
-  return readFileSync(VIEWER_PATH, "utf-8");
+  return readFileSync(VIEWER_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 function preflightSource(): string {
-  return readFileSync(PREFLIGHT_PATH, "utf-8");
+  return readFileSync(PREFLIGHT_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 function summarySource(): string {
-  return readFileSync(SUMMARY_PATH, "utf-8");
+  return readFileSync(SUMMARY_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 function escrowSource(): string {
-  return readFileSync(ESCROW_HOOK_PATH, "utf-8");
+  return readFileSync(ESCROW_HOOK_PATH, "utf-8").replace(/\r\n/g, "\n");
 }
 
 /** Slice a branch from its marker to the next `} else if` (isolated block). */

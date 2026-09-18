@@ -3,6 +3,19 @@ import Button from "@/components/ui/Button";
 import StatusBadge from "@/components/ui/StatusBadge";
 import AccordLine from "@/components/shared/AccordLine";
 import type { AccordStage } from "@/components/shared/AccordLine";
+import { CELO_MAINNET_ESCROW_TOKEN_CONFIG } from "@/lib/web3/tokens";
+
+/**
+ * P4.5D — static marketing example is Mainnet-first.
+ * Amount reuses the canonical Mainnet escrow token name (USA₮) instead of
+ * hardcoding a display string. Network uses the short production "Celo"
+ * label (matches product "On Celo" copy; full canonical name via
+ * getChainName(42220) is "Celo Mainnet"). This is presentation-only:
+ * per-payment rendering stays chain-driven and Sepolia/USDC flows are
+ * untouched.
+ */
+const PRODUCTION_EXAMPLE_TOKEN_NAME = CELO_MAINNET_ESCROW_TOKEN_CONFIG.name;
+const PRODUCTION_EXAMPLE_AMOUNT = `100.00 ${PRODUCTION_EXAMPLE_TOKEN_NAME}`;
 
 const previewStages: AccordStage[] = [
   { label: "Terms", state: "completed" },
@@ -124,7 +137,7 @@ export default function LandingPage() {
                   <article className="document-card proof-card proof-card--terms">
                     <p className="proof-card__label">Agreement</p>
                     <p className="proof-card__title">Terms locked</p>
-                    <p className="proof-card__detail">100.00 USDC | Release after approval</p>
+                    <p className="proof-card__detail">{`${PRODUCTION_EXAMPLE_AMOUNT} | Release after approval`}</p>
                   </article>
 
                   <article className="document-card proof-card proof-card--evidence">
@@ -164,7 +177,13 @@ export default function LandingPage() {
                     <div>
                       <dt className="text-[11px] text-muted">Amount</dt>
                       <dd className="mt-1 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] tabular-nums text-ink">
-                        100.00 USDC
+                        {PRODUCTION_EXAMPLE_AMOUNT}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] text-muted">Network</dt>
+                      <dd className="mt-1 font-[family-name:var(--font-ibm-plex-mono)] text-[13px] tabular-nums text-ink">
+                        Celo
                       </dd>
                     </div>
                     <div>
