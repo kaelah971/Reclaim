@@ -100,7 +100,9 @@ describe("reviewer escrow identity binding", () => {
     expect(getReviewerBindingMismatches(decision(), binding)).toEqual([]);
   });
 
-  it("does not substitute Sepolia when the mainnet escrow address is absent", () => {
-    expect(() => getEscrowContractAddress(42220)).toThrow(/not deployed on chain 42220/i);
+  it("resolves the deployed Celo Mainnet escrow (P3)", () => {
+    expect(getEscrowContractAddress(42220)).toBe(
+      "0xE42cF4620DE454bE0De5004255d25683e4F882c4",
+    );
   });
 });
