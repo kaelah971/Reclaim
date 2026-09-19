@@ -17,6 +17,7 @@
 import { createPublicClient, http } from "viem";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
+import { getEscrowDeployment } from "@/lib/contracts/escrowIdentity";
 import {
   CELO_MAINNET_CHAIN_ID,
   CELO_SEPOLIA_CHAIN_ID,
@@ -350,6 +351,12 @@ export interface CeloChainFinalProofReaderOptions {
   chainId?: number;
   rpcUrl?: string;
   client?: ChainReadClient;
+  /**
+   * P7.2: optional explicit escrow contract. Must be allowlisted for the
+   * chain (validated via getEscrowDeployment, throws on unknown). Absent →
+   * canonical default (existing behavior unchanged).
+   */
+  escrowAddress?: string | null;
 }
 
 /**
@@ -379,6 +386,7 @@ export class CeloChainFinalProofReader {
     let chainId: number = CELO_SEPOLIA_CHAIN_ID;
     let resolvedRpcUrl = rpcUrl;
     let resolvedClient = client;
+    let escrowOverride: string | null = null;
     if (
       typeof chainIdOrOptions === "object" &&
       chainIdOrOptions !== null
@@ -386,11 +394,24 @@ export class CeloChainFinalProofReader {
       if (chainIdOrOptions.chainId !== undefined) chainId = chainIdOrOptions.chainId;
       if (chainIdOrOptions.rpcUrl !== undefined) resolvedRpcUrl = chainIdOrOptions.rpcUrl;
       if (chainIdOrOptions.client !== undefined) resolvedClient = chainIdOrOptions.client;
+      if (
+        chainIdOrOptions.escrowAddress !== undefined &&
+        chainIdOrOptions.escrowAddress !== null &&
+        String(chainIdOrOptions.escrowAddress).trim() !== ""
+      ) {
+        escrowOverride = String(chainIdOrOptions.escrowAddress).trim();
+      }
     } else if (typeof chainIdOrOptions === "number") {
       chainId = chainIdOrOptions;
     }
 
-    const { contractAddress } = resolveChainProvenanceConfig(chainId);
+    const { contractAddress: canonicalAddress } =
+      resolveChainProvenanceConfig(chainId);
+    // P7.2: an explicit escrow must be allowlisted for this chain (fail
+    // closed — never fall back). Absent → canonical default (unchanged).
+    const contractAddress = escrowOverride
+      ? getEscrowDeployment({ chainId, escrowAddress: escrowOverride }).address
+      : canonicalAddress;
     const chainDefinition =
       getCeloChain(chainId) ??
       (chainId === CELO_MAINNET_CHAIN_ID ? celoMainnetChain : celoSepoliaChain);

@@ -31,6 +31,11 @@ import {
   resolveEvidenceChainId,
 } from "@/lib/evidence/chainScope";import { normalizeForJson } from "@/lib/x402/jsonSafe";
 import {
+  getEscrowDeployment,
+  isCanonicalDeployment,
+  parseEscrowParam,
+} from "@/lib/contracts/escrowIdentity";
+import {
   X402_NETWORK,
   X402_PAY_TO_ADDRESS,
   X402_SPENDER_ADDRESS,
@@ -156,10 +161,39 @@ function EvidencePageInner() {
     if (targetChainId === null) return undefined;
     return targetChainId;
   }, [searchParams, targetChainId]);
-  const chainQuery =
+  const chainQueryBase =
     explicitEvidenceChainId !== undefined
       ? `?chainId=${explicitEvidenceChainId}`
       : "";
+  // P7.2 escrow threading (?escrow=): absent → canonical V1 (legacy
+  // behavior); present → fail-closed allowlist validation against the
+  // resolved chain (unknown escrow joins the fail-closed branch below —
+  // never falls back to the canonical contract).
+  const escrowRaw = searchParams?.get("escrow") ?? null;
+  const escrowParam = useMemo(() => parseEscrowParam(escrowRaw), [escrowRaw]);
+  const escrowChainForValidation = targetChainId ?? CELO_CHAIN_ID;
+  const escrowDeployment = useMemo(() => {
+    if (escrowParam.status !== "valid") return undefined;
+    try {
+      return getEscrowDeployment({
+        chainId: escrowChainForValidation,
+        escrowAddress: escrowParam.address,
+      });
+    } catch {
+      return undefined;
+    }
+  }, [escrowParam, escrowChainForValidation]);
+  const isEscrowInvalid =
+    escrowParam.status === "invalid" ||
+    (escrowParam.status === "valid" && escrowDeployment === undefined);
+  const explicitEscrowAddress =
+    escrowDeployment && !isCanonicalDeployment(escrowDeployment)
+      ? escrowDeployment.address
+      : undefined;
+  const chainQuery =
+    explicitEscrowAddress !== undefined
+      ? `${chainQueryBase || `?chainId=${escrowChainForValidation}`}&escrow=${explicitEscrowAddress}`
+      : chainQueryBase;
 
   const { data: payment, isLoading, isError, notFound, refetch: refetchPayment } = usePayment(
     targetChainId === null ? undefined : paymentId,
@@ -673,7 +707,8 @@ function EvidencePageInner() {
     payment.worker.toLowerCase() === wallet.address.toLowerCase();
 
   // P4.3b fail-closed: an unsupported ?chainId= never binds to an escrow.
-  if (targetChainId === null) {
+  // P7.2: an unknown ?escrow= fails closed the same way (never falls back).
+  if (targetChainId === null || isEscrowInvalid) {
     return (
       <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
         <div className="flex flex-col items-center justify-center gap-4 text-center">
@@ -682,7 +717,9 @@ function EvidencePageInner() {
           </h1>
           <p className="text-[15px] text-muted">
             This delivery evidence form supports Celo Sepolia and Celo Mainnet.
-            The network in the page URL is not supported.
+            {isEscrowInvalid
+              ? " The escrow contract in the page URL is not a known deployment."
+              : " The network in the page URL is not supported."}
           </p>
           <Button
             variant="secondary"

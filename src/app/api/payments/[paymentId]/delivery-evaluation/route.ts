@@ -17,6 +17,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import {
+  pickEscrowParam,
+  resolveRouteEscrow,
+} from "@/lib/contracts/escrowIdentity";
+import { isSupportedChain } from "@/lib/web3/chains";
+import {
   consumeEvidenceChallenge,
   hashEvidenceChallenge,
   verifyEvidenceChallenge,
@@ -48,9 +53,48 @@ export async function POST(
     const correlationId =
       request.headers.get("x-correlation-id") ?? randomUUID();
 
+    // P7.2: optional explicit escrow (body escrow/escrowAddress — mirrors
+    // this route's body-only chain scoping). Absent → canonical default
+    // (behavior unchanged). Present → allowlist-validated here (fail closed
+    // UNKNOWN_ESCROW), then closed over by the injected readers below.
+    // An unparseable chain is left for the service's own chain validation.
+    let validatedEscrow: `0x${string}` | undefined;
+    {
+      const rawChainForEscrow =
+        body.chainId ??
+        body.escrowChainId ??
+        body.chain_id ??
+        body.escrow_chain_id ??
+        null;
+      const parsedChainForEscrow =
+        typeof rawChainForEscrow === "number"
+          ? rawChainForEscrow
+          : typeof rawChainForEscrow === "string" && rawChainForEscrow.trim() !== ""
+            ? Number(rawChainForEscrow.trim())
+            : null;
+      const pickedEscrow = pickEscrowParam(
+        body.escrow ?? body.escrowAddress ?? body.escrowContractAddress ?? body.escrow_contract_address ?? null,
+      );
+      if (
+        pickedEscrow !== undefined &&
+        parsedChainForEscrow !== null &&
+        Number.isSafeInteger(parsedChainForEscrow) &&
+        isSupportedChain(parsedChainForEscrow)
+      ) {
+        try {
+          validatedEscrow = resolveRouteEscrow(parsedChainForEscrow, pickedEscrow).address;
+        } catch {
+          return NextResponse.json(
+            { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+            { status: 400 },
+          );
+        }
+      }
+    }
+
     const result = await evaluateDeliveryRequest(
       {
-        verifyChallenge: (input) => verifyEvidenceChallenge(input),
+        verifyChallenge: (input) => verifyEvidenceChallenge({ ...input, escrowAddress: validatedEscrow ?? undefined }),
         consumeChallenge: (challengeHash) =>
           consumeEvidenceChallenge({ challengeHash }),
         hashChallenge: (challengeId) => hashEvidenceChallenge(challengeId),
@@ -61,6 +105,7 @@ export async function POST(
               chainId === 42220
                 ? process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL
                 : process.env.CELO_SEPOLIA_RPC_URL,
+              validatedEscrow ?? undefined,
             );
             const full = await reader.getFullPayment(id);
             if (!full || (full as { exists?: boolean }).exists === false) {

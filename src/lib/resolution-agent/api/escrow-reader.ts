@@ -12,6 +12,7 @@ import { createPublicClient, http } from "viem";
 import type { Chain } from "viem/chains";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
+import { getEscrowDeployment } from "@/lib/contracts/escrowIdentity";
 import {
   celoMainnetChain,
   celoSepoliaChain,
@@ -120,8 +121,15 @@ export class CeloEscrowCaseReader
    * @param chain — Celo chain definition or chain ID. Defaults to Sepolia.
    * @param rpcUrl — Optional RPC endpoint override. Defaults to the public
    *   Forno endpoint for the selected chain.
+   * @param escrowAddress — P7.2: optional explicit escrow contract. Must be
+   *   allowlisted for the chain (validated via getEscrowDeployment, throws
+   *   on unknown). Absent → canonical default (existing behavior unchanged).
    */
-  constructor(chain: Chain | number = celoSepoliaChain, rpcUrl?: string) {
+  constructor(
+    chain: Chain | number = celoSepoliaChain,
+    rpcUrl?: string,
+    escrowAddress?: string | null,
+  ) {
     const chainDefinition =
       typeof chain === "number"
         ? chain === CELO_CHAIN_ID
@@ -135,11 +143,25 @@ export class CeloEscrowCaseReader
       throw new Error(`Unsupported escrow chain ${chain}.`);
     }
 
-    const contractAddress = getEscrowAddress(chainDefinition.id);
-    if (!contractAddress) {
+    const canonicalAddress = getEscrowAddress(chainDefinition.id);
+    if (!canonicalAddress) {
       throw new Error(
         `ProtectedPaymentEscrow is not deployed on chain ${chainDefinition.id}.`,
       );
+    }
+
+    // P7.2: an explicit escrow must be allowlisted for this chain (fail
+    // closed — never fall back). Absent → canonical default (unchanged).
+    let contractAddress = canonicalAddress;
+    if (
+      escrowAddress !== undefined &&
+      escrowAddress !== null &&
+      String(escrowAddress).trim() !== ""
+    ) {
+      contractAddress = getEscrowDeployment({
+        chainId: chainDefinition.id,
+        escrowAddress: String(escrowAddress),
+      }).address;
     }
 
     this.chainId = chainDefinition.id;

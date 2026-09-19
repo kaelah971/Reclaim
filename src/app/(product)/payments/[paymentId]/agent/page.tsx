@@ -19,6 +19,12 @@ import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { buildAgentDetailsMessage } from "@/lib/resolution-agent/api/auth";
 import { encodeWalletAuthMessage } from "@/lib/x402/walletAuth";
 import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
+import { CELO_CHAIN_ID } from "@/lib/web3/chains";
+import {
+  getEscrowDeployment,
+  isCanonicalDeployment,
+  parseEscrowParam,
+} from "@/lib/contracts/escrowIdentity";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,8 +122,33 @@ function AgentControlRoomContent() {
     chainResolution.status === "explicit"
       ? chainResolution.chainId
       : undefined;
-  const chainQuery =
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  // P7.2 escrow threading (?escrow=): absent → canonical V1 (legacy
+  // behavior); present → fail-closed allowlist validation (unknown escrow
+  // fails the packet fetch closed via the API — never falls back).
+  const escrowRaw = searchParams?.get("escrow");
+  const escrowParam = useMemo(() => parseEscrowParam(escrowRaw), [escrowRaw]);
+  const escrowDeployment = useMemo(() => {
+    if (escrowParam.status !== "valid") return undefined;
+    try {
+      return getEscrowDeployment({
+        chainId: activeChainId,
+        escrowAddress: escrowParam.address,
+      });
+    } catch {
+      return undefined;
+    }
+  }, [escrowParam, activeChainId]);
+  const explicitEscrowAddress =
+    escrowDeployment && !isCanonicalDeployment(escrowDeployment)
+      ? escrowDeployment.address
+      : undefined;
+  const chainQueryBase =
     explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+  const chainQuery =
+    explicitEscrowAddress !== undefined
+      ? `${chainQueryBase || `?chainId=${activeChainId}`}&escrow=${explicitEscrowAddress}`
+      : chainQueryBase;
 
   // Safe bigint conversion for the on-chain payment state read — only pure
   // numeric payment IDs are accepted (hyphen/space-formatted IDs are not).

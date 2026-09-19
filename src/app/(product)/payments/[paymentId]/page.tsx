@@ -28,6 +28,11 @@ import {
   parseChainIdParam,
   buildReceiptPath,
 } from "@/components/payment/paymentLifecycle";
+import {
+  getEscrowDeployment,
+  isCanonicalDeployment,
+  parseEscrowParam,
+} from "@/lib/contracts/escrowIdentity";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useTokenApproval } from "@/hooks/contracts/useTokenApproval";
 import {
@@ -337,10 +342,48 @@ function PaymentRoomContent() {
   // Preserve default (Sepolia) when absent; explicit 42220/11142220 threads
   // through every read + write below.
   const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
-  // Preserve-or-propagate ?chainId=: only when explicitly present in the URL
-  // (keeps default/Sepolia links byte-identical when absent).
-  const chainQuery =
+  // ---- Escrow resolution from ?escrow= (P7.2) ----
+  // Absent → canonical V1 default for the active chain (legacy behavior).
+  // Present → fail-closed allowlist validation via getEscrowDeployment
+  // (unknown escrow renders the unsupported-network notice below — never
+  // falls back to the canonical contract).
+  const escrowRaw = searchParams?.get("escrow");
+  const escrowParam = useMemo(() => parseEscrowParam(escrowRaw), [escrowRaw]);
+  const escrowDeployment = useMemo(() => {
+    if (escrowParam.status !== "valid") return undefined;
+    try {
+      return getEscrowDeployment({
+        chainId: activeChainId,
+        escrowAddress: escrowParam.address,
+      });
+    } catch {
+      return undefined;
+    }
+  }, [escrowParam, activeChainId]);
+  const isEscrowInvalid =
+    escrowParam.status === "invalid" ||
+    (escrowParam.status === "valid" && escrowDeployment === undefined);
+  const escrowInvalidRaw =
+    escrowParam.status === "invalid"
+      ? escrowParam.raw
+      : escrowParam.status === "valid"
+        ? escrowParam.address
+        : "";
+  // Explicit non-canonical escrow address to thread (undefined for canonical
+  // V1 so legacy links stay byte-identical).
+  const explicitEscrowAddress =
+    escrowDeployment && !isCanonicalDeployment(escrowDeployment)
+      ? escrowDeployment.address
+      : undefined;
+  // Preserve-or-propagate ?chainId= (+ ?escrow= for explicit non-canonical):
+  // only when explicitly present in the URL (keeps default/Sepolia links
+  // byte-identical when absent; canonical V1 links stay `?chainId=X` exactly).
+  const chainQueryBase =
     explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+  const chainQuery =
+    explicitEscrowAddress !== undefined
+      ? `${chainQueryBase || `?chainId=${activeChainId}`}&escrow=${explicitEscrowAddress}`
+      : chainQueryBase;
   const chainDisplayName = getChainName(activeChainId);
 
   const { requireWallet, requestNetworkSwitch } = useRequireWallet();
@@ -509,8 +552,11 @@ function PaymentRoomContent() {
         return;
       }
       try {
+        // P7.2: thread the explicit chain (+ escrow when non-canonical) into
+        // the oracle read; the default (empty chainQuery) keeps the legacy
+        // `?chainId=` URL byte-identical.
         const res = await fetch(
-          `/api/payments/${paymentIdStr}/evidence/metadata?chainId=${activeChainId}`,
+          `/api/payments/${paymentIdStr}/evidence/metadata${chainQuery || `?chainId=${activeChainId}`}`,
         );
         if (!res.ok) return;
         const data = (await res.json()) as { found?: boolean };
@@ -531,6 +577,7 @@ function PaymentRoomContent() {
   }, [
     paymentIdStr,
     activeChainId,
+    chainQuery,
     hasOnChainDelivery,
     conversationalEvidence.metadataState,
   ]);
@@ -582,20 +629,29 @@ function PaymentRoomContent() {
     [requireWallet],
   );
 
-  // ---- Fail closed on malformed/unsupported ?chainId= ----
-  if (isChainInvalid) {
+  // ---- Fail closed on malformed/unsupported ?chainId= / ?escrow= ----
+  if (isChainInvalid || isEscrowInvalid) {
     return (
       <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
         <div className="flex flex-col items-center justify-center gap-4 text-center">
           <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
             Unsupported network
           </h1>
-          <p className="text-[15px] text-muted">
-            This payment link uses an unsupported network (chainId
-            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
-            (42220) and Celo Sepolia (11142220). Ask the sender for a link
-            with a supported chainId.
-          </p>
+          {isEscrowInvalid && !isChainInvalid ? (
+            <p className="text-[15px] text-muted">
+              This payment link references an unknown escrow contract
+              (&ldquo;{escrowInvalidRaw}&rdquo;). Supported networks are Celo
+              (42220) and Celo Sepolia (11142220). Ask the sender for a link
+              with a supported escrow address.
+            </p>
+          ) : (
+            <p className="text-[15px] text-muted">
+              This payment link uses an unsupported network (chainId
+              &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+              (42220) and Celo Sepolia (11142220). Ask the sender for a link
+              with a supported chainId.
+            </p>
+          )}
           <Link href="/payments">
             <Button variant="secondary">Return to payments</Button>
           </Link>
@@ -1089,6 +1145,7 @@ function PaymentRoomContent() {
           <SharePaymentLink
             paymentId={paymentIdStr ?? ""}
             chainId={activeChainId}
+            escrowAddress={explicitEscrowAddress}
           />
         </div>
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>

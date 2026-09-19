@@ -36,6 +36,7 @@ import { createHash, randomBytes } from "crypto";
 import { recoverMessageAddress } from "viem";
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
+import { getEscrowDeployment } from "@/lib/contracts/escrowIdentity";
 import { isSupportedChain } from "@/lib/web3/chains";
 import { CeloEscrowCaseReader } from "@/lib/resolution-agent/api/escrow-reader";
 
@@ -225,10 +226,50 @@ export function resolveEvidenceEscrow(chainId: number): `0x${string}` | null {
   return getEscrowAddress(chainId) ?? null;
 }
 
+/**
+ * P7.2: resolve + validate an explicit escrow contract for a chain.
+ * Absent escrowAddress → canonical default (existing behavior unchanged).
+ * Present → MUST be allowlisted for the chain (fail closed, never fall
+ * back). Throws a coded UNKNOWN_ESCROW error on unknown contracts.
+ */
+export function resolveEvidenceEscrowFor(
+  chainId: number,
+  escrowAddress?: string | null,
+): `0x${string}` {
+  if (
+    escrowAddress === undefined ||
+    escrowAddress === null ||
+    String(escrowAddress).trim() === ""
+  ) {
+    const canonical = resolveEvidenceEscrow(chainId);
+    if (!canonical) {
+      throw Object.assign(new Error("Unsupported chain."), {
+        code: "UNSUPPORTED_CHAIN",
+      });
+    }
+    return canonical;
+  }
+  try {
+    return getEscrowDeployment({
+      chainId,
+      escrowAddress: String(escrowAddress),
+    }).address;
+  } catch {
+    throw Object.assign(
+      new Error(
+        `Unknown escrow contract ${String(escrowAddress).trim()} on chain ${chainId}.`,
+      ),
+      { code: "UNKNOWN_ESCROW" },
+    );
+  }
+}
+
 export interface IssueChallengeInput {
   paymentId: string;
   chainId: number;
   wallet: string;
+  /** P7.2: optional explicit escrow (allowlisted, fail closed). */
+  escrowAddress?: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   supabase?: any;
   now?: number;
@@ -254,10 +295,9 @@ export async function issueEvidenceChallenge(input: IssueChallengeInput): Promis
   const supabase = input.supabase ?? getSupabaseClient();
   const now = input.now ?? Date.now();
 
-  const escrowAddress = resolveEvidenceEscrow(chainId);
-  if (!escrowAddress) {
-    throw Object.assign(new Error("Unsupported chain."), { code: "UNSUPPORTED_CHAIN" });
-  }
+  // P7.2: absent escrowAddress → canonical default (unchanged); explicit
+  // escrow is allowlist-validated (throws coded UNKNOWN_ESCROW/UNSUPPORTED).
+  const escrowAddress = resolveEvidenceEscrowFor(chainId, input.escrowAddress);
 
   const challengeId = generateEvidenceChallengeId();
   const challengeHash = hashEvidenceChallenge(challengeId);
@@ -307,6 +347,8 @@ export interface VerifyChallengeInput {
   wallet: string;
   challengeId: string;
   signature: string;
+  /** P7.2: optional explicit escrow (allowlisted, fail closed). */
+  escrowAddress?: string | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   supabase?: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -360,6 +402,27 @@ export async function verifyEvidenceChallenge(input: VerifyChallengeInput): Prom
   if (!canonicalContract) {
     return deny("UNSUPPORTED_CHAIN", "Unsupported chain.", 400);
   }
+  // P7.2: absent escrowAddress → canonical default (existing behavior
+  // unchanged); explicit escrow is allowlist-validated, fail closed.
+  let expectedContract = canonicalContract;
+  if (
+    input.escrowAddress !== undefined &&
+    input.escrowAddress !== null &&
+    String(input.escrowAddress).trim() !== ""
+  ) {
+    try {
+      expectedContract = getEscrowDeployment({
+        chainId,
+        escrowAddress: String(input.escrowAddress),
+      }).address;
+    } catch {
+      return deny(
+        "UNKNOWN_ESCROW",
+        "Unknown escrow contract for this chain.",
+        400,
+      );
+    }
+  }
 
   const challengeHash = hashEvidenceChallenge(challengeId).toLowerCase();
 
@@ -395,8 +458,9 @@ export async function verifyEvidenceChallenge(input: VerifyChallengeInput): Prom
   if (String(row.wallet_address).toLowerCase() !== wallet.toLowerCase()) {
     return deny("CHALLENGE_WALLET_MISMATCH", "Challenge is not bound to this wallet.", 403);
   }
-  // Contract must still resolve canonically — never trust a stale row.
-  if (String(row.escrow_contract_address).toLowerCase() !== canonicalContract.toLowerCase()) {
+  // Contract must still resolve to the expected (canonical or explicit
+  // allowlisted) escrow — never trust a stale row.
+  if (String(row.escrow_contract_address).toLowerCase() !== expectedContract.toLowerCase()) {
     return deny("CHALLENGE_CONTRACT_MISMATCH", "Challenge contract does not match the canonical escrow.", 403);
   }
   if (row.consumed_at !== null) {
@@ -446,12 +510,18 @@ export async function verifyEvidenceChallenge(input: VerifyChallengeInput): Prom
     return deny("SIGNER_MISMATCH", "Signer does not match the challenged wallet.", 401);
   }
 
-  // Live on-chain party check against the canonical escrow for this chain.
+  // Live on-chain party check against the expected escrow for this chain.
   let parties: { client: string; worker: string; exists: boolean };
   try {
     const reader =
       input.escrowReader ??
-      new CeloEscrowCaseReader(chainId as 11142220 | 42220);
+      (expectedContract.toLowerCase() !== canonicalContract.toLowerCase()
+        ? new CeloEscrowCaseReader(
+            chainId as 11142220 | 42220,
+            undefined,
+            expectedContract,
+          )
+        : new CeloEscrowCaseReader(chainId as 11142220 | 42220));
     const result = await reader.getCaseParties({ escrowPaymentId: paymentId });
     parties = {
       client: String(result.client),

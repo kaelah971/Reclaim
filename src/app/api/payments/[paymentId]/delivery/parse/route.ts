@@ -3,6 +3,10 @@
 //
 // Body: { message, draft?, messagesText?, paymentContext: { chainId, worker,
 //   deliverables?, evidenceRequirements?, agreementLabel? } }
+//   Optional escrow scope (P7.2): top-level `escrow` or
+//   paymentContext.escrow — MUST be allowlisted for the chain (fail closed
+//   UNKNOWN_ESCROW). Absent → behavior unchanged (this route performs no
+//   chain reads; validation only).
 // Returns: { ok, draft, missingFields, clarifyingQuestion, ready, rejected,
 //   boundaryMessage, errors, paymentId, chainId, worker, aiUnavailable }
 //
@@ -14,6 +18,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
+import { getEscrowDeployment } from "@/lib/contracts/escrowIdentity";
 import { parseDelivery } from "@/lib/delivery/parseDelivery";
 import { deliveryIntentDraftSchema } from "@/lib/delivery/deliveryIntent";
 import { enrichDeliveryWithAI } from "@/lib/delivery/aiDeliveryEnricher";
@@ -97,6 +102,30 @@ export async function POST(
       { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
       { status: 400 },
     );
+  }
+  // P7.2: optional explicit escrow (top-level `escrow` or
+  // paymentContext.escrow) — allowlist-validated, fail closed. Absent →
+  // behavior unchanged (no chain reads in this route).
+  {
+    const rawEscrow =
+      (input as { escrow?: unknown }).escrow ?? (pc as Record<string, unknown>).escrow;
+    if (
+      rawEscrow !== undefined &&
+      rawEscrow !== null &&
+      String(rawEscrow).trim() !== ""
+    ) {
+      try {
+        getEscrowDeployment({
+          chainId: pc.chainId as number,
+          escrowAddress: String(rawEscrow),
+        });
+      } catch {
+        return NextResponse.json(
+          { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+          { status: 400 },
+        );
+      }
+    }
   }
   if (typeof pc.worker !== "string" || !WORKER_RE.test(pc.worker)) {
     return NextResponse.json(

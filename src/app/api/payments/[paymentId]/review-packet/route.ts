@@ -18,6 +18,10 @@ import { SupabaseResolutionAgentStore } from "@/lib/resolution-agent/store/supab
 import { getSupabaseClient } from "@/lib/supabase/client";
 import { sanitizeReviewPacketForPublic } from "@/lib/evidence/publicSanitize";
 import {
+  pickEscrowParam,
+  resolveRouteEscrow,
+} from "@/lib/contracts/escrowIdentity";
+import {
   CeloEscrowCaseReader,
   CeloSepoliaEscrowCaseReader,
 } from "@/lib/resolution-agent/api/escrow-reader";
@@ -32,23 +36,51 @@ const PACKET_EVENT_TYPE = "review_packet_prepared";
 /**
  * Resolve an explicit chainId (?chainId=). Defaults to Celo Sepolia to
  * preserve behavior. Validated against the canonical supported-chain mapping.
+ *
+ * P7.2: also resolves the optional explicit escrow (?escrow= — query ONLY,
+ * mirroring the query-only chain scope). Absent → canonical default
+ * (behavior unchanged). Unknown → null escrow (fail closed UNKNOWN_ESCROW).
  */
-function resolveReviewPacketChainId(request: NextRequest): number | null {
+function resolveReviewPacketScope(request: NextRequest): {
+  chainId: number;
+  escrowAddress?: `0x${string}`;
+} | null | { unknownEscrow: true } {
   let raw: string | null = null;
+  let escrowRaw: string | null = null;
   try {
     const url = new URL(request.url);
     raw =
       url.searchParams.get("chainId") ??
       url.searchParams.get("chain_id") ??
       url.searchParams.get("escrowChainId");
+    escrowRaw =
+      url.searchParams.get("escrow") ??
+      url.searchParams.get("escrowAddress") ??
+      url.searchParams.get("escrowContractAddress");
   } catch {
     raw = null;
+    escrowRaw = null;
   }
-  if (raw === null || raw.trim() === "") return CELO_CHAIN_ID;
+  if (raw === null || raw.trim() === "") {
+    const chainId = CELO_CHAIN_ID;
+    const picked = pickEscrowParam(escrowRaw);
+    if (picked === undefined) return { chainId };
+    try {
+      return { chainId, escrowAddress: resolveRouteEscrow(chainId, picked).address };
+    } catch {
+      return { unknownEscrow: true };
+    }
+  }
   const parsed = Number(raw.trim());
   if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
   if (!isSupportedChain(parsed)) return null;
-  return parsed;
+  const picked = pickEscrowParam(escrowRaw);
+  if (picked === undefined) return { chainId: parsed };
+  try {
+    return { chainId: parsed, escrowAddress: resolveRouteEscrow(parsed, picked).address };
+  } catch {
+    return { unknownEscrow: true };
+  }
 }
 
 export async function GET(
@@ -66,23 +98,38 @@ export async function GET(
 
     const store = new SupabaseResolutionAgentStore();
     // Chain-aware escrow identity (Sepolia default preserves behavior;
-    // ?chainId=42220 binds to the canonical Mainnet escrow).
-    const chainId = resolveReviewPacketChainId(request);
-    if (chainId === null) {
+    // ?chainId=42220 binds to the canonical Mainnet escrow; P7.2 ?escrow=
+    // binds to an explicit allowlisted contract, fail closed).
+    const scope = resolveReviewPacketScope(request);
+    if (scope === null) {
       return NextResponse.json(
         { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
         { status: 400 },
       );
     }
+    if ("unknownEscrow" in scope) {
+      return NextResponse.json(
+        { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+        { status: 400 },
+      );
+    }
+    const { chainId, escrowAddress } = scope;
     const escrowReader =
       chainId === CELO_MAINNET_CHAIN_ID
         ? new CeloEscrowCaseReader(
             chainId,
             process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL,
+            escrowAddress,
           )
-        : new CeloSepoliaEscrowCaseReader(
-            process.env.CELO_SEPOLIA_RPC_URL,
-          );
+        : escrowAddress
+          ? new CeloEscrowCaseReader(
+              chainId,
+              process.env.CELO_SEPOLIA_RPC_URL,
+              escrowAddress,
+            )
+          : new CeloSepoliaEscrowCaseReader(
+              process.env.CELO_SEPOLIA_RPC_URL,
+            );
 
     const agent = await store.getAgentByCaseIdentity(
       String(escrowReader.chainId),

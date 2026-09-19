@@ -7,6 +7,8 @@ import {
 } from "@/lib/web3/chains";
 import { getEscrowAddress } from "./addresses";
 import { protectedPaymentEscrowABI } from "./ProtectedPaymentEscrow.abi";
+import { protectedPaymentEscrowV2ABI } from "./ProtectedPaymentEscrowV2.abi";
+import type { EscrowDeployment } from "./escrowIdentity";
 import type { Chain } from "viem/chains";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,59 @@ export function getEscrowContractConfig(
     abi: protectedPaymentEscrowABI,
     chainId,
   } as const;
+}
+
+// ---------------------------------------------------------------------------
+// P7.2 — deployment-aware escrow config (V1 vs V2 discriminated).
+//
+// getEscrowDeploymentConfig takes a resolved EscrowDeployment (see
+// src/lib/contracts/escrowIdentity.ts) and returns the matching address+ABI
+// pair, discriminated by the deployment's `contract` field so V1 call sites
+// cannot accidentally use V2-only functions (executeAutoRelease,
+// getAutoReleaseEligibility, autopilot createPayment) and vice versa.
+// Existing getEscrowContractConfig above is UNCHANGED (still V1 canonical).
+// ---------------------------------------------------------------------------
+
+/** V1 escrow config (ProtectedPaymentEscrow ABI — no autopilot functions). */
+export interface EscrowV1ContractConfig {
+  kind: "v1";
+  address: `0x${string}`;
+  abi: typeof protectedPaymentEscrowABI;
+  chainId: number;
+}
+
+/** V2 escrow config (ProtectedPaymentEscrowV2 ABI — incl. autopilot). */
+export interface EscrowV2ContractConfig {
+  kind: "v2";
+  address: `0x${string}`;
+  abi: typeof protectedPaymentEscrowV2ABI;
+  chainId: number;
+}
+
+export type EscrowDeploymentConfig =
+  | EscrowV1ContractConfig
+  | EscrowV2ContractConfig;
+
+/**
+ * Returns the discriminated address+ABI config for a resolved deployment.
+ */
+export function getEscrowDeploymentConfig(
+  deployment: EscrowDeployment,
+): EscrowDeploymentConfig {
+  if (deployment.contract === "ProtectedPaymentEscrowV2") {
+    return {
+      kind: "v2",
+      address: deployment.address,
+      abi: protectedPaymentEscrowV2ABI,
+      chainId: deployment.chainId,
+    };
+  }
+  return {
+    kind: "v1",
+    address: deployment.address,
+    abi: protectedPaymentEscrowABI,
+    chainId: deployment.chainId,
+  };
 }
 
 /**

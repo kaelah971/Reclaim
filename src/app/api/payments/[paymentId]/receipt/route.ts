@@ -51,6 +51,10 @@ import {
 import { getPaymentTokenConfig } from "@/lib/web3/tokens";
 import { fromBytes32Label } from "@/lib/contracts/types";
 import {
+  pickEscrowParam,
+  resolveRouteEscrow,
+} from "@/lib/contracts/escrowIdentity";
+import {
   sanitizeReceiptEvidenceForPublic,
   sanitizeReceiptQualityCheckForPublic,
 } from "@/lib/evidence/publicSanitize";
@@ -61,23 +65,47 @@ import { celo } from "viem/chains";
  * Resolve an explicit chainId (?chainId=). Defaults to Celo Sepolia to
  * preserve behavior. Validated against the canonical supported-chain mapping;
  * unsupported values are rejected (never trust the URL chain alone).
+ *
+ * P7.2: also resolves the optional explicit escrow (?escrow= — query ONLY).
+ * Absent → canonical default (behavior unchanged). Unknown → unknownEscrow
+ * (fail closed UNKNOWN_ESCROW).
  */
-function resolveReceiptChainId(request: NextRequest): number | null {
+function resolveReceiptScope(request: NextRequest): {
+  chainId: number;
+  escrowAddress?: `0x${string}`;
+} | null | { unknownEscrow: true } {
   let raw: string | null = null;
+  let escrowRaw: string | null = null;
   try {
     const url = new URL(request.url);
     raw =
       url.searchParams.get("chainId") ??
       url.searchParams.get("chain_id") ??
       url.searchParams.get("escrowChainId");
+    escrowRaw =
+      url.searchParams.get("escrow") ??
+      url.searchParams.get("escrowAddress") ??
+      url.searchParams.get("escrowContractAddress");
   } catch {
     raw = null;
+    escrowRaw = null;
   }
-  if (raw === null || raw.trim() === "") return CELO_CHAIN_ID;
-  const parsed = Number(raw.trim());
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
-  if (!isSupportedChain(parsed)) return null;
-  return parsed;
+  let chainId: number;
+  if (raw === null || raw.trim() === "") {
+    chainId = CELO_CHAIN_ID;
+  } else {
+    const parsed = Number(raw.trim());
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+    if (!isSupportedChain(parsed)) return null;
+    chainId = parsed;
+  }
+  const picked = pickEscrowParam(escrowRaw);
+  if (picked === undefined) return { chainId };
+  try {
+    return { chainId, escrowAddress: resolveRouteEscrow(chainId, picked).address };
+  } catch {
+    return { unknownEscrow: true };
+  }
 }
 
 const PACKET_EVENT_TYPE = "review_packet_prepared";
@@ -175,34 +203,54 @@ export async function GET(
     }
 
     // ---- 0. Chain scope (explicit ?chainId=, Sepolia default) -------------
-    const chainId = resolveReceiptChainId(request);
-    if (chainId === null) {
+    // P7.2: optional explicit ?escrow= selects which allowlisted contract
+    // to READ (fail closed UNKNOWN_ESCROW); absent → canonical (unchanged).
+    const scope = resolveReceiptScope(request);
+    if (scope === null) {
       return NextResponse.json(
         { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
         { status: 400 },
       );
     }
+    if ("unknownEscrow" in scope) {
+      return NextResponse.json(
+        { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+        { status: 400 },
+      );
+    }
+    const chainId = scope.chainId;
+    const escrowOverride = scope.escrowAddress;
     const isMainnet = chainId === CELO_MAINNET_CHAIN_ID;
 
     // ---- 1. On-chain final state + release/evidence proofs (read-only) ----
     // Sepolia default path is preserved exactly; Mainnet verifies against the
     // canonical Mainnet escrow via the chain-aware reader.
-    const proofReader = isMainnet
-      ? new CeloChainFinalProofReader(chainId)
-      : new CeloSepoliaChainFinalProofReader();
+    const proofReader = escrowOverride
+      ? new CeloChainFinalProofReader({ chainId, escrowAddress: escrowOverride })
+      : isMainnet
+        ? new CeloChainFinalProofReader(chainId)
+        : new CeloSepoliaChainFinalProofReader();
     const proof = await proofReader.readFinalProof(BigInt(paymentId));
     if (!proof) {
       return NextResponse.json({ found: false, paymentId }, { status: 200 });
     }
 
-    const escrowReader = isMainnet
+    const escrowReader = escrowOverride
       ? new CeloEscrowCaseReader(
           chainId,
-          process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL,
+          isMainnet
+            ? process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL
+            : process.env.CELO_SEPOLIA_RPC_URL,
+          escrowOverride,
         )
-      : new CeloSepoliaEscrowCaseReader(
-          process.env.CELO_SEPOLIA_RPC_URL,
-        );
+      : isMainnet
+        ? new CeloEscrowCaseReader(
+            chainId,
+            process.env.NEXT_PUBLIC_CELO_MAINNET_RPC_URL,
+          )
+        : new CeloSepoliaEscrowCaseReader(
+            process.env.CELO_SEPOLIA_RPC_URL,
+          );
 
     // ---- 2. Verified evidence metadata -------------------------------------
     const evidenceReader = new SupabaseEvidenceReader();

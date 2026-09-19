@@ -21,6 +21,17 @@ import {
  * - Record:    contracts/deployments/celo-sepolia.json
  */
 export const DEPLOYED_ADDRESSES = {
+  [CELO_MAINNET_CHAIN_ID]: {
+    /** P3 mainnet deployment (RA2.3B) — ProtectedPaymentEscrow with resolveDispute.
+     *  Deploy tx: 0x9f2c79705fc02b60835e37f84caad98b02e17830ec8d3528dc96950387a01ae3
+     *  Block: 77810953. Record: contracts/deployments/celo-mainnet.json */
+    protectedPaymentEscrow:
+      "0xE42cF4620DE454bE0De5004255d25683e4F882c4" as `0x${string}`,
+    /** P7.2 — ProtectedPaymentEscrowV2 lands here post-deploy (PART 2).
+     *  Leave undefined until the V2 contract is deployed + recorded; the
+     *  allowlist in src/lib/contracts/escrowIdentity.ts is authoritative. */
+    protectedPaymentEscrowV2: undefined as unknown as `0x${string}` | undefined,
+  },
   [CELO_SEPOLIA_CHAIN_ID]: {
     /** V2 — current canonical escrow with dispute resolution. */
     protectedPaymentEscrow:
@@ -28,13 +39,10 @@ export const DEPLOYED_ADDRESSES = {
     /** V1 — historical escrow without resolveDispute. */
     protectedPaymentEscrowV1:
       "0x0fA826256a58F19Ad24Fc9384d81D313f2266F79" as `0x${string}`,
-  },
-  [CELO_MAINNET_CHAIN_ID]: {
-    /** P3 mainnet deployment (RA2.3B) — ProtectedPaymentEscrow with resolveDispute.
-     *  Deploy tx: 0x9f2c79705fc02b60835e37f84caad98b02e17830ec8d3528dc96950387a01ae3
-     *  Block: 77810953. Record: contracts/deployments/celo-mainnet.json */
-    protectedPaymentEscrow:
-      "0xE42cF4620DE454bE0De5004255d25683e4F882c4" as `0x${string}`,
+    /** P7.2 — ProtectedPaymentEscrowV2 lands here post-deploy (PART 2).
+     *  Leave undefined until the V2 contract is deployed + recorded; the
+     *  allowlist in src/lib/contracts/escrowIdentity.ts is authoritative. */
+    protectedPaymentEscrowV2: undefined as unknown as `0x${string}` | undefined,
   },
 } as const;
 

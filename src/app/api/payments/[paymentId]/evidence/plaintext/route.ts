@@ -6,8 +6,10 @@
 //
 //   POST (preferred — signature in body, never logged in URLs):
 //     body { challengeId, signature, chainId, wallet }
+//     Optional escrow scope (P7.2): body escrow/escrowAddress — MUST be
+//     allowlisted for the chain (fail closed UNKNOWN_ESCROW).
 //   GET (alias — same contract via query params):
-//     ?challengeId= &signature= &chainId= &wallet=
+//     ?challengeId= &signature= &chainId= &wallet= [&escrow=]
 //
 // Flow: load durable challenge by SHA-256 hash → purpose/payment/chain/wallet
 // + canonical-contract binding → expiry + single-use checks → reconstruct the
@@ -32,6 +34,7 @@ interface PlaintextRequest {
   signature: string;
   chainId: unknown;
   wallet: string;
+  escrow: unknown;
 }
 
 function readGetParams(request: NextRequest): PlaintextRequest {
@@ -39,6 +42,7 @@ function readGetParams(request: NextRequest): PlaintextRequest {
   let signature = "";
   let chainId: unknown = null;
   let wallet = "";
+  let escrow: unknown = null;
   try {
     const url = new URL(request.url);
     challengeId = url.searchParams.get("challengeId") ?? url.searchParams.get("challenge_id") ?? "";
@@ -49,6 +53,11 @@ function readGetParams(request: NextRequest): PlaintextRequest {
       url.searchParams.get("escrowChainId") ??
       null;
     chainId = rawChain;
+    escrow =
+      url.searchParams.get("escrow") ??
+      url.searchParams.get("escrowAddress") ??
+      url.searchParams.get("escrowContractAddress") ??
+      null;
     wallet =
       url.searchParams.get("wallet") ??
       url.searchParams.get("walletAddress") ??
@@ -57,7 +66,7 @@ function readGetParams(request: NextRequest): PlaintextRequest {
   } catch {
     // fall through with empty values → validated below
   }
-  return { challengeId, signature, chainId, wallet };
+  return { challengeId, signature, chainId, wallet, escrow };
 }
 
 function parseChainId(raw: unknown): number | null {
@@ -109,6 +118,9 @@ async function handlePlaintext(
     wallet,
     challengeId,
     signature,
+    // P7.2: absent → canonical default (unchanged); explicit escrow is
+    // allowlist-validated inside (fail closed UNKNOWN_ESCROW).
+    escrowAddress: typeof input.escrow === "string" ? input.escrow : undefined,
   });
 
   if (!verification.ok) {
@@ -189,6 +201,8 @@ export async function POST(
             : "",
       chainId:
         body.chainId ?? body.escrowChainId ?? body.chain_id ?? body.escrow_chain_id ?? null,
+      escrow:
+        body.escrow ?? body.escrowAddress ?? body.escrowContractAddress ?? body.escrow_contract_address ?? null,
       wallet:
         typeof body.wallet === "string"
           ? body.wallet

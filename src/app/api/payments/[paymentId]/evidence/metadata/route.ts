@@ -12,6 +12,10 @@
 // Body (JSON):
 //   { title, description, type, relatedClaim, date, externalRef, pastedText, fileHash }
 //   Optional chain scope: ?chainId= query param or body chainId/escrowChainId.
+//   Optional escrow scope (P7.2): ?escrow= query param or body
+//   escrow/escrowAddress — MUST be allowlisted for the chain (fail closed
+//   with UNKNOWN_ESCROW; never falls back). Absent → canonical default
+//   (existing behavior unchanged).
 //   Defaults to Celo Sepolia (11142220); 42220 verifies against the Mainnet
 //   escrow. Unsupported chains are rejected with UNSUPPORTED_CHAIN.
 //
@@ -33,6 +37,10 @@ import {
 import type { EvidenceFormData } from "@/lib/evidence/manifest";
 import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
+import {
+  pickEscrowParam,
+  resolveRouteEscrow,
+} from "@/lib/contracts/escrowIdentity";
 import {
   CELO_CHAIN_ID,
   CELO_MAINNET_CHAIN_ID,
@@ -148,6 +156,42 @@ function resolveEvidenceChain(
       ),
     };
   }
+  // P7.2: optional explicit escrow (?escrow= query or escrow/escrowAddress
+  // body) selects which allowlisted contract to READ. Absent → canonical
+  // default above (behavior unchanged). Unknown → fail closed.
+  let resolvedEscrowAddress = escrowAddress;
+  {
+    let queryEscrow: unknown = null;
+    try {
+      const url = new URL(request.url);
+      queryEscrow =
+        url.searchParams.get("escrow") ??
+        url.searchParams.get("escrowAddress") ??
+        url.searchParams.get("escrowContractAddress") ??
+        null;
+    } catch {
+      queryEscrow = null;
+    }
+    let bodyEscrow: unknown = null;
+    if (body !== null && typeof body === "object") {
+      const b = body as Record<string, unknown>;
+      bodyEscrow =
+        b.escrow ?? b.escrowAddress ?? b.escrowContractAddress ?? b.escrow_contract_address ?? null;
+    }
+    const pickedEscrow = pickEscrowParam(queryEscrow, bodyEscrow);
+    if (pickedEscrow !== undefined) {
+      try {
+        resolvedEscrowAddress = resolveRouteEscrow(chainId, pickedEscrow).address;
+      } catch {
+        return {
+          error: NextResponse.json(
+            { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+            { status: 400 },
+          ),
+        };
+      }
+    }
+  }
   // Validate the chain resolves in the canonical mapping (never trust URL alone).
   const chainDefinition = getCeloChain(chainId);
   if (!chainDefinition) {
@@ -158,7 +202,7 @@ function resolveEvidenceChain(
       ),
     };
   }
-  return { chainId, escrowAddress };
+  return { chainId, escrowAddress: resolvedEscrowAddress };
 }
 
 function createChainReader(chainId: number): EvidenceMetadataChainReader {
@@ -223,6 +267,36 @@ function resolveEvidenceChainQueryOnly(
       ),
     };
   }
+  // P7.2: optional explicit escrow (?escrow= query only — a metadata POST
+  // body can never smuggle a conflicting escrow scope into this read).
+  // Absent → canonical default above (behavior unchanged). Unknown → fail closed.
+  let resolvedEscrowAddress = escrowAddress;
+  {
+    let queryEscrow: unknown = null;
+    try {
+      const url = new URL(request.url);
+      queryEscrow =
+        url.searchParams.get("escrow") ??
+        url.searchParams.get("escrowAddress") ??
+        url.searchParams.get("escrowContractAddress") ??
+        null;
+    } catch {
+      queryEscrow = null;
+    }
+    const pickedEscrow = pickEscrowParam(queryEscrow);
+    if (pickedEscrow !== undefined) {
+      try {
+        resolvedEscrowAddress = resolveRouteEscrow(chainId, pickedEscrow).address;
+      } catch {
+        return {
+          error: NextResponse.json(
+            { error: "Unknown escrow contract for this chain.", code: "UNKNOWN_ESCROW" },
+            { status: 400 },
+          ),
+        };
+      }
+    }
+  }
   const chainDefinition = getCeloChain(chainId);
   if (!chainDefinition) {
     return {
@@ -232,7 +306,7 @@ function resolveEvidenceChainQueryOnly(
       ),
     };
   }
-  return { chainId, escrowAddress };
+  return { chainId, escrowAddress: resolvedEscrowAddress };
 }
 
 function isValidEvidenceFormData(body: unknown): body is EvidenceFormData {

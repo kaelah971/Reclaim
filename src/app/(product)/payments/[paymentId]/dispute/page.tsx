@@ -16,6 +16,11 @@ import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useOpenDispute } from "@/hooks/contracts/useEscrowActions";
 import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
 import {
+  getEscrowDeployment,
+  isCanonicalDeployment,
+  parseEscrowParam,
+} from "@/lib/contracts/escrowIdentity";
+import {
   CELO_CHAIN_ID,
   CELO_MAINNET_CHAIN_ID,
   getCeloExplorerTxUrl,
@@ -68,8 +73,42 @@ function DisputePageInner() {
       ? chainResolution.chainId
       : undefined;
   const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
-  const chainQuery =
+  // P7.2 escrow threading (?escrow=): absent → canonical V1 (legacy
+  // behavior); present → fail-closed allowlist validation (unknown escrow
+  // renders the unsupported-network notice — never falls back).
+  const escrowRaw = searchParams?.get("escrow");
+  const escrowParam = useMemo(() => parseEscrowParam(escrowRaw), [escrowRaw]);
+  const escrowDeployment = useMemo(() => {
+    if (escrowParam.status !== "valid") return undefined;
+    try {
+      return getEscrowDeployment({
+        chainId: activeChainId,
+        escrowAddress: escrowParam.address,
+      });
+    } catch {
+      return undefined;
+    }
+  }, [escrowParam, activeChainId]);
+  const isEscrowInvalid =
+    escrowParam.status === "invalid" ||
+    (escrowParam.status === "valid" && escrowDeployment === undefined);
+  const escrowInvalidRaw =
+    escrowParam.status === "invalid"
+      ? escrowParam.raw
+      : escrowParam.status === "valid"
+        ? escrowParam.address
+        : "";
+  const explicitEscrowAddress =
+    escrowDeployment && !isCanonicalDeployment(escrowDeployment)
+      ? escrowDeployment.address
+      : undefined;
+  // Preserve-or-propagate ?chainId= (+ ?escrow= for explicit non-canonical).
+  const chainQueryBase =
     explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+  const chainQuery =
+    explicitEscrowAddress !== undefined
+      ? `${chainQueryBase || `?chainId=${activeChainId}`}&escrow=${explicitEscrowAddress}`
+      : chainQueryBase;
 
   const { requireWallet } = useRequireWallet();
   const wallet = useWalletState();
@@ -157,20 +196,29 @@ function DisputePageInner() {
     };
   }, [payment, briefReason, briefOutcome]);
 
-  // Fail closed on malformed/unsupported ?chainId= (no silent fallback).
-  if (isChainInvalid) {
+  // Fail closed on malformed/unsupported ?chainId= / ?escrow= (no silent fallback).
+  if (isChainInvalid || isEscrowInvalid) {
     return (
       <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
         <div className="flex flex-col items-center justify-center gap-4 text-center">
           <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
             Unsupported network
           </h1>
-          <p className="text-[15px] text-muted">
-            This dispute link uses an unsupported network (chainId
-            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
-            (42220) and Celo Sepolia (11142220). Ask the sender for a link
-            with a supported chainId.
-          </p>
+          {isEscrowInvalid && !isChainInvalid ? (
+            <p className="text-[15px] text-muted">
+              This dispute link references an unknown escrow contract
+              (&ldquo;{escrowInvalidRaw}&rdquo;). Supported networks are Celo
+              (42220) and Celo Sepolia (11142220). Ask the sender for a link
+              with a supported escrow address.
+            </p>
+          ) : (
+            <p className="text-[15px] text-muted">
+              This dispute link uses an unsupported network (chainId
+              &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+              (42220) and Celo Sepolia (11142220). Ask the sender for a link
+              with a supported chainId.
+            </p>
+          )}
           <Link href="/payments">
             <Button variant="secondary">Return to payments</Button>
           </Link>

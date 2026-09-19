@@ -3,6 +3,8 @@
 //
 // Issues a wallet challenge for party-scoped plaintext evidence reads:
 //   body { chainId?, escrowChainId?, chain_id?, wallet, purpose? }
+//   Optional escrow scope (P7.2): ?escrow= query or escrow/escrowAddress
+//   body — MUST be allowlisted for the chain (fail closed UNKNOWN_ESCROW).
 //   → 200 { challengeId, message, expiresAt, paymentId, chainId,
 //           escrowContractAddress, wallet }
 //
@@ -13,6 +15,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
+import { pickEscrowParam } from "@/lib/contracts/escrowIdentity";
 import { isSupportedChain, CELO_CHAIN_ID } from "@/lib/web3/chains";
 import {
   EVIDENCE_READ_PURPOSE,
@@ -28,6 +31,21 @@ function readQueryChain(request: NextRequest): unknown {
       url.searchParams.get("chainId") ??
       url.searchParams.get("chain_id") ??
       url.searchParams.get("escrowChainId") ??
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** P7.2: optional explicit escrow (?escrow= / ?escrowAddress= query only). */
+function readQueryEscrow(request: NextRequest): unknown {
+  try {
+    const url = new URL(request.url);
+    return (
+      url.searchParams.get("escrow") ??
+      url.searchParams.get("escrowAddress") ??
+      url.searchParams.get("escrowContractAddress") ??
       null
     );
   } catch {
@@ -126,10 +144,19 @@ export async function POST(
       );
     }
 
+    // P7.2: optional explicit escrow (?escrow= query or escrow/escrowAddress
+    // body) — allowlist-validated inside issueEvidenceChallenge (fail closed
+    // with UNKNOWN_ESCROW). Absent → canonical default (unchanged).
+    const escrowAddress = pickEscrowParam(
+      readQueryEscrow(request),
+      body.escrow ?? body.escrowAddress ?? body.escrowContractAddress ?? body.escrow_contract_address ?? null,
+    );
+
     const issued = await issueEvidenceChallenge({
       paymentId,
       chainId,
       wallet,
+      escrowAddress: escrowAddress ?? undefined,
     });
 
     return NextResponse.json(
@@ -150,9 +177,15 @@ export async function POST(
       err instanceof Error && "code" in err
         ? String((err as Record<string, unknown>).code)
         : "INTERNAL_ERROR";
-    if (code === "UNSUPPORTED_CHAIN") {
+    if (code === "UNSUPPORTED_CHAIN" || code === "UNKNOWN_ESCROW") {
       return NextResponse.json(
-        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        {
+          error:
+            code === "UNKNOWN_ESCROW"
+              ? "Unknown escrow contract for this chain."
+              : "Unsupported chain.",
+          code,
+        },
         { status: 400 },
       );
     }
