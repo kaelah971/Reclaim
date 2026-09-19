@@ -14,6 +14,13 @@ import NewPaymentStepper from "@/components/payment/NewPaymentStepper";
 import ProtectPreflight from "@/components/payment/ProtectPreflight";
 import WalletButton from "@/components/ui/WalletButton";
 import SharePaymentLink from "@/components/payment/SharePaymentLink";
+import CommandBox from "@/components/command/CommandBox";
+import PolicyConfirmationCard from "@/components/command/PolicyConfirmationCard";
+import {
+  draftToPolicy,
+  type PaymentIntentDraft,
+  type PaymentPolicy,
+} from "@/lib/command/paymentIntent";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import {
   useProtectPaymentFlow,
@@ -89,6 +96,131 @@ export default function CreatePaymentPage() {
     useState<ProtectionRulesData>(EMPTY_RULES);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // ---- Reclaim Command (P6.1): chat understands, policy decides ----
+  // Primary creation experience. The draft NEVER executes: confirmation hands
+  // into the existing wizard/review flow below (no second tx architecture).
+  const [showWizard, setShowWizard] = useState(false);
+  const [commandDraft, setCommandDraft] = useState<PaymentIntentDraft | null>(null);
+  const [commandQuestion, setCommandQuestion] = useState<string | null>(null);
+  const [commandPolicy, setCommandPolicy] = useState<PaymentPolicy | null>(null);
+  const [commandDeadlineLabel, setCommandDeadlineLabel] = useState<string | undefined>(undefined);
+  const [commandThread, setCommandThread] = useState<Array<{ role: "user" | "agent"; text: string }>>([]);
+  const [commandWorking, setCommandWorking] = useState(false);
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [commandBoundary, setCommandBoundary] = useState<string | null>(null);
+  const [commandHistory, setCommandHistory] = useState("");
+
+  const handleCommandSubmit = useCallback(
+    async (userMessage: string) => {
+      setCommandWorking(true);
+      setCommandError(null);
+      setCommandBoundary(null);
+      setCommandThread((prev) => [...prev, { role: "user", text: userMessage }]);
+      const nextHistory = `${commandHistory}\n${userMessage}`.trim();
+      try {
+        const res = await fetch("/api/command/parse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: userMessage,
+            draft: commandDraft ?? {},
+            messagesText: commandHistory,
+          }),
+        });
+        const data = (await res.json()) as {
+          ok?: boolean;
+          draft?: PaymentIntentDraft;
+          missingFields?: string[];
+          clarifyingQuestion?: string | null;
+          ready?: boolean;
+          rejected?: boolean;
+          boundaryMessage?: string | null;
+          errors?: string[];
+          error?: string;
+        };
+        if (!res.ok || data.ok === false) {
+          if (res.status === 503) {
+            setCommandError(
+              data.error ?? "Reclaim could not interpret that command right now.",
+            );
+          } else {
+            setCommandError(data.error ?? "Could not interpret that command.");
+          }
+          return;
+        }
+        const draft = data.draft ?? {};
+        setCommandDraft(draft);
+        setCommandHistory(nextHistory);
+        setCommandQuestion(data.clarifyingQuestion ?? null);
+        if (data.rejected && data.boundaryMessage) {
+          setCommandBoundary(data.boundaryMessage);
+          setCommandThread((prev) => [...prev, { role: "agent", text: data.boundaryMessage as string }]);
+          return;
+        }
+        if (data.errors && data.errors.length > 0) {
+          setCommandThread((prev) => [...prev, { role: "agent", text: data.errors!.join(" ") }]);
+        } else if (data.clarifyingQuestion) {
+          setCommandThread((prev) => [...prev, { role: "agent", text: data.clarifyingQuestion as string }]);
+        }
+        // Derive the validated policy client-side for the confirmation card
+        // (server is authoritative for readiness; this only renders).
+        const { policy } = draftToPolicy(draft);
+        setCommandPolicy(policy);
+        setCommandDeadlineLabel(draft.deadlineLabel);
+      } catch {
+        setCommandError("Could not interpret that command. Nothing was created.");
+      } finally {
+        setCommandWorking(false);
+      }
+    },
+    [commandDraft, commandHistory],
+  );
+
+  const applyPolicyToWizard = useCallback(
+    (policy: PaymentPolicy, step: WizardStep) => {
+      if (policy.chainId !== targetChainId) {
+        setTargetChainId(policy.chainId);
+        setErrors({});
+        setSubmitError(null);
+        flow.reset();
+      }
+      setWorkerWallet(policy.worker);
+      setAmount(policy.amountHuman);
+      setTitle(policy.title);
+      setDeliverable(policy.deliverableSummary);
+      setDeliveryFormat(policy.deliveryFormat);
+      setDeadline(policy.deadlineDate);
+      setProtectionRules({
+        releaseRule: policy.releaseRule,
+        autoReleaseHours: "",
+        disputeWindow: "",
+        evidenceExpectation: policy.evidenceExpectation,
+      });
+      setErrors({});
+      setSubmitError(null);
+      setShowWizard(true);
+      setStep(step);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [targetChainId],
+  );
+
+  const handleProtectFromCommand = useCallback(() => {
+    if (!commandPolicy) return;
+    // Handoff into the existing review/protection flow (step 3): the user
+    // still explicitly approves + locks funds via the wallet flow.
+    applyPolicyToWizard(commandPolicy, 3);
+  }, [commandPolicy, applyPolicyToWizard]);
+
+  const handleEditFromCommand = useCallback(() => {
+    if (!commandPolicy) {
+      setShowWizard(true);
+      setStep(1);
+      return;
+    }
+    applyPolicyToWizard(commandPolicy, 1);
+  }, [commandPolicy, applyPolicyToWizard]);
 
   // Native CELO balance for the gas warning (warning only, never blocking;
   // shown only when determinable).
@@ -255,16 +387,97 @@ export default function CreatePaymentPage() {
       <h1 className="text-[32px] leading-[1.1] tracking-[-0.02em] font-[family-name:var(--font-newsreader)] font-medium text-ink md:text-[44px]">
         Protect a payment
       </h1>
-      <p className="mt-1 text-[15px] text-muted">
-        {step === 1 && "Step 1 of 3 — tell us who to pay and how much."}
-        {step === 2 && "Step 2 of 3 — describe the work in plain words."}
-        {step === 3 && "Step 3 of 3 — review, then lock the funds in."}
-      </p>
-      <div className="mt-4">
-        <NewPaymentStepper currentStep={step} />
-      </div>
+      {!showWizard && (
+        <p className="mt-1 text-[15px] text-muted">
+          Describe what you want handled — Reclaim drafts the protected-payment
+          policy for your review.
+        </p>
+      )}
+      {showWizard && (
+        <p className="mt-1 text-[15px] text-muted">
+          {step === 1 && "Step 1 of 3 — tell us who to pay and how much."}
+          {step === 2 && "Step 2 of 3 — describe the work in plain words."}
+          {step === 3 && "Step 3 of 3 — review, then lock the funds in."}
+        </p>
+      )}
 
-      {walletMismatched && (
+      {!showWizard && (
+        <div className="mt-6 space-y-6">
+          <CommandBox
+            onSubmit={handleCommandSubmit}
+            isWorking={commandWorking}
+            error={commandError}
+            boundaryMessage={commandBoundary}
+          />
+          {commandThread.length > 0 && (
+            <div
+              aria-label="Command conversation"
+              className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-3"
+            >
+              {commandThread.map((msg, i) => (
+                <p
+                  key={i}
+                  className={`text-[14px] leading-relaxed ${msg.role === "user" ? "text-ink" : "text-muted"}`}
+                >
+                  <span className="font-medium">
+                    {msg.role === "user" ? "You: " : "Reclaim: "}
+                  </span>
+                  {msg.text}
+                </p>
+              ))}
+              {commandQuestion && !commandPolicy && (
+                <div className="pt-2">
+                  <CommandBox
+                    onSubmit={handleCommandSubmit}
+                    isWorking={commandWorking}
+                    error={null}
+                    boundaryMessage={null}
+                    compact
+                  />
+                </div>
+              )}
+            </div>
+          )}
+          {commandPolicy && (
+            <PolicyConfirmationCard
+              policy={commandPolicy}
+              deadlineLabel={commandDeadlineLabel}
+              onProtect={handleProtectFromCommand}
+              onEdit={handleEditFromCommand}
+            />
+          )}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setShowWizard(true);
+              }}
+              className="text-[14px] font-medium text-muted hover:text-ink transition-colors"
+            >
+              Or fill in the details manually →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showWizard && (
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setShowWizard(false)}
+            className="text-[14px] font-medium text-muted hover:text-ink transition-colors"
+          >
+            ← Back to command
+          </button>
+        </div>
+      )}
+      {showWizard && (
+        <div className="mt-4">
+          <NewPaymentStepper currentStep={step} />
+        </div>
+      )}
+
+      {showWizard && walletMismatched && (
         <div className="mt-6">
           <Notice variant="warning">
             <p className="text-[14px] leading-relaxed">
@@ -293,7 +506,7 @@ export default function CreatePaymentPage() {
         </div>
       )}
 
-      {step === 1 && (
+      {showWizard && step === 1 && (
         <div className="mt-8 grid gap-8 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-5">
             <section aria-label="Network">
@@ -462,7 +675,7 @@ export default function CreatePaymentPage() {
         </div>
       )}
 
-      {step === 2 && (
+      {showWizard && step === 2 && (
         <div className="mt-8 grid gap-8 lg:grid-cols-3">
           <div className="lg:col-span-2 space-y-5">
             <section aria-label="Work description">
@@ -565,7 +778,7 @@ export default function CreatePaymentPage() {
         </div>
       )}
 
-      {step === 3 && (
+      {showWizard && step === 3 && (
         <div className="mt-8 grid gap-8 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <ProtectPreflight
