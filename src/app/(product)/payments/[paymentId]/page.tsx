@@ -38,6 +38,10 @@ import {
 } from "@/hooks/contracts/useEscrowActions";
 import { useWalletState, shortenAddress } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
+import { useSignMessage } from "wagmi";
+import { useDeliveryEvaluation } from "@/hooks/review/useDeliveryEvaluation";
+import DeliveryReviewCard from "@/components/review/DeliveryReviewCard";
+import { deriveReleaseMode } from "@/lib/review/deliveryEvaluation";
 import {
   usePaymentActionSync,
   PAYMENT_SYNCING_MESSAGE,
@@ -479,6 +483,29 @@ function PaymentRoomContent() {
     wallet.isConnected &&
     wallet.chainId !== undefined &&
     wallet.chainId !== activeChainId;
+
+  // ---- Agent-assisted delivery review (P6.2, advisory only) ----
+  // Manual release mode keeps the existing review flow (no evaluation).
+  // agent_assisted fetches a party-scoped evaluation after delivery; the card
+  // never triggers release — human wallet approval below still decides.
+  const { signMessageAsync } = useSignMessage();
+  const reviewReleaseMode = deriveReleaseMode(payment?.releaseRule);
+  const isReviewEvaluable =
+    payment?.state === "DeliverySubmitted" ||
+    payment?.state === "ReleaseRequested";
+  const reviewEnabled =
+    reviewReleaseMode === "agent_assisted" &&
+    isReviewEvaluable &&
+    wallet.isConnected &&
+    (role === "client" || role === "worker");
+  const deliveryReview = useDeliveryEvaluation({
+    paymentId: paymentIdStr ?? "",
+    chainId: activeChainId,
+    walletAddress: wallet.address,
+    isConnected: wallet.isConnected,
+    enabled: reviewEnabled,
+    signMessage: (message: string) => signMessageAsync({ message }),
+  });
 
   // ---- Action wrappers with wallet gating ----
   const wrapAction = useCallback(
@@ -1050,6 +1077,16 @@ function PaymentRoomContent() {
   ) {
     primaryActionContent = (
       <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-5">
+        {reviewReleaseMode === "agent_assisted" && (
+          <DeliveryReviewCard
+            status={deliveryReview.status}
+            evaluation={deliveryReview.evaluation}
+            role="worker"
+            error={deliveryReview.error}
+            unavailableMessage={deliveryReview.unavailableMessage}
+            onRetry={() => deliveryReview.retry()}
+          />
+        )}
         <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
           Request release
         </h3>
@@ -1162,36 +1199,50 @@ function PaymentRoomContent() {
             </dd>
           </div>
         </dl>
-        <SecureEvidenceViewer
-          paymentId={paymentIdStr ?? ""}
-          chainId={activeChainId}
-          walletAddress={wallet.address}
-          isConnected={wallet.isConnected}
-          evidenceReference={payment.evidenceReference}
-        />
-        <ReleasePreflight
-          amountLabel={formatUSDC(payment.amount)}
-          tokenSymbol={token.symbol}
-          workerAddress={payment.worker}
-          networkName={chainDisplayName}
-          targetChainId={activeChainId}
-          chainId={activeChainId}
-          canonicalState={payment.state}
-          isWrongNetwork={isWrongNetwork}
-          isEligible={
-            wallet.isConnected && role === "client" && !isWrongNetwork
-          }
-          isPending={approveRelease.isPending}
-          isSuccess={approveRelease.isSuccess}
-          error={approveRelease.error}
-          txHash={approveRelease.txHash}
-          onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
-          onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
-          onRefresh={() => refetchPayment()}
-          onDismissError={() => approveRelease.reset()}
-          isSyncing={releaseSync.isSyncing}
-          isTimedOut={releaseSync.isTimedOut}
-        />
+        {reviewReleaseMode === "agent_assisted" && (
+          <DeliveryReviewCard
+            status={deliveryReview.status}
+            evaluation={deliveryReview.evaluation}
+            role="client"
+            error={deliveryReview.error}
+            unavailableMessage={deliveryReview.unavailableMessage}
+            onRetry={() => deliveryReview.retry()}
+          />
+        )}
+        <div id="delivery-evidence">
+          <SecureEvidenceViewer
+            paymentId={paymentIdStr ?? ""}
+            chainId={activeChainId}
+            walletAddress={wallet.address}
+            isConnected={wallet.isConnected}
+            evidenceReference={payment.evidenceReference}
+          />
+        </div>
+        <div id="release-payment">
+          <ReleasePreflight
+            amountLabel={formatUSDC(payment.amount)}
+            tokenSymbol={token.symbol}
+            workerAddress={payment.worker}
+            networkName={chainDisplayName}
+            targetChainId={activeChainId}
+            chainId={activeChainId}
+            canonicalState={payment.state}
+            isWrongNetwork={isWrongNetwork}
+            isEligible={
+              wallet.isConnected && role === "client" && !isWrongNetwork
+            }
+            isPending={approveRelease.isPending}
+            isSuccess={approveRelease.isSuccess}
+            error={approveRelease.error}
+            txHash={approveRelease.txHash}
+            onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
+            onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
+            onRefresh={() => refetchPayment()}
+            onDismissError={() => approveRelease.reset()}
+            isSyncing={releaseSync.isSyncing}
+            isTimedOut={releaseSync.isTimedOut}
+          />
+        </div>
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
             Open dispute
@@ -1259,36 +1310,50 @@ function PaymentRoomContent() {
             </dd>
           </div>
         </dl>
-        <SecureEvidenceViewer
-          paymentId={paymentIdStr ?? ""}
-          chainId={activeChainId}
-          walletAddress={wallet.address}
-          isConnected={wallet.isConnected}
-          evidenceReference={payment.evidenceReference}
-        />
-        <ReleasePreflight
-          amountLabel={formatUSDC(payment.amount)}
-          tokenSymbol={token.symbol}
-          workerAddress={payment.worker}
-          networkName={chainDisplayName}
-          targetChainId={activeChainId}
-          chainId={activeChainId}
-          canonicalState={payment.state}
-          isWrongNetwork={isWrongNetwork}
-          isEligible={
-            wallet.isConnected && role === "client" && !isWrongNetwork
-          }
-          isPending={approveRelease.isPending}
-          isSuccess={approveRelease.isSuccess}
-          error={approveRelease.error}
-          txHash={approveRelease.txHash}
-          onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
-          onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
-          onRefresh={() => refetchPayment()}
-          onDismissError={() => approveRelease.reset()}
-          isSyncing={releaseSync.isSyncing}
-          isTimedOut={releaseSync.isTimedOut}
-        />
+        {reviewReleaseMode === "agent_assisted" && (
+          <DeliveryReviewCard
+            status={deliveryReview.status}
+            evaluation={deliveryReview.evaluation}
+            role="client"
+            error={deliveryReview.error}
+            unavailableMessage={deliveryReview.unavailableMessage}
+            onRetry={() => deliveryReview.retry()}
+          />
+        )}
+        <div id="delivery-evidence">
+          <SecureEvidenceViewer
+            paymentId={paymentIdStr ?? ""}
+            chainId={activeChainId}
+            walletAddress={wallet.address}
+            isConnected={wallet.isConnected}
+            evidenceReference={payment.evidenceReference}
+          />
+        </div>
+        <div id="release-payment">
+          <ReleasePreflight
+            amountLabel={formatUSDC(payment.amount)}
+            tokenSymbol={token.symbol}
+            workerAddress={payment.worker}
+            networkName={chainDisplayName}
+            targetChainId={activeChainId}
+            chainId={activeChainId}
+            canonicalState={payment.state}
+            isWrongNetwork={isWrongNetwork}
+            isEligible={
+              wallet.isConnected && role === "client" && !isWrongNetwork
+            }
+            isPending={approveRelease.isPending}
+            isSuccess={approveRelease.isSuccess}
+            error={approveRelease.error}
+            txHash={approveRelease.txHash}
+            onRequestSwitch={(cid) => requestNetworkSwitch(cid)}
+            onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
+            onRefresh={() => refetchPayment()}
+            onDismissError={() => approveRelease.reset()}
+            isSyncing={releaseSync.isSyncing}
+            isTimedOut={releaseSync.isTimedOut}
+          />
+        </div>
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
             Open dispute
@@ -1302,6 +1367,16 @@ function PaymentRoomContent() {
   ) {
     primaryActionContent = (
       <div className="space-y-4">
+        {reviewReleaseMode === "agent_assisted" && (
+          <DeliveryReviewCard
+            status={deliveryReview.status}
+            evaluation={deliveryReview.evaluation}
+            role="worker"
+            error={deliveryReview.error}
+            unavailableMessage={deliveryReview.unavailableMessage}
+            onRetry={() => deliveryReview.retry()}
+          />
+        )}
         <Notice variant="info">
           <p className="text-[14px] leading-relaxed">
             Waiting for the client to approve the release.
