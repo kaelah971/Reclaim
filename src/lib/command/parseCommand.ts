@@ -185,10 +185,11 @@ function extractRecipientName(text: string): string | undefined {
 function extractPurpose(text: string): string | undefined {
   // "for X to <purpose> by ..." / "for <purpose>" / "to <purpose>".
   let m = text.match(/\bfor\s+(?:[A-Z][a-zA-Z]{1,30}\s+)?to\s+(.+?)(?:\s+by\s+|\s*\.\s*$|\s*$)/i);
-  if (m?.[1]) return cleanPhrase(m[1]);
+  if (m?.[1]) return normalizePurpose(m[1]);
   m = text.match(/\bfor\s+(?:a\s+|an\s+|the\s+)?(.+?)(?:\s+by\s+|\s*\.\s*$|\s*$)/i);
   if (m?.[1]) {
-    const candidate = cleanPhrase(m[1]);
+    const candidate = normalizePurpose(m[1]);
+    if (!candidate) return undefined;
     // Skip bare names ("for Daniel") — that's a recipient, not a purpose.
     if (/^[A-Z][a-zA-Z]{1,30}$/.test(candidate)) return undefined;
     // Skip fragments that are only amount/asset/address.
@@ -197,7 +198,7 @@ function extractPurpose(text: string): string | undefined {
     return candidate || undefined;
   }
   m = text.match(/\bto\s+(design|build|create|deliver|write|develop)\b(.+?)(?:\s+by\s+|\s*\.\s*$|\s*$)/i);
-  if (m) return cleanPhrase(`${m[1]}${m[2] ?? ""}`);
+  if (m) return normalizePurpose(`${m[1]}${m[2] ?? ""}`);
   return undefined;
 }
 
@@ -212,10 +213,113 @@ function cleanPhrase(s: string): string {
     .slice(0, 120);
 }
 
-function inferDeliverables(purpose: string | undefined): string[] | undefined {
+const RELEASE_CLAUSE_RE = /ask\s+me|before\s+releas|\bapprov|\bmanual\b|\breview\b|\bagent\b|\bassist/i;
+
+const WEEKDAY_ALT = "sunday|monday|tuesday|wednesday|thursday|friday|saturday";
+
+/** Strip temporal tokens, release clauses, and role prefixes from a purpose. */
+function normalizePurpose(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // Split into sentences; drop release/approval sentences entirely.
+  const parts = raw.split(/[.!?]+/);
+  const kept = parts.filter((p) => {
+    const t = p.trim();
+    if (!t) return false;
+    return !RELEASE_CLAUSE_RE.test(t);
+  });
+  let s = kept.join(" ").trim();
+  if (!s) return undefined;
+  // Temporal stripping (deadline is captured separately via extractDeadline).
+  s = s.replace(/\btomorrow\b/gi, " ");
+  s = s.replace(new RegExp(`\\bby\\s+(this\\s+|next\\s+)?(${WEEKDAY_ALT})\\b`, "gi"), " ");
+  s = s.replace(new RegExp(`\\b(on|by)\\s+(${WEEKDAY_ALT})\\b`, "gi"), " ");
+  s = s.replace(/\bby\s+\d{4}-\d{2}-\d{2}\b/gi, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  if (!s) return undefined;
+  // Role-verb separation: "designer to deliver a logo" → "deliver a logo".
+  const verbMatch = s.match(
+    /\bto\s+(deliver|design|build|create|write|develop|make|produce|complete|finish)\b/i,
+  );
+  if (verbMatch && (verbMatch.index ?? 0) > 0) {
+    const fromTo = s.slice(verbMatch.index);
+    s = fromTo.replace(/^to\s+/i, "").trim();
+  }
+  s = s.replace(/\s+/g, " ").trim();
+  if (!s) return undefined;
+  const cleaned = cleanPhrase(s);
+  return cleaned || undefined;
+}
+
+/** Specific tokens that must be grounded verbatim — never invented. */
+const SPECIFIC_REQUIREMENT_TOKENS = [
+  "svg",
+  "png",
+  "jpg",
+  "jpeg",
+  "pdf",
+  "figma",
+  "psd",
+  "sketch",
+  "source file",
+  "source files",
+  "brand guide",
+  "brand guidelines",
+  "multiple variants",
+  "variants",
+  "mockup",
+  "prototype",
+  "notarized",
+  "audit",
+  "video walkthrough",
+  "wireframe",
+];
+
+function mentionsSpecificRequirement(text: string): boolean {
+  const lower = text.toLowerCase();
+  return SPECIFIC_REQUIREMENT_TOKENS.some((t) => lower.includes(t.toLowerCase()));
+}
+
+/**
+ * Grounded when every specific token inside the item appears verbatim in the
+ * user text. Items with no specific tokens pass (generic wording).
+ */
+function isRequirementGrounded(item: string, messagesText: string): boolean {
+  if (!mentionsSpecificRequirement(item)) return true;
+  const itemLower = item.toLowerCase();
+  const msgLower = messagesText.toLowerCase();
+  const hits = SPECIFIC_REQUIREMENT_TOKENS.filter((t) =>
+    itemLower.includes(t.toLowerCase()),
+  );
+  if (hits.length === 0) return true;
+  return hits.every((t) => msgLower.includes(t.toLowerCase()));
+}
+
+function inferDeliverables(
+  purpose: string | undefined,
+  messagesText: string,
+): string[] | undefined {
   if (!purpose) return undefined;
   const lower = purpose.toLowerCase();
-  if (lower.includes("logo")) return ["Logo design files (SVG + PNG)"];
+  if (lower.includes("logo")) {
+    // Only report file formats explicitly present in the user text.
+    const found: string[] = [];
+    if (/\bsvg\b/i.test(messagesText)) found.push("svg");
+    if (/\bpng\b/i.test(messagesText)) found.push("png");
+    if (/\bjpg\b/i.test(messagesText)) found.push("jpg");
+    else if (/\bjpeg\b/i.test(messagesText)) found.push("jpeg");
+    if (/\bpdf\b/i.test(messagesText)) found.push("pdf");
+    if (/\bfigma\b/i.test(messagesText)) found.push("figma");
+    if (/\bpsd\b/i.test(messagesText)) found.push("psd");
+    if (/\bsource files?\b/i.test(messagesText)) {
+      found.push(
+        messagesText.toLowerCase().includes("source files")
+          ? "source files"
+          : "source file",
+      );
+    }
+    if (found.length > 0) return [`Logo (${found.join(", ").toUpperCase()})`];
+    return ["Logo"];
+  }
   if (lower.includes("landing")) return ["Landing page delivery"];
   return undefined;
 }
@@ -250,13 +354,39 @@ function groundAIDraft(
   // Low-risk semantic context may be inferred.
   if (ai.purpose) out.purpose = ai.purpose;
   if (ai.jobType) out.jobType = ai.jobType;
-  if (ai.deliverables) out.deliverables = ai.deliverables;
-  if (ai.evidenceRequirements) out.evidenceRequirements = ai.evidenceRequirements;
+  if (ai.deliverables) {
+    const kept = ai.deliverables.filter((d) => isRequirementGrounded(d, messagesText));
+    if (kept.length > 0) out.deliverables = kept;
+  }
+  if (ai.evidenceRequirements) {
+    const kept = ai.evidenceRequirements.filter((e) =>
+      isRequirementGrounded(e, messagesText),
+    );
+    if (kept.length > 0) out.evidenceRequirements = kept;
+  }
   if (ai.recipientName) out.recipientName = ai.recipientName;
-  if (ai.releaseMode) out.releaseMode = ai.releaseMode;
-  if (ai.reviewWindow) out.reviewWindow = ai.reviewWindow;
-  if (ai.approvalThreshold) out.approvalThreshold = ai.approvalThreshold;
-  if (ai.escalationPolicy) out.escalationPolicy = ai.escalationPolicy;
+  if (ai.releaseMode === "manual") {
+    if (/ask\s+me|before\s+releas|approv|manual|review/i.test(messagesText)) {
+      out.releaseMode = "manual";
+    }
+  } else if (ai.releaseMode === "agent_assisted") {
+    if (
+      /agent|assist|\bAI\b|autopilot|without(\s+my)?\s+approval|auto[\s-]?release/i.test(
+        messagesText,
+      )
+    ) {
+      out.releaseMode = "agent_assisted";
+    }
+  }
+  if (ai.reviewWindow && isGrounded(ai.reviewWindow, messagesText)) {
+    out.reviewWindow = ai.reviewWindow;
+  }
+  if (ai.approvalThreshold && isGrounded(ai.approvalThreshold, messagesText)) {
+    out.approvalThreshold = ai.approvalThreshold;
+  }
+  if (ai.escalationPolicy && isGrounded(ai.escalationPolicy, messagesText)) {
+    out.escalationPolicy = ai.escalationPolicy;
+  }
   if (ai.chainId !== undefined) {
     const resolved = resolveCommandChainId(ai.chainId);
     if (resolved !== null && messagesText.toLowerCase().includes(String(ai.chainId))) {
@@ -405,7 +535,7 @@ export async function parsePaymentCommand(
   if (recipientName && !det.recipient) det.recipientName = recipientName;
   const purpose = extractPurpose(message);
   if (purpose) det.purpose = purpose;
-  const inferred = inferDeliverables(purpose);
+  const inferred = inferDeliverables(purpose, messagesText);
   if (inferred) det.deliverables = inferred;
   if (!det.evidenceRequirements && purpose) {
     det.evidenceRequirements = ["Delivery note / files / links as applicable"];

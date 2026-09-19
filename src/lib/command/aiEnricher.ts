@@ -22,7 +22,7 @@ const COMMAND_SYSTEM_PROMPT = [
   "Rules:",
   "- NEVER invent: wallet address (0x...), amount, asset, deadline date, approval threshold, release authority.",
   "- Only include recipient/amount/asset/deadlineDate when stated verbatim in the user message.",
-  "- You MAY infer low-risk context: purpose, jobType, deliverable wording, evidenceRequirements, recipientName.",
+  "- You MAY infer low-risk context only: purpose, jobType, recipientName. NEVER invent file formats (SVG, PNG, JPG, Figma, PSD, source files, etc.), evidenceRequirements, reviewWindow, approvalThreshold, escalationPolicy, or other specifics — deliverables and evidence must use only explicit user wording; omit any specifics the user did not state.",
   "- releaseMode is 'manual' when the user wants approval ('ask me before releasing'), else 'agent_assisted' when they mention agent/AI help. NEVER output 'autopilot'.",
   "- chainId: 42220 default. Only 11142220 when the user explicitly says Sepolia/test.",
   "- deadlineDate must be YYYY-MM-DD or omitted. deadlineLabel keeps the user's words (e.g. 'Friday').",

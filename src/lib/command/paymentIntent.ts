@@ -254,6 +254,16 @@ export interface DraftToPolicyResult {
   errors: string[];
 }
 
+/** Truncate to max chars without cutting mid-word (falls back to hard slice). */
+export function truncateAtWordBoundary(s: string, max = 32): string {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  const slice = t.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  if (lastSpace > 0) return slice.slice(0, lastSpace).trim();
+  return slice;
+}
+
 /** Deterministic validation: only validated values become a policy. */
 export function draftToPolicy(draft: PaymentIntentDraft): DraftToPolicyResult {
   const errors: string[] = [];
@@ -305,14 +315,11 @@ export function draftToPolicy(draft: PaymentIntentDraft): DraftToPolicyResult {
     }
   }
 
-  const title = (draft.purpose ?? draft.jobType ?? "").trim().slice(0, 32);
-  const deliverableSummary = (
-    draft.deliverables?.[0] ??
-    draft.purpose ??
-    ""
-  )
-    .trim()
-    .slice(0, 32);
+  const title = truncateAtWordBoundary((draft.purpose ?? draft.jobType ?? "").trim(), 32);
+  const deliverableSummary = truncateAtWordBoundary(
+    (draft.deliverables?.[0] ?? draft.purpose ?? "").trim(),
+    32,
+  );
   if (title && utf8ByteLength(title) > 32) {
     errors.push("Title too long.");
   }
