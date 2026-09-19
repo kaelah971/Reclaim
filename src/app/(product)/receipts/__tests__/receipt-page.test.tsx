@@ -197,9 +197,12 @@ describe("/receipts/[receiptId]", () => {
     expect(text).toContain(WORKER);
     expect(text).toContain("Worker allocation");
     expect(text).toContain("Client allocation");
-    // Evidence record
+    // Evidence record — humanized (P4.5F), never raw enums.
     expect(text).toContain("0x1bb11c9d819f4a69fc88c2eccb8fcf4343f07d965b1c87f7e3d3d7e5f94abb99");
-    expect(text).toContain("package_available");
+    expect(text).toContain("Evidence record available");
+    expect(text).toContain("Verified on-chain");
+    expect(text).not.toContain("package_available");
+    expect(text).not.toContain("chain_verified");
     // Resolution record: agent, QC, decision
     expect(text).toContain("agt_f1f9a3f6-b2ab-4719-995f-90a6d7867235");
     expect(text).toContain("The agent prepared the case. A person made the final decision.");

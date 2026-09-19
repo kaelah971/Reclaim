@@ -77,6 +77,10 @@ export function useSubmitEvidenceFlow(
   const submit = useCallback(
     (data: EvidenceFormData) => {
       if (!paymentId) return;
+      // P4.5F action locking: never rebroadcast once a receipt is known.
+      // The confirmed tx + metadata flow owns the lifecycle; a second submit
+      // would double-broadcast the same evidence hash.
+      if (isPending || isTxConfirmed) return;
       const manifest = buildEvidenceManifest(data);
       const reference = keccak256(stringToHex(manifest));
 
@@ -88,7 +92,7 @@ export function useSubmitEvidenceFlow(
 
       submitEvidenceTx(paymentId, reference);
     },
-    [paymentId, submitEvidenceTx],
+    [paymentId, submitEvidenceTx, isPending, isTxConfirmed],
   );
 
   // After the tx receipt confirms, persist the metadata. Success is only

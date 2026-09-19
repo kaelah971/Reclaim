@@ -166,6 +166,10 @@ function useEscrowWriteCore(
 
   /** Shared gates; returns the account when the write may proceed. */
   const passesGates = useCallback((): `0x${string}` | undefined => {
+    // P4.5F action locking: once a receipt is confirmed this hook instance
+    // never rebroadcasts — the canonical sync owns the lifecycle. A fresh
+    // attempt requires reset() (new hook state), never an automatic repeat.
+    if (isConfirmed) return undefined;
     if (inFlightRef.current || isPending || isConfirming) return undefined;
 
     setLocalError(null);
@@ -183,7 +187,7 @@ function useEscrowWriteCore(
       return undefined;
     }
     return account;
-  }, [account, isConfirming, isPending, isReconnecting, publicClient]);
+  }, [account, isConfirming, isConfirmed, isPending, isReconnecting, publicClient]);
 
   /**
    * Resolve the LIVE chain from the connected connector (reads eth_chainId

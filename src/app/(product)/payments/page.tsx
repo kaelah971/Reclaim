@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import Button from "@/components/ui/Button";
 import PaymentFilters from "@/components/payment/PaymentFilters";
 import StatusBadge from "@/components/ui/StatusBadge";
@@ -16,6 +17,11 @@ import {
   PAYMENT_STATE_LABELS,
   type PaymentState,
 } from "@/lib/contracts/types";
+import {
+  parseChainIdParam,
+  buildPaymentPath,
+} from "@/components/payment/paymentLifecycle";
+import { CELO_CHAIN_ID } from "@/lib/web3/chains";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -127,13 +133,17 @@ function PaymentCard({
   paymentId,
   userAddress,
   filter,
+  chainId,
+  chainQuery,
 }: {
   paymentId: bigint;
   userAddress: string;
   filter: string;
+  chainId: number;
+  chainQuery: string;
 }) {
   const { data: payment, isLoading, isError, notFound, refetch } =
-    usePayment(paymentId);
+    usePayment(paymentId, chainId);
 
   if (isLoading) return <PaymentRowSkeleton />;
 
@@ -183,10 +193,14 @@ function PaymentCard({
 
   const role = isClient ? "Client" : "Worker";
   const displayId = payment.id.toString();
+  // P4.5F: preserve explicit chain so Mainnet rooms never fall back.
+  const cardHref =
+    buildPaymentPath(displayId, chainQuery ? chainId : undefined) ??
+    `/payments/${displayId}${chainQuery}`;
 
   return (
     <Link
-      href={`/payments/${displayId}`}
+      href={cardHref}
       className="block rounded-[--radius-card] border border-border bg-surface px-6 py-5 transition-colors hover:border-primary/30 hover:bg-input/50"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -222,6 +236,34 @@ function PaymentCard({
 type FilterKey = "all" | "action" | "active" | "disputed" | "completed";
 
 export default function PaymentsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-10 md:px-6 md:py-12">
+          <p className="text-[15px] text-muted">Loading payments…</p>
+        </div>
+      }
+    >
+      <PaymentsPageContent />
+    </Suspense>
+  );
+}
+
+function PaymentsPageContent() {
+  const searchParams = useSearchParams();
+  // P4.5F: explicit ?chainId= threads into reads + card links. Absent keeps
+  // Sepolia default behavior byte-identical; unsupported fails closed.
+  const chainResolution = useMemo(
+    () => parseChainIdParam(searchParams?.get("chainId")),
+    [searchParams],
+  );
+  const explicitChainId =
+    chainResolution.status === "explicit"
+      ? chainResolution.chainId
+      : undefined;
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
   const { address, isConnected } = useWalletState();
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
 
@@ -230,14 +272,14 @@ export default function PaymentsPage() {
     isLoading: clientLoading,
     isError: clientError,
     refetch: refetchClient,
-  } = useClientPaymentIds(isConnected ? address : undefined);
+  } = useClientPaymentIds(isConnected ? address : undefined, activeChainId);
 
   const {
     data: workerIds,
     isLoading: workerLoading,
     isError: workerError,
     refetch: refetchWorker,
-  } = useWorkerPaymentIds(isConnected ? address : undefined);
+  } = useWorkerPaymentIds(isConnected ? address : undefined, activeChainId);
 
   const allPaymentIds = useMemo(() => {
     const seen = new Set<string>();
@@ -271,7 +313,7 @@ export default function PaymentsPage() {
             Payments
           </h1>
           <p className="mt-1 text-[15px] text-muted">
-            Protected USDC payments you created or were invited to.
+            Protected stablecoin payments you created or were invited to.
           </p>
         </div>
         <Link href="/payments/new">
@@ -280,6 +322,16 @@ export default function PaymentsPage() {
           </Button>
         </Link>
       </div>
+
+      {chainResolution.status === "invalid" && (
+        <div className="mt-6 rounded-[--radius-card] border border-border bg-surface px-6 py-5 text-center">
+          <p className="text-[14px] text-muted">
+            This payments link uses an unsupported network (chainId
+            &ldquo;{chainResolution.raw}&rdquo;). Supported networks are Celo
+            (42220) and Celo Sepolia (11142220).
+          </p>
+        </div>
+      )}
 
       <div className="mt-8">
         <PaymentFilters
@@ -347,6 +399,8 @@ export default function PaymentsPage() {
                   paymentId={id}
                   userAddress={address!}
                   filter={activeFilter}
+                  chainId={activeChainId}
+                  chainQuery={chainQuery}
                 />
               ))}
             </div>

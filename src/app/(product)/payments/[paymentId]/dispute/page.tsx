@@ -1,7 +1,7 @@
 "use client";
 
-import { useParams, useRouter } from "next/navigation";
-import { useMemo, useState, useEffect, useCallback } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useMemo, useState, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
 import { keccak256, stringToHex } from "viem";
 import Button from "@/components/ui/Button";
@@ -14,12 +14,35 @@ import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useOpenDispute } from "@/hooks/contracts/useEscrowActions";
-import { getCeloExplorerTxUrl } from "@/lib/web3/chains";
+import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
+import {
+  CELO_CHAIN_ID,
+  CELO_MAINNET_CHAIN_ID,
+  getCeloExplorerTxUrl,
+  getCeloMainnetExplorerTxUrl,
+} from "@/lib/web3/chains";
 import { formatUSDC } from "@/lib/contracts/types";
 import type { DisputeFormData } from "@/components/payment/DisputeForm";
 
 export default function DisputePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+          <div className="flex flex-col items-center justify-center gap-4">
+            <p className="text-[15px] text-muted">Loading payment data…</p>
+          </div>
+        </div>
+      }
+    >
+      <DisputePageInner />
+    </Suspense>
+  );
+}
+
+function DisputePageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const params = useParams<{ paymentId: string }>();
   const paymentIdStr = params?.paymentId;
   const paymentId = useMemo(() => {
@@ -31,12 +54,32 @@ export default function DisputePage() {
     }
   }, [paymentIdStr]);
 
+  // P4.5F: explicit chain preservation (Mainnet 42220 / Sepolia), fail closed.
+  const chainIdRaw = searchParams?.get("chainId");
+  const chainResolution = useMemo(
+    () => parseChainIdParam(chainIdRaw),
+    [chainIdRaw],
+  );
+  const isChainInvalid = chainResolution.status === "invalid";
+  const chainInvalidRaw =
+    chainResolution.status === "invalid" ? chainResolution.raw : "";
+  const explicitChainId =
+    chainResolution.status === "explicit"
+      ? chainResolution.chainId
+      : undefined;
+  const activeChainId = explicitChainId ?? CELO_CHAIN_ID;
+  const chainQuery =
+    explicitChainId !== undefined ? `?chainId=${explicitChainId}` : "";
+
   const { requireWallet } = useRequireWallet();
   const wallet = useWalletState();
 
-  const { data: payment, isLoading, isError, notFound } = usePayment(paymentId);
+  const { data: payment, isLoading, isError, notFound } = usePayment(
+    paymentId,
+    activeChainId,
+  );
   const { action: openDispute, isPending, isSuccess, error, txHash, reset } =
-    useOpenDispute();
+    useOpenDispute(activeChainId);
 
   const [lastReference, setLastReference] = useState<`0x${string}` | null>(null);
 
@@ -48,15 +91,17 @@ export default function DisputePage() {
   useEffect(() => {
     if (isSuccess) {
       const timer = setTimeout(() => {
-        router.push(`/payments/${paymentIdStr}`);
+        router.push(`/payments/${paymentIdStr}${chainQuery}`);
       }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [isSuccess, paymentIdStr, router]);
+  }, [isSuccess, paymentIdStr, router, chainQuery]);
 
   const handleOpenDispute = useCallback(
     (data: DisputeFormData) => {
       if (!paymentId) return;
+      // P4.5F action locking: never rebroadcast once receipt is known.
+      if (isPending || isSuccess) return;
       requireWallet(() => {
         const manifest = buildDisputeManifest(data);
         const reference = keccak256(stringToHex(manifest));
@@ -64,7 +109,7 @@ export default function DisputePage() {
         openDispute(paymentId, reference);
       });
     },
-    [paymentId, requireWallet, openDispute],
+    [paymentId, requireWallet, openDispute, isPending, isSuccess],
   );
 
   // Build x402 brief request from the inline form + on-chain payment data
@@ -111,6 +156,28 @@ export default function DisputePage() {
       ],
     };
   }, [payment, briefReason, briefOutcome]);
+
+  // Fail closed on malformed/unsupported ?chainId= (no silent fallback).
+  if (isChainInvalid) {
+    return (
+      <div className="mx-auto max-w-[1200px] px-4 py-16 md:px-6 md:py-20">
+        <div className="flex flex-col items-center justify-center gap-4 text-center">
+          <h1 className="text-[24px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Unsupported network
+          </h1>
+          <p className="text-[15px] text-muted">
+            This dispute link uses an unsupported network (chainId
+            &ldquo;{chainInvalidRaw}&rdquo;). Supported networks are Celo
+            (42220) and Celo Sepolia (11142220). Ask the sender for a link
+            with a supported chainId.
+          </p>
+          <Link href="/payments">
+            <Button variant="secondary">Return to payments</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -170,7 +237,7 @@ export default function DisputePage() {
           <p className="text-[15px] text-muted">
             Only the client or worker can open a dispute for this payment.
           </p>
-          <Link href={`/payments/${paymentIdStr}`}>
+          <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
             <Button variant="secondary">Return to Payment Room</Button>
           </Link>
         </div>
@@ -195,7 +262,7 @@ export default function DisputePage() {
             A dispute can be opened once the payment is funded and before it is released or
             cancelled. Current state: {payment.state}.
           </p>
-          <Link href={`/payments/${paymentIdStr}`}>
+          <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
             <Button variant="secondary">Return to Payment Room</Button>
           </Link>
         </div>
@@ -215,7 +282,7 @@ export default function DisputePage() {
             frozen while the case is reviewed.
           </p>
         </div>
-        <Link href={`/payments/${paymentIdStr}`}>
+        <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
           <Button variant="secondary" size="sm">
             Return to Payment Room
           </Button>
@@ -307,7 +374,11 @@ export default function DisputePage() {
                 </p>
               )}
               <a
-                href={getCeloExplorerTxUrl(txHash)}
+                href={
+                  activeChainId === CELO_MAINNET_CHAIN_ID
+                    ? getCeloMainnetExplorerTxUrl(txHash)
+                    : getCeloExplorerTxUrl(txHash)
+                }
                 target="_blank"
                 rel="noopener noreferrer"
                 className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
@@ -327,7 +398,7 @@ export default function DisputePage() {
           AI prepares the case. People decide. The contract settles.
         </p>
         <div className="mt-6">
-          <DisputeForm onSubmit={handleOpenDispute} />
+          <DisputeForm onSubmit={handleOpenDispute} submitted={isSuccess} />
         </div>
       </div>
 

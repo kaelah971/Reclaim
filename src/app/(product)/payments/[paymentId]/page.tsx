@@ -24,6 +24,7 @@ import ReleasedSummary from "@/components/payment/ReleasedSummary";
 import {
   getPaymentLifecycleLabel,
   parseChainIdParam,
+  buildReceiptPath,
 } from "@/components/payment/paymentLifecycle";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useTokenApproval } from "@/hooks/contracts/useTokenApproval";
@@ -37,6 +38,11 @@ import {
 } from "@/hooks/contracts/useEscrowActions";
 import { useWalletState, shortenAddress } from "@/hooks/wallet/useWalletState";
 import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
+import {
+  usePaymentActionSync,
+  PAYMENT_SYNCING_MESSAGE,
+  PAYMENT_SYNC_TIMEOUT_MESSAGE,
+} from "@/hooks/payment/usePaymentActionSync";
 import { formatUSDC, type PaymentData, type PaymentState } from "@/lib/contracts/types";
 import {
   CELO_CHAIN_ID,
@@ -111,6 +117,12 @@ interface TxStatusProps {
   onDismiss: () => void;
   label: string;
   chainId: number;
+  /** True while receipt confirmed but canonical barrier not yet observed. */
+  isSyncing?: boolean;
+  /** True when bounded sync timed out (confirmed but still stale). */
+  isTimedOut?: boolean;
+  /** Safe canonical refresh (refetch only — never rebroadcast). */
+  onRefresh?: () => void;
 }
 
 function TxStatus({
@@ -121,6 +133,9 @@ function TxStatus({
   onDismiss,
   label,
   chainId,
+  isSyncing = false,
+  isTimedOut = false,
+  onRefresh,
 }: TxStatusProps) {
   if (error) {
     return (
@@ -195,6 +210,56 @@ function TxStatus({
   }
 
   if (isSuccess && txHash) {
+    // Confirmed but RPC still stale → syncing / timeout states. The action
+    // stays locked (caller disables on isSuccess); only a safe refetch is
+    // offered — never a rebroadcast.
+    if (isSyncing) {
+      return (
+        <Notice variant="info">
+          <p className="text-[14px] leading-relaxed">
+            {PAYMENT_SYNCING_MESSAGE}
+          </p>
+          <p className="mt-1 text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted break-all">
+            {txHash}
+          </p>
+          <a
+            href={explorerTxUrlForChain(chainId, txHash)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+          >
+            View on Celo Explorer
+          </a>
+        </Notice>
+      );
+    }
+    if (isTimedOut) {
+      return (
+        <Notice variant="info">
+          <p className="text-[14px] leading-relaxed">
+            {PAYMENT_SYNC_TIMEOUT_MESSAGE}
+          </p>
+          <p className="mt-1 text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted break-all">
+            {txHash}
+          </p>
+          <a
+            href={explorerTxUrlForChain(chainId, txHash)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+          >
+            View on Celo Explorer
+          </a>
+          {onRefresh && (
+            <div className="mt-3">
+              <Button size="sm" variant="secondary" onClick={onRefresh}>
+                Refresh status
+              </Button>
+            </div>
+          )}
+        </Notice>
+      );
+    }
     return (
       <Notice variant="success">
         <p className="text-[14px] leading-relaxed">{label} confirmed.</p>
@@ -309,7 +374,48 @@ function PaymentRoomContent() {
   const openDispute = useOpenDispute(activeChainId);
   const cancelUnfunded = useCancelUnfunded(activeChainId);
 
+  // ---- Post-receipt canonical sync (P4.5F) ----
+  // Each barrier polls refetchPayment() only (never rebroadcasts) until the
+  // expected state is observed. Cancelled on unmount / payment / chain change.
+  const fundSync = usePaymentActionSync({
+    isSuccess: fundPayment.isSuccess,
+    txHash: fundPayment.txHash,
+    canonicalState: payment?.state,
+    expectedState: "Funded",
+    refetch: refetchPayment,
+    paymentId: paymentIdStr,
+    chainId: activeChainId,
+  });
+  const acceptSync = usePaymentActionSync({
+    isSuccess: acceptPayment.isSuccess,
+    txHash: acceptPayment.txHash,
+    canonicalState: payment?.state,
+    expectedState: "Accepted",
+    refetch: refetchPayment,
+    paymentId: paymentIdStr,
+    chainId: activeChainId,
+  });
+  const requestSync = usePaymentActionSync({
+    isSuccess: requestRelease.isSuccess,
+    txHash: requestRelease.txHash,
+    canonicalState: payment?.state,
+    expectedState: "ReleaseRequested",
+    refetch: refetchPayment,
+    paymentId: paymentIdStr,
+    chainId: activeChainId,
+  });
+  const releaseSync = usePaymentActionSync({
+    isSuccess: approveRelease.isSuccess,
+    txHash: approveRelease.txHash,
+    canonicalState: payment?.state,
+    expectedState: "Released",
+    refetch: refetchPayment,
+    paymentId: paymentIdStr,
+    chainId: activeChainId,
+  });
+
   // ---- Refetch on action success (confirmed receipt → state refresh) ----
+  // Immediate re-read; bounded polling above covers stale RPC reads.
   useEffect(() => {
     if (
       fundPayment.isSuccess ||
@@ -650,7 +756,7 @@ function PaymentRoomContent() {
         txHash={approveRelease.txHash}
         releasedAtLabel={releasedAtLabel}
         role={role === "client" || role === "worker" ? role : "viewer"}
-        receiptHref={`/receipts/${paymentIdStr}`}
+        receiptHref={buildReceiptPath(paymentIdStr ?? "", explicitChainId) ?? `/receipts/${paymentIdStr}`}
         receiptLabel="View receipt"
         sharePaymentId={paymentIdStr ?? ""}
         shareChainId={activeChainId}
@@ -756,9 +862,13 @@ function PaymentRoomContent() {
                   onClick={() =>
                     wrapAction(() => fundPayment.action(payment.id))
                   }
-                  disabled={fundPayment.isPending}
+                  disabled={fundPayment.isPending || fundPayment.isSuccess}
                 >
-                  {fundPayment.isPending ? "Depositing…" : "Deposit funds"}
+                  {fundPayment.isPending
+                    ? "Depositing…"
+                    : fundPayment.isSuccess
+                      ? "Deposit confirmed"
+                      : "Deposit funds"}
                 </Button>
               </div>
             )}
@@ -771,23 +881,28 @@ function PaymentRoomContent() {
               onDismiss={() => fundPayment.reset()}
               label="Deposit"
               chainId={activeChainId}
+              isSyncing={fundSync.isSyncing}
+              isTimedOut={fundSync.isTimedOut}
+              onRefresh={() => refetchPayment()}
             />
           </>
         )}
 
         <div className="pt-2 border-t border-border">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() =>
-              wrapAction(() => cancelUnfunded.action(payment.id))
-            }
-            disabled={cancelUnfunded.isPending}
-          >
-            {cancelUnfunded.isPending
-              ? "Cancelling…"
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() =>
+            wrapAction(() => cancelUnfunded.action(payment.id))
+          }
+          disabled={cancelUnfunded.isPending || cancelUnfunded.isSuccess}
+        >
+          {cancelUnfunded.isPending
+            ? "Cancelling…"
+            : cancelUnfunded.isSuccess
+              ? "Cancel confirmed"
               : "Cancel unfunded payment"}
-          </Button>
+        </Button>
         </div>
 
         <TxStatus
@@ -835,9 +950,13 @@ function PaymentRoomContent() {
           onClick={() =>
             wrapAction(() => acceptPayment.action(payment.id))
           }
-          disabled={acceptPayment.isPending}
+          disabled={acceptPayment.isPending || acceptPayment.isSuccess}
         >
-          {acceptPayment.isPending ? "Accepting…" : "Accept terms"}
+          {acceptPayment.isPending
+            ? "Accepting…"
+            : acceptPayment.isSuccess
+              ? "Terms confirmed"
+              : "Accept terms"}
         </Button>
         <TxStatus
           isPending={acceptPayment.isPending}
@@ -847,6 +966,9 @@ function PaymentRoomContent() {
           onDismiss={() => acceptPayment.reset()}
           label="Accept terms"
           chainId={activeChainId}
+          isSyncing={acceptSync.isSyncing}
+          isTimedOut={acceptSync.isTimedOut}
+          onRefresh={() => refetchPayment()}
         />
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="ghost" size="sm">
@@ -945,9 +1067,13 @@ function PaymentRoomContent() {
           onClick={() =>
             wrapAction(() => requestRelease.action(payment.id))
           }
-          disabled={requestRelease.isPending}
+          disabled={requestRelease.isPending || requestRelease.isSuccess}
         >
-          {requestRelease.isPending ? "Requesting…" : "Request release"}
+          {requestRelease.isPending
+            ? "Requesting…"
+            : requestRelease.isSuccess
+              ? "Request confirmed"
+              : "Request release"}
         </Button>
         <TxStatus
           isPending={requestRelease.isPending}
@@ -957,6 +1083,9 @@ function PaymentRoomContent() {
           onDismiss={() => requestRelease.reset()}
           label="Release request"
           chainId={activeChainId}
+          isSyncing={requestSync.isSyncing}
+          isTimedOut={requestSync.isTimedOut}
+          onRefresh={() => refetchPayment()}
         />
         <div className="pt-2 border-t border-border">
           <Link href={`/payments/${paymentIdStr}/evidence${chainQuery}`}>
@@ -1060,6 +1189,8 @@ function PaymentRoomContent() {
           onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
           onRefresh={() => refetchPayment()}
           onDismissError={() => approveRelease.reset()}
+          isSyncing={releaseSync.isSyncing}
+          isTimedOut={releaseSync.isTimedOut}
         />
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">
@@ -1155,6 +1286,8 @@ function PaymentRoomContent() {
           onRelease={() => wrapAction(() => approveRelease.action(payment.id))}
           onRefresh={() => refetchPayment()}
           onDismissError={() => approveRelease.reset()}
+          isSyncing={releaseSync.isSyncing}
+          isTimedOut={releaseSync.isTimedOut}
         />
         <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
           <Button variant="destructive" size="lg" className="w-full">

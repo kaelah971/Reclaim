@@ -131,7 +131,7 @@ function AgentControlRoomContent() {
     }
   }, [paymentId]);
 
-  const { data: escrowPayment } = usePayment(numericPaymentId);
+  const { data: escrowPayment } = usePayment(numericPaymentId, explicitChainId);
   const wallet = useWalletState();
   const { signMessageAsync } = useSignMessage();
 

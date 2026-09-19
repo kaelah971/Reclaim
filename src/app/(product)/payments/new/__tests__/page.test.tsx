@@ -418,7 +418,8 @@ describe("/payments/new — progress, error, success", () => {
     const text = bodyText();
     expect(text).toContain("Payment protected");
     expect(text).toContain("Payment ID 9");
-    expect(routerMocks.push).toHaveBeenCalledWith("/payments/9");
+    // P4.5F: creation success preserves explicit chain (Mainnet default).
+    expect(routerMocks.push).toHaveBeenCalledWith("/payments/9?chainId=42220");
   });
 });
 

@@ -18,7 +18,11 @@ import TransactionReference from "@/components/receipt/TransactionReference";
 import type { TransactionRef } from "@/components/receipt/TransactionReference";
 import VerificationSummary from "@/components/receipt/VerificationSummary";
 import PrintReceiptButton from "@/components/receipt/PrintReceiptButton";
-import { parseChainIdParam } from "@/components/payment/paymentLifecycle";
+import {
+  parseChainIdParam,
+  humanizeAvailabilityLabel,
+  humanizeSubmitterLabel,
+} from "@/components/payment/paymentLifecycle";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import type { ReceiptData } from "@/lib/receipt/types";
 import {
@@ -320,6 +324,23 @@ function ReceiptDetailContent() {
     );
   }
 
+  // P4.5F receipt truthfulness: only claim Resolution Agent involvement
+  // when durable lifecycle data proves it (agent row / packet event /
+  // version hashes). A normal client release has none of these.
+  const hasAgentInvolvement = Boolean(
+    agent?.agentId ??
+      data?.agentId ??
+      data?.packetEventId ??
+      agent?.caseVersionHash ??
+      agent?.evidenceVersionHash,
+  );
+  const releasedOutcomeText = hasAgentInvolvement
+    ? "The protected amount was released to the worker after the client approved the release. The resolution agent prepared the case; a person made the final decision."
+    : "The protected payment was released to the worker after the client approved the delivery.";
+  const releasedReviewNote = hasAgentInvolvement
+    ? "The agent prepared the case. A person made the final decision."
+    : "The client approved the delivery — no Resolution Agent review was involved.";
+
   // Chain-aware network label for escrow-chain transactions. The canonical
   // network comes from the verified receipt; the URL chain is the fallback
   // before the receipt loads (receipt is loaded here, so pp.network wins).
@@ -418,7 +439,7 @@ function ReceiptDetailContent() {
                               pp?.finalState === "Resolved"
                             ? "The dispute was resolved with the protected amount released to the worker."
                             : pp?.finalState === "Released"
-                              ? "The protected amount was released to the worker after the client approved the release. The resolution agent prepared the case; a person made the final decision."
+                              ? releasedOutcomeText
                               : "The payment has not reached a final settlement outcome."
                 }
               </p>
@@ -492,8 +513,14 @@ function ReceiptDetailContent() {
                 {ev?.claim ? <Row label="Claim" value={ev.claim} /> : null}
                 {ev?.date ? <Row label="Date" value={ev.date} /> : null}
                 {ev?.pastedText ? <Row label="Pasted text" value={ev.pastedText} /> : null}
-                <Row label="Availability" value={ev?.availability ?? null} />
-                <Row label="Submitter" value={ev?.submitter ?? null} />
+                <Row
+                  label="Availability"
+                  value={humanizeAvailabilityLabel(ev?.availability)}
+                />
+                <Row
+                  label="Submitter"
+                  value={humanizeSubmitterLabel(ev?.submitter)}
+                />
                 {ev?.submittedAt ? (
                   <Row label="Submitted at" value={ev.submittedAt} mono />
                 ) : null}
@@ -517,7 +544,10 @@ function ReceiptDetailContent() {
               <dl className="mt-4 space-y-2 text-[14px]">
                 <Row label="Agent" value={agent?.agentId ?? null} mono breakAll />
                 <Row label="Objective" value={agent?.objective ?? null} />
-                <Row label="Statement" value={agent?.statement ?? null} />
+                <Row
+                  label="Statement"
+                  value={hasAgentInvolvement ? (agent?.statement ?? null) : null}
+                />
                 <Row label="QC tool" value={qc?.toolId ?? null} mono />
                 <Row label="QC price" value={qc?.priceHuman ?? null} />
                 <Row label="QC network" value={qc?.network ?? null} />
@@ -580,7 +610,7 @@ function ReceiptDetailContent() {
                 reviewerCount={undefined}
                 reviewNote={
                   pp?.finalState === "Released"
-                    ? "The agent prepared the case. A person made the final decision."
+                    ? releasedReviewNote
                     : pp?.finalState === "Resolved"
                       ? "The escrow owner resolved the dispute on-chain."
                       : pp?.finalState === "Disputed"

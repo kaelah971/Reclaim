@@ -20,6 +20,11 @@ import { useRequireWallet } from "@/hooks/wallet/useRequireWallet";
 import { useWalletState } from "@/hooks/wallet/useWalletState";
 import { usePayment } from "@/hooks/contracts/useReadContract";
 import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";
+import {
+  usePaymentActionSync,
+  PAYMENT_SYNCING_MESSAGE,
+  PAYMENT_SYNC_TIMEOUT_MESSAGE,
+} from "@/hooks/payment/usePaymentActionSync";
 import { getCeloExplorerTxUrl, getCeloMainnetExplorerTxUrl, getChainName, CELO_CHAIN_ID } from "@/lib/web3/chains";
 import {
   readEvidenceChainRaw,
@@ -134,6 +139,7 @@ function EvidencePageInner() {
   // an explicit error instead of binding to the wrong canonical escrow.
   // useSearchParams (Suspense boundary above) keeps SSR and hydration in
   // agreement — no window reads during render.
+  // P4.5F: preserve explicit chain in all return navigation via chainQuery.
   // -----------------------------------------------------------------------
   const targetChainId: number | null = useMemo(() => {
     try {
@@ -144,8 +150,18 @@ function EvidencePageInner() {
       return null;
     }
   }, [searchParams]);
+  const explicitEvidenceChainId: number | undefined = useMemo(() => {
+    const raw = readEvidenceChainRaw(searchParams.toString());
+    if (raw === null || raw.trim() === "") return undefined;
+    if (targetChainId === null) return undefined;
+    return targetChainId;
+  }, [searchParams, targetChainId]);
+  const chainQuery =
+    explicitEvidenceChainId !== undefined
+      ? `?chainId=${explicitEvidenceChainId}`
+      : "";
 
-  const { data: payment, isLoading, isError, notFound } = usePayment(
+  const { data: payment, isLoading, isError, notFound, refetch: refetchPayment } = usePayment(
     targetChainId === null ? undefined : paymentId,
     targetChainId ?? CELO_CHAIN_ID,
   );
@@ -161,6 +177,25 @@ function EvidencePageInner() {
     retryMetadata,
     reset,
   } = useSubmitEvidenceFlow(paymentId, paymentIdStr, targetChainId ?? CELO_CHAIN_ID);
+
+  // P4.5F post-receipt sync: Accepted → DeliverySubmitted barrier. Locks the
+  // form (submit guards on isTxConfirmed), shows syncing copy, bounded-polls
+  // canonical state — never rebroadcasts.
+  const evidenceSync = usePaymentActionSync({
+    isSuccess: isTxConfirmed,
+    txHash,
+    canonicalState: payment?.state,
+    expectedState: "DeliverySubmitted",
+    refetch: () => {
+      try {
+        refetchPayment();
+      } catch {
+        // Best-effort.
+      }
+    },
+    paymentId: paymentIdStr,
+    chainId: targetChainId ?? CELO_CHAIN_ID,
+  });
 
   // -----------------------------------------------------------------------
   // Evidence quality check state
@@ -352,14 +387,14 @@ function EvidencePageInner() {
   // -----------------------------------------------------------------------
 
   // Redirect to the Payment Room only AFTER the tx confirmed AND the
-  // evidence metadata was persisted.
+  // evidence metadata was persisted. P4.5F: preserve explicit chain.
   useEffect(() => {
     if (metadataState !== "persisted") return;
     const timer = setTimeout(() => {
-      router.push(`/payments/${paymentIdStr}`);
+      router.push(`/payments/${paymentIdStr}${chainQuery}`);
     }, 2000);
     return () => clearTimeout(timer);
-  }, [metadataState, paymentIdStr, router]);
+  }, [metadataState, paymentIdStr, router, chainQuery]);
 
   // -----------------------------------------------------------------------
   // Evidence submit callback
@@ -655,7 +690,7 @@ function EvidencePageInner() {
           >
             Switch to Celo Sepolia
           </Button>
-          <Link href={`/payments/${paymentIdStr}`}>
+          <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
             <Button variant="secondary">Return to Payment Room</Button>
           </Link>
         </div>
@@ -673,7 +708,7 @@ function EvidencePageInner() {
           <p className="text-[15px] text-muted">
             Only the assigned worker can submit evidence for this payment.
           </p>
-          <Link href={`/payments/${paymentIdStr}`}>
+          <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
             <Button variant="secondary">Return to Payment Room</Button>
           </Link>
         </div>
@@ -692,7 +727,7 @@ function EvidencePageInner() {
             Evidence can be submitted after you accept the terms (and updated until release is
             requested). Current state: {payment.state}.
           </p>
-          <Link href={`/payments/${paymentIdStr}`}>
+          <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
             <Button variant="secondary">Return to Payment Room</Button>
           </Link>
         </div>
@@ -713,7 +748,7 @@ function EvidencePageInner() {
               : `Submit your delivery evidence reference for payment #${paymentIdStr}.`}
           </p>
         </div>
-        <Link href={`/payments/${paymentIdStr}`}>
+        <Link href={`/payments/${paymentIdStr}${chainQuery}`}>
           <Button variant="secondary" size="sm">
             Return to Payment Room
           </Button>
@@ -851,6 +886,31 @@ function EvidencePageInner() {
               <p className="text-[14px] leading-relaxed">
                 Evidence submitted successfully. Redirecting to Payment Room…
               </p>
+              {evidenceSync.isSyncing && (
+                <p className="mt-1 text-[13px] text-muted">
+                  {PAYMENT_SYNCING_MESSAGE}
+                </p>
+              )}
+              {evidenceSync.isTimedOut && (
+                <div className="mt-2">
+                  <p className="text-[13px] text-muted">
+                    {PAYMENT_SYNC_TIMEOUT_MESSAGE}
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-1 text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+                    onClick={() => {
+                      try {
+                        refetchPayment();
+                      } catch {
+                        // Best-effort.
+                      }
+                    }}
+                  >
+                    Refresh status
+                  </button>
+                </div>
+              )}
               {lastReference && (
                 <p className="mt-1 text-[13px] font-[family-name:var(--font-ibm-plex-mono)] text-muted break-all">
                   Verification reference: {lastReference}

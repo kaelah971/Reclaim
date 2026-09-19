@@ -11,7 +11,7 @@ export default function Footer() {
               {productName}
             </span>
             <p className="mt-3 text-[15px] leading-relaxed text-page/68">
-              Protected USDC payments for clients and independent digital
+              Protected stablecoin payments for clients and independent digital
               workers.
             </p>
           </div>
@@ -101,8 +101,7 @@ export default function Footer() {
               Built on
             </h3>
             <p className="mt-4 text-[15px] leading-relaxed text-page/68">
-              Celo network &middot; USDC stablecoin &middot; x402 agentic
-              payments
+              Celo &middot; USA₮ &middot; x402 agentic payments
             </p>
           </div>
         </div>

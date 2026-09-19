@@ -128,11 +128,13 @@ export default function CreatePaymentPage() {
   );
 
   // ---- Redirect to the Payment Room once funds are protected ----
+  // P4.5F: preserve explicit chain (Mainnet 42220 / Sepolia) so the room
+  // never falls back to the wrong network after a real production lifecycle.
   useEffect(() => {
     if (flow.phase === "done" && flow.createdPaymentId !== undefined) {
-      router.push(`/payments/${flow.createdPaymentId.toString()}`);
+      router.push(`/payments/${flow.createdPaymentId.toString()}?chainId=${targetChainId}`);
     }
-  }, [flow.phase, flow.createdPaymentId, router]);
+  }, [flow.phase, flow.createdPaymentId, router, targetChainId]);
 
   const parsedRaw = useMemo(
     () => parseAmountToRaw(amount, token.decimals),

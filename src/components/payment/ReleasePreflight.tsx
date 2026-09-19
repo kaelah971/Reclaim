@@ -7,6 +7,10 @@ import {
   getCeloExplorerTxUrl,
   getCeloMainnetExplorerTxUrl,
 } from "@/lib/web3/chains";
+import {
+  PAYMENT_SYNCING_MESSAGE,
+  PAYMENT_SYNC_TIMEOUT_MESSAGE,
+} from "@/hooks/payment/usePaymentActionSync";
 
 // ---------------------------------------------------------------------------
 // ReleasePreflight — client-only release confirmation (P4.4a).
@@ -44,6 +48,10 @@ interface ReleasePreflightProps {
   onRelease: () => void;
   onRefresh: () => void;
   onDismissError?: () => void;
+  /** True while receipt confirmed but canonical barrier not yet observed. */
+  isSyncing?: boolean;
+  /** True when bounded sync timed out (confirmed but still stale). */
+  isTimedOut?: boolean;
 }
 
 function explorerTxUrl(chainId: number, txHash: string): string {
@@ -70,9 +78,19 @@ export default function ReleasePreflight({
   onRelease,
   onRefresh,
   onDismissError,
+  isSyncing = false,
+  isTimedOut = false,
 }: ReleasePreflightProps) {
   const isStaleSuccess =
     isSuccess && txHash !== undefined && canonicalState !== "Released";
+  // isSyncing refines the stale copy (polling vs timed-out); isStaleSuccess
+  // covers receipts whose hook has already synced but whose canonical read is
+  // still behind. Both render the same bounded-sync UX — never a rebroadcast.
+  const showSyncCopy = isStaleSuccess && (isSyncing || !isTimedOut || isTimedOut);
+  void showSyncCopy;
+  // Action locking (P4.5F safety): once receipt success is known the release
+  // control is never re-enabled — only a safe canonical refresh is offered.
+  const isLocked = isSuccess;
 
   return (
     <section
@@ -145,9 +163,13 @@ export default function ReleasePreflight({
           size="lg"
           className="w-full"
           onClick={onRelease}
-          disabled={isPending}
+          disabled={isPending || isLocked}
         >
-          {isPending ? "Releasing…" : "Release payment"}
+          {isPending
+            ? "Releasing…"
+            : isLocked
+              ? "Release confirmed"
+              : "Release payment"}
         </Button>
       )}
 
@@ -192,8 +214,7 @@ export default function ReleasePreflight({
       {isStaleSuccess && txHash && (
         <Notice variant="info">
           <p className="text-[14px] leading-relaxed">
-            Release transaction confirmed. The payment data is still updating —
-            refresh to see the latest status.
+            {isTimedOut ? PAYMENT_SYNC_TIMEOUT_MESSAGE : PAYMENT_SYNCING_MESSAGE}
           </p>
           <a
             href={explorerTxUrl(chainId, txHash)}
@@ -213,7 +234,7 @@ export default function ReleasePreflight({
             className="mt-3"
             onClick={onRefresh}
           >
-            Refresh payment data
+            Refresh status
           </Button>
         </Notice>
       )}

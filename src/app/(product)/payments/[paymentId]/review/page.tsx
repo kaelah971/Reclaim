@@ -105,6 +105,7 @@ function ReviewContent() {
   const wallet = useWalletState();
   const { data: payment, isLoading } = usePayment(
     paymentIdStr ? BigInt(paymentIdStr) : undefined,
+    explicitChainId,
   );
 
   const [loading, setLoading] = useState(true);
