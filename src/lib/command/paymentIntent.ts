@@ -28,7 +28,7 @@ import {
   parseAmountToRaw,
   dateToUnixTimestamp,
 } from "@/app/(product)/payments/new/validation";
-import { utf8ByteLength } from "@/lib/contracts/types";
+import { utf8ByteLength, MAX_BYTES32_LABEL_BYTES } from "@/lib/contracts/types";
 
 /** Canonical command chain: Celo Mainnet. Sepolia only via explicit request. */
 export const COMMAND_DEFAULT_CHAIN_ID = CELO_MAINNET_CHAIN_ID;
@@ -254,14 +254,72 @@ export interface DraftToPolicyResult {
   errors: string[];
 }
 
-/** Truncate to max chars without cutting mid-word (falls back to hard slice). */
+/** Truncate to max UTF-8 bytes without cutting mid-word (falls back to hard slice). */
 export function truncateAtWordBoundary(s: string, max = 32): string {
   const t = s.trim();
-  if (t.length <= max) return t;
-  const slice = t.slice(0, max);
-  const lastSpace = slice.lastIndexOf(" ");
-  if (lastSpace > 0) return slice.slice(0, lastSpace).trim();
-  return slice;
+  if (utf8ByteLength(t) <= max) return t;
+  // Byte-fit accumulation by code point — never splits a multi-byte char
+  // (32 multibyte chars can exceed 32 bytes, so char slicing is unsafe).
+  let acc = "";
+  for (const ch of t) {
+    const next = acc + ch;
+    if (utf8ByteLength(next) > max) break;
+    acc = next;
+  }
+  const trimmed = acc.trimEnd();
+  const lastSpace = trimmed.lastIndexOf(" ");
+  if (lastSpace > 0) return trimmed.slice(0, lastSpace).trim();
+  return trimmed;
+}
+
+/**
+ * Rich human-facing evidence fallback (UI copy only — never stored on-chain
+ * verbatim; see toOnChainEvidenceLabel).
+ */
+export const GENERIC_EVIDENCE_GUIDANCE =
+  "Delivery note / files / links as applicable";
+
+/** Contract-safe canonical label for the generic evidence fallback. */
+export const GENERIC_EVIDENCE_ONCHAIN_LABEL = "Delivery evidence";
+
+/**
+ * Canonicalize rich evidence wording into a contract-safe bytes32 label.
+ *
+ * - Trims input; empty stays "" (toBytes32Label encodes "" as zero bytes32).
+ * - Returns short input byte-exact ("GitHub repository", "Figma link" pass
+ *   through untouched).
+ * - Maps the generic guidance fallback to "Delivery evidence".
+ * - Otherwise prefers the first segment split on /[\/;(,]/ when it fits.
+ * - Falls back to byte-aware word-boundary truncation (code-point iteration
+ *   so multi-byte chars are never split).
+ *
+ * Never invents wording beyond trimming/segment selection; never exceeds
+ * 32 UTF-8 bytes.
+ */
+export function toOnChainEvidenceLabel(rich: string): string {
+  const t = rich.trim();
+  if (t === "") return "";
+  if (utf8ByteLength(t) <= MAX_BYTES32_LABEL_BYTES) return t;
+  if (t.toLowerCase() === GENERIC_EVIDENCE_GUIDANCE.toLowerCase()) {
+    return GENERIC_EVIDENCE_ONCHAIN_LABEL;
+  }
+  const firstSegment = t.split(/[/;(,]/)[0]?.trim() ?? "";
+  if (
+    firstSegment !== "" &&
+    utf8ByteLength(firstSegment) <= MAX_BYTES32_LABEL_BYTES
+  ) {
+    return firstSegment;
+  }
+  let acc = "";
+  for (const ch of t) {
+    const next = acc + ch;
+    if (utf8ByteLength(next) > MAX_BYTES32_LABEL_BYTES) break;
+    acc = next;
+  }
+  const trimmed = acc.trimEnd();
+  const lastSpace = trimmed.lastIndexOf(" ");
+  if (lastSpace > 0) return trimmed.slice(0, lastSpace).trim();
+  return trimmed;
 }
 
 /** Deterministic validation: only validated values become a policy. */
@@ -340,12 +398,33 @@ export function draftToPolicy(draft: PaymentIntentDraft): DraftToPolicyResult {
     deliveryFormat: "",
     deadlineDate: draft.deadlineDate ?? "",
     deadlineUnix,
-    evidenceExpectation: (draft.evidenceRequirements?.[0] ?? "").slice(0, 160),
+    evidenceExpectation: toOnChainEvidenceLabel(
+      draft.evidenceRequirements?.[0] ?? "",
+    ),
     releaseMode,
     releaseRule: releaseModeToRule(releaseMode),
     deliverables: draft.deliverables ?? [],
     evidenceRequirements: draft.evidenceRequirements ?? [],
   };
+
+  // Fail-closed handoff guard: with canonicalization above this is
+  // unreachable, but the command → contract handoff must never produce an
+  // executable-but-oversize policy.
+  const onChainFields: Array<[string, string]> = [
+    ["Title", policy.title],
+    ["Deliverable summary", policy.deliverableSummary],
+    ["Delivery format", policy.deliveryFormat],
+    ["Release rule", policy.releaseRule],
+    ["Evidence expectation", policy.evidenceExpectation],
+  ];
+  for (const [label, value] of onChainFields) {
+    if (utf8ByteLength(value) > MAX_BYTES32_LABEL_BYTES) {
+      errors.push(`${label} exceeds on-chain limit.`);
+    }
+  }
+  if (errors.length > 0) {
+    return { policy: null, missing, errors };
+  }
 
   const parsed = paymentPolicySchema.safeParse(policy);
   if (!parsed.success) {

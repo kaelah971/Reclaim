@@ -50,8 +50,14 @@ export interface CreatePaymentParams {
 }
 
 export interface UseCreatePaymentReturn {
-  /** Call to initiate a createPayment transaction (simulated first). */
-  createPayment: (params: CreatePaymentParams) => void;
+  /**
+   * Call to initiate a createPayment transaction (simulated first).
+   * Returns true once the simulation is kicked off; false when a
+   * synchronous preflight check failed (oversize label, no account, wrong
+   * chain, no client, or a transaction already in flight) — nothing was
+   * broadcast in that case.
+   */
+  createPayment: (params: CreatePaymentParams) => boolean;
   /** True while the transaction is pending or confirming. */
   isPending: boolean;
   /** True once the transaction has been confirmed on-chain. */
@@ -129,8 +135,8 @@ export function useCreatePayment(
   const inFlightRef = useRef(false);
 
   const createPayment = useCallback(
-    (params: CreatePaymentParams) => {
-      if (inFlightRef.current || isPending || isConfirming) return;
+    (params: CreatePaymentParams): boolean => {
+      if (inFlightRef.current || isPending || isConfirming) return false;
 
       setLocalError(null);
 
@@ -139,13 +145,13 @@ export function useCreatePayment(
           setLocalError(
             `${label} is too long to store on-chain (maximum ${MAX_BYTES32_LABEL_BYTES} bytes).`,
           );
-          return;
+          return false;
         }
       }
 
       if (!account) {
         setLocalError("Connect your wallet to create a payment.");
-        return;
+        return false;
       }
       // Chain-parameterized guard: the wallet chain must equal the requested
       // escrow chain. Sepolia copy is preserved exactly
@@ -156,11 +162,11 @@ export function useCreatePayment(
         setLocalError(
           `Switch to ${getChainName(requestedChainId)} to create a payment.`,
         );
-        return;
+        return false;
       }
       if (!publicClient) {
         setLocalError("Network client unavailable. Please try again.");
-        return;
+        return false;
       }
 
       const args = [
@@ -206,6 +212,7 @@ export function useCreatePayment(
           inFlightRef.current = false;
           setLocalError(translateContractError(simulationError));
         });
+      return true;
     },
     [
       account,

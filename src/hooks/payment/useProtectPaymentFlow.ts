@@ -166,13 +166,21 @@ export function useProtectPaymentFlow(
     (input: ProtectPaymentInput) => {
       if (started) return;
       const { rawAmount, ...params } = input;
+      // Preflight FIRST: only latch `started` (which drives phase +
+      // progressLabel) when validation passed and a simulation was kicked
+      // off. A sync validation failure returns false → `started` stays
+      // false, phase stays "idle" (no stuck "Creating your agreement…"
+      // spinner), nothing was broadcast, and a later start-after-fix
+      // proceeds fresh. Retry-after-fix starts fresh; the post-create retry
+      // path below is untouched.
+      const accepted = create.createPayment(params);
+      if (!accepted) return;
       pendingRef.current = { params, rawAmount };
       firedApproveRef.current = null;
       firedFundRef.current = null;
       setRequiredAmount(rawAmount);
       setAttempt(0);
       setStarted(true);
-      create.createPayment(params);
     },
     [started, create],
   );

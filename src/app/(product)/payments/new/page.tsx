@@ -33,7 +33,7 @@ import {
   parseAmountToRaw,
   dateToUnixTimestamp,
 } from "./validation";
-import { formatUSDC } from "@/lib/contracts/types";
+import { formatUSDC, utf8ByteLength, MAX_BYTES32_LABEL_BYTES } from "@/lib/contracts/types";
 import { DEFAULT_NEW_PAYMENT_CHAIN_ID } from "@/lib/contracts/config";
 import {
   CELO_CHAIN_ID,
@@ -351,6 +351,18 @@ export default function CreatePaymentPage() {
       if (flow.tokenBalance !== undefined && flow.tokenBalance < raw) {
         setSubmitError(
           `Your ${tokenDisplay} balance is less than ${amount} ${tokenDisplay}. Add funds before protecting this payment.`,
+        );
+        return;
+      }
+      // Defense in depth: the evidence note is stored on-chain (≤ 32 UTF-8
+      // bytes). Stay on step 3 with a plain-language error — never hand an
+      // oversize value to the flow.
+      if (
+        utf8ByteLength(protectionRules.evidenceExpectation.trim()) >
+        MAX_BYTES32_LABEL_BYTES
+      ) {
+        setSubmitError(
+          "Keep the evidence note under 32 characters so it fits the agreement record.",
         );
         return;
       }
