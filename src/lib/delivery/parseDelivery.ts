@@ -144,6 +144,70 @@ function matchClaimedDeliverables(
   return distinct(out).slice(0, 8);
 }
 
+// ---------------------------------------------------------------------------
+// P6.4D — deterministic natural-language evidence-type inference.
+//
+// Conservative ordered matching (word boundaries, case-insensitive).
+// Returns the single matching category, or undefined when zero or 2+
+// categories match (ambiguous → leave missing, never guess).
+// Bare "note" / bare "evidence" alone are too weak and never match.
+// Type inference NEVER satisfies the evidence-ref requirement: a
+// claimed-but-unprovided file still yields the FILE_CLAIM guidance error
+// and the "evidence" missing field (see buildDeliveryMissingFields —
+// "evidence" vs "evidenceType" are separate fields).
+// ---------------------------------------------------------------------------
+const EVIDENCE_TYPE_PATTERNS: {
+  type: NonNullable<DeliveryIntentDraft["evidenceType"]>;
+  res: RegExp[];
+}[] = [
+  {
+    type: "message",
+    res: [
+      /\bdelivery notes?\b/i,
+      /\btext notes?\b/i,
+      /\bwritten notes?\b/i,
+      /\btext evidence\b/i,
+      /\bmessage\b/i,
+    ],
+  },
+  {
+    type: "delivery-file",
+    res: [
+      /\battached files?\b/i,
+      /\bfiles?\b/i,
+      /\bdocuments?\b/i,
+      /\bimages?\b/i,
+      /\bpdf\b/i,
+      /\bpng\b/i,
+      /\bzip\b/i,
+    ],
+  },
+  {
+    type: "revision-record",
+    res: [/\brevision records?\b/i, /\brevisions?\b/i, /\bchanges made\b/i],
+  },
+  {
+    type: "agreement-reference",
+    res: [/\bagreement references?\b/i, /\bagreements?\b/i],
+  },
+  {
+    type: "payment-reference",
+    res: [/\bpayment references?\b/i, /\btransaction references?\b/i],
+  },
+];
+
+export function inferEvidenceType(
+  message: string,
+): DeliveryIntentDraft["evidenceType"] | undefined {
+  const text = message ?? "";
+  const matched: string[] = [];
+  for (const cat of EVIDENCE_TYPE_PATTERNS) {
+    if (cat.res.some((re) => re.test(text))) matched.push(cat.type);
+  }
+  if (matched.length !== 1) return undefined;
+  return matched[0] as DeliveryIntentDraft["evidenceType"];
+}
+
 /** Critical AI prose must be length-capped; URLs must be verbatim. */
 function isGrounded(value: string, messagesText: string): boolean {
   const v = value.trim().toLowerCase();
@@ -380,6 +444,12 @@ export async function parseDelivery(
     det.pastedText = withoutUrls.slice(0, 4000);
   }
 
+  // --- P6.4D: deterministic natural-language evidence-type inference ---
+  // Type may be known while the evidence ref is still missing (file-claim
+  // guidance error is preserved; "evidence" vs "evidenceType" are separate).
+  const inferredType = inferEvidenceType(message);
+  if (inferredType) det.evidenceType = inferredType;
+
   // Merge deterministic over prior (never lose prior fields).
   let merged = mergeDeliveryDrafts(priorDraft, det);
 
@@ -392,13 +462,16 @@ export async function parseDelivery(
         const aiRaw = await enricher(message, merged, contextLabel);
         if (aiRaw) {
           const grounded = groundAIDeliveryDraft(aiRaw, messagesText);
-          // Deterministic wins for references/externalRef when present.
+          // Deterministic wins for references/externalRef/evidenceType when present.
           const aiFill: DeliveryIntentDraft = { ...grounded };
           if (merged.references && merged.references.length > 0) {
             delete aiFill.references;
           }
           if (merged.externalRef && merged.externalRef.trim()) {
             delete aiFill.externalRef;
+          }
+          if (merged.evidenceType) {
+            delete aiFill.evidenceType;
           }
           merged = mergeDeliveryDrafts(merged, aiFill);
         }

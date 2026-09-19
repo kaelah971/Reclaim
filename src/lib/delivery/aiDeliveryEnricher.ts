@@ -26,6 +26,7 @@ const DELIVERY_SYSTEM_PROMPT = [
   "- Map explicit worker statements to claimedDeliverables using verbatim phrases.",
   "- NEVER claim verification: do not say URLs were opened, files checked, policy satisfied, or dates confirmed.",
   "- evidenceType must be one of: delivery-file, message, revision-record, agreement-reference, payment-reference, other.",
+  "- Natural phrases map to the enum: a delivery/text/written note or message → message; an attached file/document/image → delivery-file; a revision record → revision-record.",
   "- NEVER invent deliveryDate: omit it (the parser sets it at packaging).",
   "- If the message is not about a delivery, return {}.",
   "",
