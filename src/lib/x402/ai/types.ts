@@ -4,7 +4,7 @@
 
 export type GenerationMode = "ai" | "deterministic_fallback";
 
-export type AIProviderId = "deepseek" | "openai" | "anthropic" | "deterministic";
+export type AIProviderId = "deepseek" | "openai" | "anthropic" | "gemini" | "deterministic";
 
 export interface AIGenerationMetadata {
   generationMode: GenerationMode;

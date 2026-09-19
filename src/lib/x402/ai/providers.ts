@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // I5: AI Provider Abstraction
 //
-// Server-only. Supports: DeepSeek, OpenAI, Anthropic, deterministic fallback.
+// Server-only. Supports: DeepSeek, OpenAI, Anthropic, Gemini, deterministic fallback.
 // Never exposes API keys.
 // ---------------------------------------------------------------------------
 
@@ -361,6 +361,9 @@ class AnthropicProvider implements DisputeBriefAIProvider {
 
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 
+const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
+const GEMINI_STRUCTURED_JSON_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+
 export class DeepSeekProvider implements DisputeBriefAIProvider {
   readonly id = "deepseek";
   readonly label = "DeepSeek";
@@ -499,6 +502,165 @@ export class DeepSeekProvider implements DisputeBriefAIProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Gemini provider — server-side only, x-goog-api-key header (never browser)
+// ---------------------------------------------------------------------------
+
+function sanitizeGeminiErrorBody(body: string): string {
+  return body
+    .replace(/sk-[a-zA-Z0-9]+/g, "[REDACTED]")
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [REDACTED]")
+    .replace(/AIza[0-9A-Za-z_-]{10,}/g, "[REDACTED]")
+    .replace(/x-goog-api-key\s*[:=]\s*[^\s"']+/gi, "x-goog-api-key [REDACTED]")
+    .slice(0, 200);
+}
+
+function extractGeminiText(data: Record<string, unknown>): string | undefined {
+  const candidates = (data as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> })
+    .candidates;
+  if (!candidates || candidates.length === 0) return undefined;
+  const parts = candidates[0]?.content?.parts;
+  if (!parts || parts.length === 0) return undefined;
+  const text = parts
+    .filter((p) => typeof p.text === "string")
+    .map((p) => p.text as string)
+    .join("");
+  return text ? text : undefined;
+}
+
+function stripMarkdownFences(content: string): string {
+  let jsonContent = content.trim();
+  if (jsonContent.startsWith("```")) {
+    jsonContent = jsonContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "");
+  }
+  return jsonContent;
+}
+
+export class GeminiProvider implements DisputeBriefAIProvider {
+  readonly id = "gemini";
+  readonly label = "Gemini";
+  private config: AIProviderConfig;
+
+  constructor(config: AIProviderConfig) {
+    this.config = config;
+  }
+
+  async generateCaseBrief(context: AICaseContext, correlationId: string): Promise<AIBriefResult> {
+    const { systemPrompt, userMessage } = buildPrompt(context);
+    let lastError: AIProviderError | undefined;
+
+    const jsonInstruction =
+      "\n\nReturn ONLY a valid JSON object. No markdown, no code fences, no explanation.";
+
+    const url = `${GEMINI_STRUCTURED_JSON_URL_BASE}/${encodeURIComponent(this.config.model)}:generateContent`;
+
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": this.config.apiKey,
+          },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: userMessage + jsonInstruction }] }],
+            generationConfig: {
+              temperature: 0.3,
+              maxOutputTokens: 4000,
+              responseMimeType: "application/json",
+            },
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          const status = response.status;
+          const body = await response.text().catch(() => "");
+          const safeBody = sanitizeGeminiErrorBody(body);
+          const retryable = status === 429 || status >= 500;
+
+          lastError = {
+            code: `GEMINI_HTTP_${status}`,
+            message: safeBody,
+            retryable,
+            statusCode: status,
+          };
+
+          // 400/401/403 etc. are non-retryable
+          if (!retryable) break;
+          if (attempt < this.config.maxRetries) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+          continue;
+        }
+
+        const data = await response.json() as Record<string, unknown>;
+        const content = extractGeminiText(data);
+
+        if (!content) {
+          lastError = { code: "GEMINI_EMPTY_RESPONSE", message: "No content in response", retryable: false };
+          break;
+        }
+
+        const jsonContent = stripMarkdownFences(content);
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(jsonContent);
+        } catch {
+          lastError = { code: "GEMINI_INVALID_JSON", message: "Response is not valid JSON", retryable: true };
+          if (attempt < this.config.maxRetries) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+          continue;
+        }
+
+        const brief = validateAIBrief(parsed);
+        if (!brief) {
+          lastError = { code: "SCHEMA_VALIDATION_FAILED", message: "Output failed schema validation", retryable: true };
+          if (attempt < this.config.maxRetries) {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+          continue;
+        }
+
+        return {
+          brief: {
+            ...brief,
+            generationMode: "ai",
+            provider: "gemini",
+            model: this.config.model,
+            serviceVersion: "I5-gemini",
+          },
+          generationMode: "ai",
+          provider: "gemini",
+          model: this.config.model,
+          attemptCount: attempt,
+        };
+
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        if ((err as { name?: string }).name === "AbortError") {
+          lastError = { code: "GEMINI_TIMEOUT", message: `Timed out after ${this.config.timeoutMs}ms`, retryable: true };
+        } else {
+          lastError = { code: "GEMINI_NETWORK_ERROR", message, retryable: true };
+        }
+        if (attempt < this.config.maxRetries) {
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+
+    throw lastError ?? { code: "GEMINI_UNKNOWN", message: "Unknown error", retryable: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Generic structured JSON generation (reusable across all schemas)
 // ---------------------------------------------------------------------------
 
@@ -520,12 +682,16 @@ export async function generateStructuredJSON(
 ): Promise<Record<string, unknown>> {
   const providerId = (process.env.AI_PROVIDER || "").toLowerCase();
   const apiKey = process.env.AI_API_KEY || "";
-  const model = process.env.AI_MODEL || "deepseek-v4-pro";
+  const model = process.env.AI_MODEL || (providerId === "gemini" ? GEMINI_DEFAULT_MODEL : "deepseek-v4-pro");
   const maxRetries = 2;
   const timeoutMs = 60000;
 
   if (!apiKey) {
     throw { code: "NO_API_KEY", message: "AI API key not configured", retryable: false };
+  }
+
+  if (providerId === "gemini") {
+    return generateStructuredJSONGemini(systemPrompt, userMessage, apiKey, model, maxRetries, timeoutMs, correlationId);
   }
 
   if (providerId === "anthropic") {
@@ -733,6 +899,92 @@ async function generateStructuredJSONAnthropic(
   throw lastError ?? { code: "ANTHROPIC_UNKNOWN", message: "All retries exhausted", retryable: false };
 }
 
+async function generateStructuredJSONGemini(
+  systemPrompt: string,
+  userMessage: string,
+  apiKey: string,
+  model: string,
+  maxRetries: number,
+  timeoutMs: number,
+  _correlationId: string,
+): Promise<Record<string, unknown>> {
+  let lastError: AIProviderError | undefined;
+
+  const jsonInstruction =
+    "\n\nReturn ONLY a valid JSON object. No markdown, no code fences, no explanation.";
+
+  const url = `${GEMINI_STRUCTURED_JSON_URL_BASE}/${encodeURIComponent(model)}:generateContent`;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: "user", parts: [{ text: userMessage + jsonInstruction }] }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 4000,
+            responseMimeType: "application/json",
+          },
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const status = response.status;
+        const rawBody = await response.text().catch(() => "");
+        const safeBody = sanitizeGeminiErrorBody(rawBody);
+        const retryable = status === 429 || status >= 500;
+        lastError = { code: `GEMINI_HTTP_${status}`, message: safeBody, retryable, statusCode: status };
+        if (!retryable) break;
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+      const data = await response.json() as Record<string, unknown>;
+      const content = extractGeminiText(data);
+
+      if (!content) {
+        lastError = { code: "GEMINI_EMPTY_RESPONSE", message: "No content in response", retryable: false };
+        break;
+      }
+
+      const jsonContent = stripMarkdownFences(content);
+
+      try {
+        return JSON.parse(jsonContent) as Record<string, unknown>;
+      } catch {
+        lastError = { code: "GEMINI_INVALID_JSON", message: "Response is not valid JSON", retryable: true };
+        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      if ((err as { name?: string }).name === "AbortError") {
+        lastError = { code: "GEMINI_TIMEOUT", message: `Timed out after ${timeoutMs}ms`, retryable: true };
+      } else if ((err as { code?: string }).code) {
+        throw err;
+      } else {
+        lastError = { code: "GEMINI_NETWORK_ERROR", message, retryable: true };
+      }
+      if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+
+  throw lastError ?? { code: "GEMINI_UNKNOWN", message: "All retries exhausted", retryable: false };
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -762,6 +1014,9 @@ export function getAIProvider(): DisputeBriefAIProvider {
   } else if (providerId === "anthropic" && apiKey) {
     console.log("[ai/provider] Using Anthropic provider");
     cachedProvider = new AnthropicProvider({ ...defaultConfig, model: model || "claude-3-5-sonnet-20241022" });
+  } else if (providerId === "gemini" && apiKey) {
+    console.log("[ai/provider] Using Gemini provider");
+    cachedProvider = new GeminiProvider({ ...defaultConfig, model: model || "gemini-3.8-flash" });
   } else {
     console.log("[ai/provider] AI provider not configured — using deterministic fallback");
     cachedProvider = new DeterministicFallbackProvider();
@@ -773,5 +1028,5 @@ export function getAIProvider(): DisputeBriefAIProvider {
 export function isAIConfigured(): boolean {
   const providerId = (process.env.AI_PROVIDER || "").toLowerCase();
   const apiKey = process.env.AI_API_KEY || "";
-  return (providerId === "deepseek" || providerId === "openai" || providerId === "anthropic") && apiKey.length > 0;
+  return (providerId === "deepseek" || providerId === "openai" || providerId === "anthropic" || providerId === "gemini") && apiKey.length > 0;
 }
