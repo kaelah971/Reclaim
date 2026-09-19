@@ -1,0 +1,119 @@
+"use client";
+
+import { useState } from "react";
+import Button from "@/components/ui/Button";
+import Notice from "@/components/ui/Notice";
+
+// ---------------------------------------------------------------------------
+// DeliveryChatBox — worker conversational delivery entry (P6.3).
+//
+// Scoped chatbox (mirrors CommandBox): delivery notes only, NOT a general
+// chatbot. The worker describes the delivery in their own words; the parent
+// structures it via the parse API and shows a confirmation card. NOTHING
+// submits from this box — submission requires an explicit confirm click.
+// ---------------------------------------------------------------------------
+
+const EXAMPLES = [
+  "Done — here's the deployed site…",
+  "Finished the logo. Here are the final files…",
+  "The repo is here…",
+];
+
+interface DeliveryChatBoxProps {
+  onSubmit: (message: string) => void;
+  isWorking: boolean;
+  error: string | null;
+  boundaryMessage: string | null;
+  compact?: boolean;
+}
+
+export default function DeliveryChatBox({
+  onSubmit,
+  isWorking,
+  error,
+  boundaryMessage,
+  compact = false,
+}: DeliveryChatBoxProps) {
+  const [value, setValue] = useState("");
+
+  const submit = () => {
+    const trimmed = value.trim();
+    if (!trimmed || isWorking) return;
+    onSubmit(trimmed);
+    setValue("");
+  };
+
+  return (
+    <section
+      aria-label="Delivery chat"
+      className={compact ? "" : "rounded-[--radius-card] border border-border bg-surface p-6 md:p-8"}
+    >
+      {!compact && (
+        <>
+          <h2 className="text-[20px] font-[family-name:var(--font-newsreader)] font-medium text-ink">
+            Tell Reclaim what you delivered
+          </h2>
+          <p className="mt-1 text-[14px] text-muted">
+            Describe what you delivered in your own words. Reclaim structures
+            the evidence — nothing submits until you confirm.
+          </p>
+        </>
+      )}
+      <div className="mt-4">
+        <label htmlFor="delivery-chat-input" className="sr-only">
+          Tell Reclaim what you delivered
+        </label>
+        <textarea
+          id="delivery-chat-input"
+          rows={compact ? 2 : 3}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
+          }}
+          placeholder="Done — here's the deployed site…"
+          disabled={isWorking}
+          className="w-full rounded-[--radius-input] border border-border bg-input px-4 py-3 text-[15px] text-ink placeholder:text-muted/70 focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-60"
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button
+          variant="primary"
+          onClick={submit}
+          disabled={isWorking || !value.trim()}
+        >
+          {isWorking ? "Structuring…" : "Send delivery note"}
+        </Button>
+        {!compact && (
+          <div className="flex flex-wrap gap-2">
+            {EXAMPLES.map((ex) => (
+              <button
+                key={ex}
+                type="button"
+                disabled={isWorking}
+                onClick={() => onSubmit(ex)}
+                className="rounded-[--radius-pill] border border-border bg-page px-3 py-1.5 text-[13px] text-muted hover:text-ink hover:border-primary/30 transition-colors disabled:opacity-60"
+              >
+                {ex}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {error && (
+        <div className="mt-4">
+          <Notice variant="warning">
+            <p className="text-[14px] leading-relaxed">{error}</p>
+          </Notice>
+        </div>
+      )}
+      {boundaryMessage && (
+        <div className="mt-4">
+          <Notice variant="info">
+            <p className="text-[14px] leading-relaxed">{boundaryMessage}</p>
+          </Notice>
+        </div>
+      )}
+    </section>
+  );
+}

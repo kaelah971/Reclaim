@@ -949,6 +949,20 @@ function EvidencePageInner() {
       </div>
 
       <div className="rounded-[--radius-card] border border-border bg-surface p-6 md:p-8">
+        <div className="mb-6">
+          <Notice variant="info">
+            <p className="text-[14px] leading-relaxed">
+              New: describe your delivery in the Payment Room and Reclaim will
+              draft the evidence — or fill the form below manually.
+            </p>
+            <Link
+              href={`/payments/${paymentIdStr}${chainQuery}`}
+              className="mt-2 inline-block text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+            >
+              Use conversational delivery in the Payment Room
+            </Link>
+          </Notice>
+        </div>
         <h2 className="text-lg font-[family-name:var(--font-georama)] font-semibold text-ink">
           Evidence form
         </h2>

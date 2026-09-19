@@ -19,7 +19,8 @@ import SharePaymentLink from "@/components/payment/SharePaymentLink";
 import FreelancerLanding from "@/components/payment/FreelancerLanding";
 import WorkerGasNotice from "@/components/payment/WorkerGasNotice";
 import SecureEvidenceViewer from "@/components/payment/SecureEvidenceViewer";
-import ReleasePreflight from "@/components/payment/ReleasePreflight";
+import WorkerDeliveryChat from "@/components/delivery/WorkerDeliveryChat";
+import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";import ReleasePreflight from "@/components/payment/ReleasePreflight";
 import ReleasedSummary from "@/components/payment/ReleasedSummary";
 import {
   getPaymentLifecycleLabel,
@@ -418,6 +419,26 @@ function PaymentRoomContent() {
     chainId: activeChainId,
   });
 
+  // ---- Conversational delivery submission (P6.3, worker Accepted branch) ----
+  // Primary conversational UX: WorkerDeliveryChat structures the delivery via
+  // the parse API, then submit() runs the SAME manifest→hash→tx→receipt→
+  // metadata lifecycle as the manual evidence form. No tx without explicit
+  // worker clicks; the DeliverySubmitted+worker branch below is untouched.
+  const conversationalEvidence = useSubmitEvidenceFlow(
+    paymentId,
+    paymentIdStr,
+    activeChainId,
+  );
+  const conversationalSync = usePaymentActionSync({
+    isSuccess: conversationalEvidence.isTxConfirmed,
+    txHash: conversationalEvidence.txHash,
+    canonicalState: payment?.state,
+    expectedState: "DeliverySubmitted",
+    refetch: refetchPayment,
+    paymentId: paymentIdStr,
+    chainId: activeChainId,
+  });
+
   // ---- Refetch on action success (confirmed receipt → state refresh) ----
   // Immediate re-read; bounded polling above covers stale RPC reads.
   useEffect(() => {
@@ -428,6 +449,7 @@ function PaymentRoomContent() {
       approveRelease.isSuccess ||
       openDispute.isSuccess ||
       cancelUnfunded.isSuccess ||
+      conversationalEvidence.isSuccess ||
       isApproveSuccess
     ) {
       refetchPayment();
@@ -440,6 +462,7 @@ function PaymentRoomContent() {
     approveRelease.isSuccess,
     openDispute.isSuccess,
     cancelUnfunded.isSuccess,
+    conversationalEvidence.isSuccess,
     isApproveSuccess,
     refetchPayment,
     refetchAllowance,
@@ -1033,27 +1056,86 @@ function PaymentRoomContent() {
     );
   } else if (payment.state === "Accepted" && role === "worker") {
     primaryActionContent = (
-      <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-5">
-        <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
-          Submit evidence
-        </h3>
-        <p className="text-[14px] text-muted">
-          Submit your delivery evidence to move the payment forward.
-        </p>
+      <div className="space-y-4">
+        <WorkerDeliveryChat
+          paymentIdStr={paymentIdStr ?? ""}
+          chainId={activeChainId}
+          workerAddress={payment.worker}
+          deliverables={[payment.deliverableSummary, payment.deliveryFormat].filter(Boolean)}
+          evidenceRequirements={payment.evidenceExpectation ? [payment.evidenceExpectation] : []}
+          agreementLabel={payment.agreementLabel}
+          protectedLabel={`${formatUSDC(payment.amount)} ${token.symbol} protected`}
+          releaseMode={deriveReleaseMode(payment.releaseRule) === "manual" ? "manual" : "agent_assisted"}
+          onSubmitDelivery={(data) => conversationalEvidence.submit(data)}
+          submitState={{
+            isPending: conversationalEvidence.isPending,
+            isTxConfirmed: conversationalEvidence.isTxConfirmed,
+            isSuccess: conversationalEvidence.isSuccess,
+            txHash: conversationalEvidence.txHash,
+            error: conversationalEvidence.error,
+            metadataState: conversationalEvidence.metadataState,
+            metadataError: conversationalEvidence.metadataError,
+          }}
+          onRequestPayment={() => wrapAction(() => requestRelease.action(payment.id))}
+          requestState={{
+            isPending: requestRelease.isPending,
+            isSuccess: requestRelease.isSuccess,
+            error: requestRelease.error,
+            txHash: requestRelease.txHash,
+          }}
+          reviewStatus={deliveryReview.status}
+        />
+        <TxStatus
+          isPending={conversationalEvidence.isPending}
+          isSuccess={conversationalEvidence.isSuccess}
+          error={conversationalEvidence.error}
+          txHash={conversationalEvidence.txHash}
+          onDismiss={() => conversationalEvidence.reset()}
+          label="Delivery submission"
+          chainId={activeChainId}
+          isSyncing={conversationalSync.isSyncing}
+          isTimedOut={conversationalSync.isTimedOut}
+          onRefresh={() => refetchPayment()}
+        />
+        {conversationalEvidence.isTxConfirmed &&
+          conversationalEvidence.metadataState === "idle" && (
+            <Notice variant="info">
+              <p className="text-[14px] leading-relaxed">
+                Recording evidence details…
+              </p>
+            </Notice>
+          )}
+        {conversationalEvidence.metadataState === "error" && (
+          <Notice variant="warning">
+            <p className="text-[14px] leading-relaxed">
+              {conversationalEvidence.metadataError ??
+                "Evidence metadata could not be persisted."}
+            </p>
+            <button
+              type="button"
+              className="mt-2 text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+              onClick={() => conversationalEvidence.retryMetadata()}
+            >
+              Retry
+            </button>
+          </Notice>
+        )}
         <WorkerGasNotice
           chainId={activeChainId}
           address={wallet.address as `0x${string}` | undefined}
         />
-        <Link href={`/payments/${paymentIdStr}/evidence${chainQuery}`}>
-          <Button variant="primary" size="lg" className="w-full">
-            Submit delivery evidence
-          </Button>
-        </Link>
-        <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
-          <Button variant="ghost" size="sm">
-            Open dispute
-          </Button>
-        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link href={`/payments/${paymentIdStr}/evidence${chainQuery}`}>
+            <Button variant="secondary" size="sm">
+              Add evidence manually
+            </Button>
+          </Link>
+          <Link href={`/payments/${paymentIdStr}/dispute${chainQuery}`}>
+            <Button variant="ghost" size="sm">
+              Open dispute
+            </Button>
+          </Link>
+        </div>
       </div>
     );
   } else if (payment.state === "Accepted" && role === "client") {
