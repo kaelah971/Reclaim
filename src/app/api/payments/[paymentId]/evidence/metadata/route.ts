@@ -31,6 +31,7 @@ import {
   type EvidenceMetadataChainReader,
 } from "@/lib/evidence/persistEvidenceMetadata";
 import type { EvidenceFormData } from "@/lib/evidence/manifest";
+import { protectedPaymentEscrowABI } from "@/lib/contracts/ProtectedPaymentEscrow.abi";
 import { getEscrowAddress } from "@/lib/contracts/addresses";
 import {
   CELO_CHAIN_ID,
@@ -170,6 +171,70 @@ function createChainReader(chainId: number): EvidenceMetadataChainReader {
   }) as unknown as EvidenceMetadataChainReader;
 }
 
+/**
+ * Resolve an explicit chainId from the query string ONLY (?chainId= /
+ * ?chain_id= / ?escrowChainId=). Defaults to Celo Sepolia to preserve
+ * behavior. Used by the GET oracle so a metadata POST body can never
+ * smuggle a conflicting chain scope into a read.
+ */
+function resolveEvidenceChainQueryOnly(
+  request: NextRequest,
+): { chainId: number; escrowAddress: `0x${string}` } | { error: Response } {
+  let queryRaw: unknown = null;
+  try {
+    const url = new URL(request.url);
+    queryRaw =
+      url.searchParams.get("chainId") ??
+      url.searchParams.get("chain_id") ??
+      url.searchParams.get("escrowChainId") ??
+      null;
+  } catch {
+    queryRaw = null;
+  }
+  const normalized =
+    queryRaw === null || String(queryRaw).trim() === "" ? null : String(queryRaw).trim();
+  let chainId: number = CELO_CHAIN_ID; // Sepolia default preserves existing behavior.
+  if (normalized !== null) {
+    const parsed = Number(normalized);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      return {
+        error: NextResponse.json(
+          { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+          { status: 400 },
+        ),
+      };
+    }
+    chainId = parsed;
+  }
+  if (!isSupportedChain(chainId)) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  const escrowAddress = getEscrowAddress(chainId);
+  if (!escrowAddress) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  const chainDefinition = getCeloChain(chainId);
+  if (!chainDefinition) {
+    return {
+      error: NextResponse.json(
+        { error: "Unsupported chain.", code: "UNSUPPORTED_CHAIN" },
+        { status: 400 },
+      ),
+    };
+  }
+  return { chainId, escrowAddress };
+}
+
 function isValidEvidenceFormData(body: unknown): body is EvidenceFormData {
   if (!body || typeof body !== "object") return false;
   const b = body as Record<string, unknown>;
@@ -267,6 +332,94 @@ export async function POST(
 
   } catch (err) {
     console.error(`[evidence-metadata][${correlationId}]`, err);
+    return NextResponse.json({
+      error: err instanceof Error ? err.message : "Internal server error",
+      code: "INTERNAL_ERROR",
+    }, { status: 500 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/payments/[paymentId]/evidence/metadata?chainId=
+//
+// Hash-only durability oracle (P6.4E): reports whether verified evidence
+// metadata is persisted for the CURRENT on-chain evidenceReference.
+//
+// Returns 200 `{ found, evidenceReference }` where `found` is true only
+// when a row exists in evidence_metadata for (paymentId, chainId, escrow
+// address lowercase, on-chain reference) AND is_current.
+//
+// Returns NO plaintext (hash + boolean only — nothing beyond public chain
+// state), so no party auth is required. The POST hash-equality rule is
+// unchanged: only a caller who knows the exact submitted manifest can
+// persist it.
+//
+// Responses:
+//   200 — { found, evidenceReference }
+//   400 — INVALID_PAYMENT_ID / UNSUPPORTED_CHAIN
+//   500 — CHAIN_READ_FAILED
+// ---------------------------------------------------------------------------
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ paymentId: string }> },
+): Promise<Response> {
+  const correlationId = crypto.randomUUID();
+
+  try {
+    const { paymentId } = await params;
+
+    if (!paymentId || !/^\d+$/.test(paymentId)) {
+      return NextResponse.json(
+        { error: "Invalid payment id.", code: "INVALID_PAYMENT_ID" },
+        { status: 400 },
+      );
+    }
+
+    const chainResolution = resolveEvidenceChainQueryOnly(request);
+    if ("error" in chainResolution) return chainResolution.error;
+    const { chainId, escrowAddress } = chainResolution;
+    const chainReader = createChainReader(chainId);
+
+    let onChainReference: `0x${string}`;
+    try {
+      const payment = await chainReader.readContract({
+        address: escrowAddress,
+        abi: protectedPaymentEscrowABI,
+        functionName: "getPayment",
+        args: [BigInt(paymentId)],
+      });
+      onChainReference = payment.evidenceReference;
+    } catch {
+      return NextResponse.json(
+        {
+          error: "Failed to read the current on-chain evidence reference.",
+          code: "CHAIN_READ_FAILED",
+        },
+        { status: 500 },
+      );
+    }
+
+    const normalizedReference = onChainReference.toLowerCase();
+
+    const { data, error } = await getSupabaseClient()
+      .from("evidence_metadata")
+      .select("id")
+      .eq("escrow_payment_id", paymentId)
+      .eq("escrow_chain_id", String(chainId))
+      .eq("escrow_contract_address", escrowAddress.toLowerCase())
+      .eq("evidence_reference", normalizedReference)
+      .eq("is_current", true)
+      .maybeSingle();
+
+    return NextResponse.json(
+      {
+        found: !error && !!data,
+        evidenceReference: normalizedReference,
+      },
+      { status: 200 },
+    );
+  } catch (err) {
+    console.error(`[evidence-metadata-oracle][${correlationId}]`, err);
     return NextResponse.json({
       error: err instanceof Error ? err.message : "Internal server error",
       code: "INTERNAL_ERROR",

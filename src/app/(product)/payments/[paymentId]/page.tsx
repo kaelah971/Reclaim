@@ -20,6 +20,7 @@ import FreelancerLanding from "@/components/payment/FreelancerLanding";
 import WorkerGasNotice from "@/components/payment/WorkerGasNotice";
 import SecureEvidenceViewer from "@/components/payment/SecureEvidenceViewer";
 import WorkerDeliveryChat from "@/components/delivery/WorkerDeliveryChat";
+import EvidenceRecoveryCard from "@/components/evidence/EvidenceRecoveryCard";
 import { useSubmitEvidenceFlow } from "@/hooks/evidence/useSubmitEvidenceFlow";import ReleasePreflight from "@/components/payment/ReleasePreflight";
 import ReleasedSummary from "@/components/payment/ReleasedSummary";
 import {
@@ -48,7 +49,7 @@ import {
   PAYMENT_SYNCING_MESSAGE,
   PAYMENT_SYNC_TIMEOUT_MESSAGE,
 } from "@/hooks/payment/usePaymentActionSync";
-import { formatUSDC, type PaymentData, type PaymentState } from "@/lib/contracts/types";
+import { formatUSDC, ZERO_BYTES32, type PaymentData, type PaymentState } from "@/lib/contracts/types";
 import {
   CELO_CHAIN_ID,
   CELO_MAINNET_CHAIN_ID,
@@ -490,6 +491,49 @@ function PaymentRoomContent() {
       cancelled = true;
     };
   }, [paymentIdStr, chainQuery]);
+
+  // ---- Evidence metadata durability oracle (P6.4E, hash-only) ----
+  // Source of truth for whether the private delivery details are persisted
+  // for the CURRENT on-chain evidenceReference. Hash + boolean only (no
+  // content, no party auth — nothing beyond public chain state). While
+  // checking, the UI stays neutral and never implies metadata exists.
+  const [metadataOracleFound, setMetadataOracleFound] = useState<boolean | null>(null);
+  const [metadataOracleSettled, setMetadataOracleSettled] = useState(false);
+  const hasOnChainDelivery = Boolean(
+    payment?.evidenceReference && payment.evidenceReference !== ZERO_BYTES32,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    async function checkMetadata() {
+      if (!paymentIdStr || !hasOnChainDelivery) {
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/api/payments/${paymentIdStr}/evidence/metadata?chainId=${activeChainId}`,
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { found?: boolean };
+        if (!cancelled && typeof data.found === "boolean") {
+          setMetadataOracleFound(data.found);
+        }
+      } catch {
+        // Best-effort — neutral state is retained; the request-release
+        // button is only gated on a CONFIRMED missing (found === false).
+      } finally {
+        if (!cancelled) setMetadataOracleSettled(true);
+      }
+    }
+    void checkMetadata();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    paymentIdStr,
+    activeChainId,
+    hasOnChainDelivery,
+    conversationalEvidence.metadataState,
+  ]);
 
   // ---- Derived values (hooks must stay above all early returns) ----
   const role = useMemo(
@@ -1157,6 +1201,29 @@ function PaymentRoomContent() {
     payment.state === "DeliverySubmitted" &&
     role === "worker"
   ) {
+    // P6.4E durable recovery: the metadata POST may have failed (stale-read
+    // 400) and the refresh wiped the in-memory manifest. The oracle (hash +
+    // boolean only) is the source of truth — never assume metadata exists.
+    const recoveryPersisted =
+      conversationalEvidence.metadataState === "persisted" ||
+      metadataOracleFound === true;
+    const recoveryNeeded =
+      hasOnChainDelivery &&
+      !recoveryPersisted &&
+      metadataOracleFound === false;
+    const recoveryChecking =
+      hasOnChainDelivery &&
+      !recoveryPersisted &&
+      metadataOracleFound === null &&
+      !metadataOracleSettled;
+    const storedManifest = conversationalEvidence.hasStoredManifest();
+    const deliveryDayISO =
+      payment.deliveryAt > BigInt(0)
+        ? new Date(Number(payment.deliveryAt) * 1000)
+            .toISOString()
+            .split("T")[0]
+        : "";
+    const releaseBlocked = recoveryNeeded || recoveryChecking;
     primaryActionContent = (
       <div className="rounded-[--radius-card] border border-border bg-surface p-6 space-y-5">
         {reviewReleaseMode === "agent_assisted" && (
@@ -1167,6 +1234,54 @@ function PaymentRoomContent() {
             error={deliveryReview.error}
             unavailableMessage={deliveryReview.unavailableMessage}
             onRetry={() => deliveryReview.retry()}
+          />
+        )}
+        {recoveryChecking && (
+          <Notice variant="info">
+            <p className="text-[14px] leading-relaxed">
+              Checking delivery details…
+            </p>
+          </Notice>
+        )}
+        {recoveryNeeded && (
+          <Notice variant="warning">
+            <p className="text-[14px] leading-relaxed">
+              Delivery recorded on-chain, but private delivery details still
+              need to be saved.
+            </p>
+            {storedManifest && (
+              <button
+                type="button"
+                className="mt-2 text-[13px] font-medium text-gold hover:text-gold/80 transition-colors"
+                onClick={() =>
+                  conversationalEvidence.recoverMetadata(storedManifest)
+                }
+              >
+                Retry saving details
+              </button>
+            )}
+          </Notice>
+        )}
+        {recoveryNeeded && (
+          <EvidenceRecoveryCard
+            paymentIdStr={paymentIdStr ?? ""}
+            chainId={activeChainId}
+            onChainReference={payment.evidenceReference}
+            deliveryDayISO={deliveryDayISO}
+            initialData={{
+              title: storedManifest?.title,
+              description: storedManifest?.description,
+              type: storedManifest?.type,
+              relatedClaim: storedManifest?.relatedClaim,
+              pastedText: storedManifest?.pastedText,
+              externalRef: storedManifest?.externalRef,
+              fileHash: storedManifest?.fileHash,
+            }}
+            onRecover={(data) =>
+              conversationalEvidence.recoverMetadata(data)
+            }
+            recovering={conversationalEvidence.isRecovering}
+            recoverError={conversationalEvidence.metadataError}
           />
         )}
         <h3 className="text-sm font-semibold uppercase tracking-[0.15em] text-muted">
@@ -1186,7 +1301,16 @@ function PaymentRoomContent() {
           onClick={() =>
             wrapAction(() => requestRelease.action(payment.id))
           }
-          disabled={requestRelease.isPending || requestRelease.isSuccess}
+          disabled={
+            requestRelease.isPending || requestRelease.isSuccess || releaseBlocked
+          }
+          title={
+            recoveryNeeded
+              ? "Save the delivery details before requesting release so the client can review them."
+              : recoveryChecking
+                ? "Checking delivery details…"
+                : undefined
+          }
         >
           {requestRelease.isPending
             ? "Requesting…"
@@ -1194,6 +1318,12 @@ function PaymentRoomContent() {
               ? "Request confirmed"
               : "Request release"}
         </Button>
+        {recoveryNeeded && (
+          <p className="text-[13px] text-muted">
+            Save the delivery details before requesting release so the client
+            can review them.
+          </p>
+        )}
         <TxStatus
           isPending={requestRelease.isPending}
           isSuccess={requestRelease.isSuccess}

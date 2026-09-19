@@ -3,7 +3,13 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
-import { extractManifestField, isManifestSubstantive } from "../reader";
+import {
+  extractManifestField,
+  isManifestSubstantive,
+  type DurableEvidenceMetadata,
+} from "../reader";
+import { buildEvidenceManifest } from "../manifest";
+import { manifestSignalsFor } from "@/lib/review/evaluationService";
 
 const manifest =
   "title:Controlled dispute test — completed work evidence | " +
@@ -59,5 +65,41 @@ describe("isManifestSubstantive", () => {
   it("treats empty manifest as NOT substantive", () => {
     expect(isManifestSubstantive(null)).toBe(false);
     expect(isManifestSubstantive("")).toBe(false);
+  });
+
+  it("Payment #3 recovered manifest (message text-only) is substantive with QC signal", () => {
+    // P6.4E recovery target: text-only delivery, type message, no file hash.
+    // A recovered is_current row carrying this manifest must read as
+    // substantive evidence with the "substantive delivery content" signal.
+    const manifest = buildEvidenceManifest({
+      title: "Logo delivery",
+      description: "Final logo delivery for review",
+      type: "message",
+      relatedClaim: "Logo",
+      date: "2026-09-18",
+      externalRef: "",
+      pastedText: "Logo concepts attached as described — final delivery note.",
+      fileHash: "",
+    });
+    expect(manifest).toContain("text:");
+    expect(isManifestSubstantive(manifest)).toBe(true);
+    const facts: DurableEvidenceMetadata = {
+      evidenceReference: "0xrecovered",
+      title: "Logo delivery",
+      evidenceType: "message",
+      description: "Final logo delivery for review",
+      relatedDeliverable: "Logo",
+      externalReference: null,
+      fileCount: 0,
+      latestUpdateTimestamp: Date.now(),
+      substantiveEvidence: isManifestSubstantive(manifest),
+      submitterAddress: "chain_verified",
+      relatedClaim: "Logo",
+      pastedText: "Logo concepts attached as described — final delivery note.",
+      evidenceDate: "2026-09-18",
+      externalRef: "",
+      fileHash: null,
+    };
+    expect(manifestSignalsFor(facts)).toContain("substantive delivery content");
   });
 });

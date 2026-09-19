@@ -49,6 +49,85 @@ export interface SubmitEvidenceFlow {
   retryMetadata: () => void;
   /** Reset the whole flow back to its initial state. */
   reset: () => void;
+  /**
+   * P6.4E metadata-only recovery: POST already-confirmed delivery details
+   * WITHOUT any chain write (never calls submitEvidenceTx). Used after a
+   * refresh wiped the in-memory manifest, or when the metadata POST raced a
+   * stale chain read (HASH_MISMATCH on a matching manifest).
+   */
+  recoverMetadata: (data: EvidenceFormData) => void;
+  /**
+   * P6.4E: read the durable manifest stored by submit() for this payment,
+   * or null when absent/unparseable. Used by the UI to offer one-click retry.
+   */
+  hasStoredManifest: () => EvidenceFormData | null;
+  /** True while a recoverMetadata POST is in flight. */
+  isRecovering: boolean;
+}
+
+/** P6.4E durable manifest key — survives refresh (in-memory ref does not). */
+export function evidenceManifestStorageKey(
+  chainIdStr: string,
+  paymentIdStr: string,
+): string {
+  return `reclaim.evidenceManifest.${chainIdStr}.${paymentIdStr}`;
+}
+
+/**
+ * P6.4E: read a stored manifest without the hook (room prefill path).
+ * Returns null outside the browser or when absent/unparseable.
+ */
+export function readStoredEvidenceManifest(
+  paymentIdStr: string | undefined,
+  chainIdStr: string | undefined,
+): EvidenceFormData | null {
+  if (!paymentIdStr || !chainIdStr) return null;
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
+    const raw = window.localStorage.getItem(
+      evidenceManifestStorageKey(chainIdStr, paymentIdStr),
+    );
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<EvidenceFormData>;
+    if (
+      typeof parsed.title !== "string" ||
+      typeof parsed.description !== "string" ||
+      typeof parsed.type !== "string" ||
+      typeof parsed.date !== "string"
+    ) {
+      return null;
+    }
+    return {
+      title: parsed.title,
+      description: parsed.description,
+      type: parsed.type,
+      relatedClaim:
+        typeof parsed.relatedClaim === "string" ? parsed.relatedClaim : "",
+      date: parsed.date,
+      externalRef:
+        typeof parsed.externalRef === "string" ? parsed.externalRef : "",
+      pastedText:
+        typeof parsed.pastedText === "string" ? parsed.pastedText : "",
+      fileHash: typeof parsed.fileHash === "string" ? parsed.fileHash : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearStoredEvidenceManifest(
+  paymentIdStr: string | undefined,
+  chainIdStr: string | undefined,
+): void {
+  if (!paymentIdStr || !chainIdStr) return;
+  try {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    window.localStorage.removeItem(
+      evidenceManifestStorageKey(chainIdStr, paymentIdStr),
+    );
+  } catch {
+    // Durability is best-effort — a storage failure must never break submit.
+  }
 }
 
 export function useSubmitEvidenceFlow(
@@ -73,6 +152,13 @@ export function useSubmitEvidenceFlow(
   const [metadataState, setMetadataState] = useState<EvidenceMetadataState>("idle");
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [submitSeq, setSubmitSeq] = useState(0);
+  const [isRecovering, setIsRecovering] = useState(false);
+
+  // P4.3b: the POST body carries the explicit escrow chain so the server
+  // verifies the manifest hash against the canonical payment+chain (never
+  // the Sepolia default for a Mainnet submission). The URL is unchanged for
+  // backward compatibility; the server also accepts ?chainId=.
+  const escrowChainId = String(getEscrowChainId(chain));
 
   const submit = useCallback(
     (data: EvidenceFormData) => {
@@ -90,19 +176,31 @@ export function useSubmitEvidenceFlow(
       setLastReference(reference);
       setSubmitSeq((seq) => seq + 1);
 
+      // P6.4E durability: the in-memory ref is wiped by refresh — persist
+      // the manifest so a stale-read 400 (or any metadata failure) stays
+      // recoverable without resubmitting on-chain.
+      try {
+        if (
+          typeof window !== "undefined" &&
+          window.localStorage &&
+          paymentIdStr
+        ) {
+          window.localStorage.setItem(
+            evidenceManifestStorageKey(escrowChainId, paymentIdStr),
+            JSON.stringify(data),
+          );
+        }
+      } catch {
+        // Durability is best-effort — a storage failure must never block submit.
+      }
+
       submitEvidenceTx(paymentId, reference);
     },
-    [paymentId, submitEvidenceTx, isPending, isTxConfirmed],
+    [paymentId, paymentIdStr, escrowChainId, submitEvidenceTx, isPending, isTxConfirmed],
   );
 
   // After the tx receipt confirms, persist the metadata. Success is only
   // presented once the metadata POST itself succeeded.
-  //
-  // P4.3b: the POST body carries the explicit escrow chain so the server
-  // verifies the manifest hash against the canonical payment+chain (never
-  // the Sepolia default for a Mainnet submission). The URL is unchanged for
-  // backward compatibility; the server also accepts ?chainId=.
-  const escrowChainId = String(getEscrowChainId(chain));
   useEffect(() => {
     if (!isTxConfirmed || !txHash || !submittedRef.current) return;
     if (metadataState !== "idle") return;
@@ -137,6 +235,9 @@ export function useSubmitEvidenceFlow(
           );
         }
         setMetadataState("persisted");
+        // P6.4E durability: the manifest is now persisted server-side — the
+        // local copy is no longer needed.
+        clearStoredEvidenceManifest(paymentIdStr, escrowChainId);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -163,8 +264,78 @@ export function useSubmitEvidenceFlow(
     setLastReference(null);
     setMetadataError(null);
     setMetadataState("idle");
+    setIsRecovering(false);
     resetTx();
   }, [resetTx]);
+
+  /**
+   * P6.4E metadata-only recovery — POSTs already-confirmed delivery details
+   * with the exact submit() body shape (incl. chainId + escrowChainId) and
+   * NEVER touches the chain (no submitEvidenceTx / writeContract call).
+   *
+   * The normal POST effect cannot fire after a refresh (it requires
+   * isTxConfirmed && txHash, both false post-refresh), so recovery carries
+   * its own POST path. On success the durable manifest copy is cleared.
+   */
+  const recoverMetadata = useCallback(
+    (data: EvidenceFormData) => {
+      if (!paymentIdStr) return;
+      if (isRecovering) return;
+      submittedRef.current = data;
+      setMetadataError(null);
+      setMetadataState("idle");
+      setIsRecovering(true);
+
+      fetch(`/api/payments/${paymentIdStr}/evidence/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: data.title,
+          description: data.description,
+          type: data.type,
+          relatedClaim: data.relatedClaim,
+          date: data.date,
+          externalRef: data.externalRef,
+          pastedText: data.pastedText,
+          fileHash: data.fileHash,
+          chainId: Number(escrowChainId),
+          escrowChainId,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const detail = await res.text().catch(() => `HTTP ${res.status}`);
+            throw new Error(
+              detail.startsWith("{")
+                ? `Evidence metadata could not be persisted: HTTP ${res.status}`
+                : `Evidence metadata could not be persisted: ${detail}`,
+            );
+          }
+          setMetadataState("persisted");
+          clearStoredEvidenceManifest(paymentIdStr, escrowChainId);
+        })
+        .catch((err: unknown) => {
+          setMetadataError(
+            err instanceof Error && err.message
+              ? err.message
+              : "Evidence metadata could not be persisted.",
+          );
+          setMetadataState("error");
+        })
+        .finally(() => {
+          setIsRecovering(false);
+        });
+    },
+    [paymentIdStr, escrowChainId, isRecovering],
+  );
+
+  /**
+   * P6.4E: read the durable manifest stored by submit() (null when absent).
+   * Safe outside the browser (returns null) and never throws.
+   */
+  const hasStoredManifest = useCallback((): EvidenceFormData | null => {
+    return readStoredEvidenceManifest(paymentIdStr, escrowChainId);
+  }, [paymentIdStr, escrowChainId]);
 
   return {
     submit,
@@ -178,5 +349,8 @@ export function useSubmitEvidenceFlow(
     metadataError,
     retryMetadata,
     reset,
+    recoverMetadata,
+    hasStoredManifest,
+    isRecovering,
   };
 }

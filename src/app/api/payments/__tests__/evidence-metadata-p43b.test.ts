@@ -15,6 +15,8 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 
 const persistMock = vi.hoisted(() => ({
   persistVerifiedEvidenceMetadata: vi.fn(),
@@ -154,10 +156,28 @@ describe("P4.3b evidence metadata hardening", () => {
     expect(body.code).toBe("EVIDENCE_REVIEW_LOCKED");
   });
 
-  it("exposes no plaintext read endpoint (D3: anonymous stays hash-only)", () => {
-    // Anonymous callers must not obtain plaintext via this route: only the
-    // hash-verified POST exists — there is no GET reader to probe.
-    expect((metadataRoute as Record<string, unknown>).GET).toBeUndefined();
+  it("exposes no plaintext read endpoint (D3: anonymous stays hash-only)", async () => {
+    // Anonymous callers must not obtain plaintext via this route: the POST
+    // verifies by hash, and the P6.4E GET oracle returns hash + boolean
+    // only — never titles, descriptions, pasted text, or manifests.
     expect(typeof POST).toBe("function");
+    const { GET } = metadataRoute as Record<string, unknown>;
+    expect(typeof GET).toBe("function");
+    const routeSrc = readFileSync(
+      resolve(__dirname, "..", "[paymentId]", "evidence", "metadata", "route.ts"),
+      "utf-8",
+    ).replace(/\r\n/g, "\n");
+    const getBlock = routeSrc.slice(routeSrc.indexOf("export async function GET"));
+    expect(getBlock).toContain("evidenceReference");
+    expect(getBlock).toContain("found");
+    for (const plaintext of [
+      "pastedText",
+      "description",
+      "manifest",
+      "externalRef",
+      "relatedClaim",
+    ]) {
+      expect(getBlock).not.toContain(plaintext);
+    }
   });
 });
