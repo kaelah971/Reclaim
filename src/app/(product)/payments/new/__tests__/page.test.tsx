@@ -104,6 +104,9 @@ async function mount() {
     root!.render(<Harness />);
   });
   await act(async () => {});
+  // P6.1: the wizard is the fallback behind the command interface — open it
+  // so these wizard regression tests exercise the structured flow.
+  await click("Or fill in the details manually →");
 }
 
 async function rerender() {
